@@ -40,15 +40,12 @@ func New(buildVersion string) *mcp.Server {
 	return instance
 }
 
-func submit(_ context.Context, _ *mcp.CallToolRequest, _ contract.SubmitInput) (*mcp.CallToolResult, contract.SubmitOutput, error) {
+func submit(_ context.Context, _ *mcp.CallToolRequest, _ contract.SubmitInput) (*mcp.CallToolResult, any, error) {
 	notImplemented := contract.NewError(contract.CodeNotImplemented, notImplementedMessage)
-	return &mcp.CallToolResult{IsError: true}, contract.SubmitOutput{Error: &notImplemented}, nil
+	return &mcp.CallToolResult{IsError: true}, contract.ErrorOutput{Error: &notImplemented}, nil
 }
 
-func await(_ context.Context, _ *mcp.CallToolRequest, _ contract.AwaitInput) (*mcp.CallToolResult, contract.AwaitOutput, error) {
+func await(_ context.Context, _ *mcp.CallToolRequest, _ contract.AwaitInput) (*mcp.CallToolResult, any, error) {
 	notImplemented := contract.NewError(contract.CodeNotImplemented, notImplementedMessage)
-	return &mcp.CallToolResult{IsError: true}, contract.AwaitOutput{
-		Terminal: true,
-		Error:    &notImplemented,
-	}, nil
+	return &mcp.CallToolResult{IsError: true}, contract.ErrorOutput{Error: &notImplemented}, nil
 }

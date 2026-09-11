@@ -16,14 +16,12 @@ type SubmitInput struct {
 	ClientContext   *ClientContext `json:"client_context,omitempty" jsonschema:"client-owned correlation values"`
 }
 
-// SubmitOutput is the client-facing output for the submit tool. On success
-// the error field is nil and the submission fields are set; on failure only
-// the error field is set.
+// SubmitOutput is the client-facing success output for the submit tool.
+// Request-level failures return ErrorOutput instead.
 type SubmitOutput struct {
 	SubmissionID    string     `json:"submission_id,omitempty"`
 	Status          Status     `json:"status,omitempty"`
 	ClientRequestID string     `json:"client_request_id,omitempty"`
 	SubmittedAt     *time.Time `json:"submitted_at,omitempty"`
 	NextPollMS      int        `json:"next_poll_ms,omitempty"`
-	Error           *Error     `json:"error,omitempty"`
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 const (
@@ -23,6 +24,26 @@ const (
 	StrategyUnsupported     Strategy = "unsupported"
 )
 
+// TaskSupport is an operation's task execution declaration.
+type TaskSupport string
+
+// Task support states.
+const (
+	TaskSupportForbidden TaskSupport = "forbidden"
+	TaskSupportOptional  TaskSupport = "optional"
+	TaskSupportRequired  TaskSupport = "required"
+)
+
+// Valid reports whether the task support state is known.
+func (s TaskSupport) Valid() bool {
+	switch s {
+	case TaskSupportForbidden, TaskSupportOptional, TaskSupportRequired:
+		return true
+	default:
+		return false
+	}
+}
+
 // Binding source vocabulary. Bindings use reviewed sources and JSON Pointer
 // targets rather than arbitrary executable transformations.
 const (
@@ -38,16 +59,33 @@ type Binding struct {
 	Required bool   `json:"required"`
 }
 
-// Valid reports whether the binding source and target are within the
-// reviewed vocabulary.
+// Valid reports whether the binding source is reviewed and the target is a
+// syntactically valid RFC 6901 JSON Pointer.
 func (b Binding) Valid() bool {
 	switch b.Source {
 	case SourceClientRequestID, SourceClientContextThreadID:
 	default:
 		return false
 	}
-	if len(b.Target) == 0 || b.Target[0] != '/' {
+	return validPointer(b.Target)
+}
+
+// validPointer reports whether p is a syntactically valid JSON Pointer with
+// at least the leading slash, with well-formed ~0 and ~1 escapes.
+func validPointer(p string) bool {
+	if !strings.HasPrefix(p, "/") {
 		return false
+	}
+	for _, reference := range strings.Split(p[1:], "/") {
+		for i := 0; i < len(reference); i++ {
+			if reference[i] != '~' {
+				continue
+			}
+			if i+1 >= len(reference) || (reference[i+1] != '0' && reference[i+1] != '1') {
+				return false
+			}
+			i++
+		}
 	}
 	return true
 }
@@ -63,7 +101,7 @@ type Descriptor struct {
 	ClientSchema json.RawMessage `json:"client_schema,omitempty"`
 	OutputSchema json.RawMessage `json:"output_schema,omitempty"`
 	Annotations  map[string]any  `json:"annotations,omitempty"`
-	TaskSupport  bool            `json:"task_support"`
+	TaskSupport  TaskSupport     `json:"task_support"`
 	Bindings     []Binding       `json:"bindings,omitempty"`
 	Strategy     Strategy        `json:"strategy"`
 	Digest       string          `json:"digest"`
@@ -79,7 +117,7 @@ type digestForm struct {
 	ClientSchema json.RawMessage `json:"client_schema"`
 	OutputSchema json.RawMessage `json:"output_schema"`
 	Annotations  map[string]any  `json:"annotations"`
-	TaskSupport  bool            `json:"task_support"`
+	TaskSupport  TaskSupport     `json:"task_support"`
 	Bindings     []Binding       `json:"bindings"`
 	Strategy     Strategy        `json:"strategy"`
 }
@@ -151,6 +189,9 @@ func (d Descriptor) Validate() error {
 	default:
 		return fmt.Errorf("descriptor %q has unknown strategy %q", d.Name, d.Strategy)
 	}
+	if !d.TaskSupport.Valid() {
+		return fmt.Errorf("descriptor %q has unknown task support %q", d.Name, d.TaskSupport)
+	}
 	if err := checkObjectSchema("input_schema", d.InputSchema, false); err != nil {
 		return err
 	}
@@ -160,10 +201,15 @@ func (d Descriptor) Validate() error {
 	if err := checkObjectSchema("output_schema", d.OutputSchema, true); err != nil {
 		return err
 	}
+	targets := make(map[string]bool, len(d.Bindings))
 	for i, binding := range d.Bindings {
 		if !binding.Valid() {
 			return fmt.Errorf("descriptor %q binding %d has an unreviewed source or target", d.Name, i)
 		}
+		if targets[binding.Target] {
+			return fmt.Errorf("descriptor %q has duplicate binding target %q", d.Name, binding.Target)
+		}
+		targets[binding.Target] = true
 	}
 	return d.CheckDigest()
 }
@@ -178,8 +224,12 @@ func checkObjectSchema(field string, raw json.RawMessage, optional bool) error {
 	if len(raw) > maxSchemaBytes {
 		return fmt.Errorf("%s exceeds %d bytes", field, maxSchemaBytes)
 	}
+	canonicalized, err := canonical(raw)
+	if err != nil {
+		return fmt.Errorf("%s is not one complete JSON value: %w", field, err)
+	}
 	var value any
-	if err := json.Unmarshal(raw, &value); err != nil {
+	if err := json.Unmarshal(canonicalized, &value); err != nil {
 		return fmt.Errorf("%s is not valid JSON: %w", field, err)
 	}
 	if _, ok := value.(map[string]any); !ok {

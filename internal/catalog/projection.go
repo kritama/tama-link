@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 )
 
 const (
@@ -44,6 +45,8 @@ type schemaShape struct {
 
 // Signatures renders one signature per operation from its client-visible
 // schema (falling back to the upstream schema), sorted by operation name.
+// It is an unbounded internal projection; SubmitDescription applies the
+// public size bounds.
 func (c Catalog) Signatures() []Signature {
 	operations := append([]Descriptor(nil), c.Operations...)
 	sort.Slice(operations, func(i, j int) bool { return operations[i].Name < operations[j].Name })
@@ -170,22 +173,20 @@ func renderType(value any) string {
 	}
 }
 
-// clip shortens s to at most n bytes on a rune boundary, marking the cut.
+// clip shortens s so the result is at most n bytes, cutting on a valid
+// UTF-8 boundary and reserving space for the omission marker. For n at or
+// below the marker length the result is the marker truncated to n bytes.
 func clip(s string, n int) string {
+	const marker = "..."
 	if len(s) <= n {
 		return s
 	}
-	cut := s[:n]
-	for len(cut) > 0 && !isRuneBoundary(cut) {
+	if n <= len(marker) {
+		return marker[:n]
+	}
+	cut := s[:n-len(marker)]
+	for len(cut) > 0 && !utf8.ValidString(cut) {
 		cut = cut[:len(cut)-1]
 	}
-	return cut + "..."
-}
-
-func isRuneBoundary(s string) bool {
-	if len(s) == 0 {
-		return true
-	}
-	last := len(s) - 1
-	return s[last] < 0x80 || s[last]&0xC0 != 0x80
+	return cut + marker
 }

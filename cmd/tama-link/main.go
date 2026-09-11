@@ -43,6 +43,10 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	case "version":
 		return runVersion(rest, stdout, stderr)
 	case "help", "-h", "--help":
+		if len(rest) > 0 {
+			writef(stderr, "tama-link: help takes no arguments\n")
+			return 2
+		}
 		write(stdout, usage)
 		return 0
 	default:

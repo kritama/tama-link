@@ -16,7 +16,7 @@ func testDescriptor(t *testing.T, mutate ...func(*Descriptor)) Descriptor {
 		Title:       "Send a message",
 		Description: "Send one message to Tama.",
 		InputSchema: json.RawMessage(`{"type":"object","properties":{"content":{"type":"string","description":"Message text"},"recipient":{"type":"string"}},"required":["content"]}`),
-		TaskSupport: true,
+		TaskSupport: TaskSupportOptional,
 		Strategy:    StrategyUpstreamTask,
 	}
 	for _, apply := range mutate {
@@ -55,7 +55,7 @@ func TestDigestChangesWithFields(t *testing.T) {
 		"schema":      func(d *Descriptor) { d.InputSchema = json.RawMessage(`{"type":"object"}`) },
 		"bindings":    func(d *Descriptor) { d.Bindings = []Binding{{Source: SourceClientRequestID, Target: "/identifier"}} },
 		"strategy":    func(d *Descriptor) { d.Strategy = StrategyLocalReplayable },
-		"task":        func(d *Descriptor) { d.TaskSupport = false },
+		"task":        func(d *Descriptor) { d.TaskSupport = TaskSupportForbidden },
 	} {
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
@@ -65,6 +65,28 @@ func TestDigestChangesWithFields(t *testing.T) {
 				t.Fatalf("digest unchanged after mutating %s", name)
 			}
 		})
+	}
+}
+
+func TestTaskSupportStatesAreDistinct(t *testing.T) {
+	t.Parallel()
+
+	states := []TaskSupport{TaskSupportForbidden, TaskSupportOptional, TaskSupportRequired}
+	digests := make([]string, 0, len(states))
+	for _, state := range states {
+		if !state.Valid() {
+			t.Fatalf("TaskSupport %q is not valid", state)
+		}
+		digests = append(digests, testDescriptor(t, func(d *Descriptor) {
+			d.TaskSupport = state
+		}).Digest)
+	}
+	for i := 0; i < len(digests); i++ {
+		for j := i + 1; j < len(digests); j++ {
+			if digests[i] == digests[j] {
+				t.Fatalf("task support states %s and %s share digest %s", states[i], states[j], digests[i])
+			}
+		}
 	}
 }
 
@@ -104,6 +126,13 @@ func TestDescriptorValidate(t *testing.T) {
 			d.InputSchema = json.RawMessage(`{"pad":"` + strings.Repeat("x", maxSchemaBytes) + `"}`)
 		}},
 		{"unreviewed binding", func(d *Descriptor) { d.Bindings = []Binding{{Source: "arguments.free", Target: "/x"}} }},
+		{"unknown task support", func(d *Descriptor) { d.TaskSupport = "sometimes" }},
+		{"trailing schema data", func(d *Descriptor) { d.InputSchema = json.RawMessage(`{"type":"object"} x`) }},
+		{"duplicate schema keys", func(d *Descriptor) { d.InputSchema = json.RawMessage(`{"type":"object","type":"object"}`) }},
+		{"invalid pointer escape", func(d *Descriptor) { d.Bindings = []Binding{{Source: SourceClientRequestID, Target: "/a~2"}} }},
+		{"duplicate binding target", func(d *Descriptor) {
+			d.Bindings = []Binding{{Source: SourceClientRequestID, Target: "/x"}, {Source: SourceClientContextThreadID, Target: "/x"}}
+		}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -125,10 +154,18 @@ func TestBindingValid(t *testing.T) {
 	}{
 		{Binding{Source: SourceClientRequestID, Target: "/identifier"}, true},
 		{Binding{Source: SourceClientContextThreadID, Target: "/thread/identifier", Required: true}, true},
+		{Binding{Source: SourceClientRequestID, Target: "/"}, true},
+		{Binding{Source: SourceClientRequestID, Target: "/~0"}, true},
+		{Binding{Source: SourceClientRequestID, Target: "/a~1b"}, true},
+		{Binding{Source: SourceClientRequestID, Target: "/a~0b~1"}, true},
+		{Binding{Source: SourceClientRequestID, Target: "/~/a"}, false},
 		{Binding{Source: "arguments.free", Target: "/x"}, false},
 		{Binding{Source: "", Target: "/x"}, false},
 		{Binding{Source: SourceClientRequestID, Target: "identifier"}, false},
 		{Binding{Source: SourceClientRequestID, Target: ""}, false},
+		{Binding{Source: SourceClientRequestID, Target: "/a~"}, false},
+		{Binding{Source: SourceClientRequestID, Target: "/a~2"}, false},
+		{Binding{Source: SourceClientRequestID, Target: "/a~/~"}, false},
 	}
 	for _, test := range tests {
 		if got := test.binding.Valid(); got != test.valid {

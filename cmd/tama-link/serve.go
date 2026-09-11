@@ -51,6 +51,11 @@ func parseServeFlags(args []string, stderr io.Writer) (serveConfig, bool) {
 	if err := fs.Parse(args); err != nil {
 		return cfg, false
 	}
+	if fs.NArg() > 0 {
+		writef(stderr, "tama-link: serve takes no positional arguments\n")
+		fs.Usage()
+		return cfg, false
+	}
 	if *profileFlag == "" {
 		writef(stderr, "tama-link: serve requires --profile\n")
 		fs.Usage()
@@ -76,12 +81,18 @@ func (c *serveConfig) resolveProfile() error {
 	c.configDir = configDir
 
 	path := profile.Path(configDir, c.profileName)
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
-		return fmt.Errorf("profile %q not found at %s", c.profileName, path)
+		if os.IsNotExist(err) {
+			return fmt.Errorf("profile %q not found at %s", c.profileName, path)
+		}
+		return fmt.Errorf("read profile %s: %w", path, err)
 	}
 	if info.IsDir() {
 		return fmt.Errorf("profile path %s is a directory", path)
+	}
+	if info.Mode()&os.ModeType != 0 {
+		return fmt.Errorf("profile path %s is not a regular file", path)
 	}
 	return nil
 }

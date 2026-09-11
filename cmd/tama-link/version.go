@@ -26,6 +26,11 @@ func runVersion(args []string, stdout, stderr io.Writer) int {
 		fs.Usage()
 		return 2
 	}
+	if fs.NArg() > 0 {
+		writef(stderr, "tama-link: version takes no positional arguments\n")
+		fs.Usage()
+		return 2
+	}
 
 	if !*asJSON {
 		writef(stdout, "%s\n", version.String())

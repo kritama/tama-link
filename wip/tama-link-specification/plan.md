@@ -22,19 +22,25 @@ resolves an open question from that spec, it says so explicitly.
 
 ## Current state
 
-Phase 0 of the spec is ~95% complete in this repository:
+Phase 0 is complete: `serve --profile <name>`, reserved `login`/`logout`
+stubs, `version [--json]`, the two-tool STDIO server with placeholder
+`not_implemented` handlers, and an end-to-end test that builds the real
+binary and completes an initialize/`tools/list` handshake.
 
-- Go module (`go 1.25.0`), `github.com/modelcontextprotocol/go-sdk v1.7.0`;
-- STDIO MCP server exposing exactly `submit` and `await`
-  (`internal/server/server.go`);
-- placeholder handlers that fail with `not_implemented`;
-- a unit test proving the two-tool catalog (`internal/server/server_test.go`);
-- `make check` = fmt-check + test + race + vet + lint + build;
-- CI with Go validation and a 5-target cross-build
-  (linux amd64/arm64, darwin amd64/arm64, windows amd64), all `CGO_ENABLED=0`.
+Phase 1 is in progress. Committed so far:
 
-Still missing against the Phase 0 list: `serve --profile <name>` flag wiring and
-`version --json`.
+- `internal/contract`: stable tool inputs/outputs, the lossless normalized
+  terminal-result model, and the error taxonomy;
+- `internal/submission`: state machine with transition guards and event
+  sequence invariants;
+- `internal/limits`: version 1 defaults with separate hard ceilings;
+- `internal/catalog`: pinned descriptors, canonical digests, drift
+  verification, and bounded submit-description projection.
+
+Still remaining in Phase 1: profile loading/validation with the catalog and
+limits wired into the server, the encrypted SQLite store with the idempotency
+index, the credential keyring integration, the worker lease/recovery logic,
+and the separate-process storage test suite.
 
 ## Key architectural decisions (resolving spec open questions)
 

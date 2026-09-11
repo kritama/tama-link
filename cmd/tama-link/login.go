@@ -28,6 +28,11 @@ func requireProfileFlag(command string, args []string, stderr io.Writer) bool {
 		fs.Usage()
 		return false
 	}
+	if fs.NArg() > 0 {
+		writef(stderr, "tama-link: %s takes no positional arguments\n", command)
+		fs.Usage()
+		return false
+	}
 	if *profileFlag == "" {
 		writef(stderr, "tama-link: %s requires --profile\n", command)
 		fs.Usage()

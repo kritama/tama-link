@@ -56,6 +56,36 @@ func TestRunRejectsUnknownCommand(t *testing.T) {
 	}
 }
 
+func TestRunRejectsPositionalArguments(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{"serve", []string{"serve", "--profile", "demo", "extra"}},
+		{"login", []string{"login", "--profile", "demo", "extra"}},
+		{"logout", []string{"logout", "--profile", "demo", "extra"}},
+		{"version", []string{"version", "junk"}},
+		{"help", []string{"help", "extra"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			var stdout, stderr bytes.Buffer
+			code := run(context.Background(), test.args, &stdout, &stderr)
+			if code != 2 {
+				t.Fatalf("exit code = %d, want 2", code)
+			}
+			if !strings.Contains(stderr.String(), "no positional arguments") &&
+				!strings.Contains(stderr.String(), "takes no arguments") {
+				t.Fatalf("stderr = %q, want positional-argument error", stderr.String())
+			}
+		})
+	}
+}
+
 func TestRunHelp(t *testing.T) {
 	t.Parallel()
 

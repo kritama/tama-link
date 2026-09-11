@@ -1,7 +1,8 @@
 // Package limits defines Tama Link's size, timeout, and retention bounds.
 //
-// Profiles may lower the version 1 defaults; a value may never exceed the
-// default, which is the implementation hard ceiling.
+// Profiles start from the version 1 defaults. A profile may lower any bound
+// and may raise one only with an explicit value at or below the
+// implementation hard ceiling and a reconciled profile digest.
 package limits
 
 import (
@@ -12,6 +13,7 @@ import (
 // Bytes is a byte size bound.
 type Bytes int64
 
+// Common byte size units.
 const (
 	KiB Bytes = 1024
 	MiB Bytes = 1024 * KiB
@@ -37,15 +39,15 @@ type Limits struct {
 	AwaitDefault time.Duration
 	// AwaitMax bounds one long-poll duration.
 	AwaitMax time.Duration
-	// PayloadRetention bounds how long terminal payloads are retained.
+	// PayloadRetention bounds how long terminal payloads are retained after
+	// completion.
 	PayloadRetention time.Duration
 	// TombstoneRetention bounds how long payload-free expiry tombstones are
-	// retained after completion.
+	// retained after completion. It must cover the payload retention.
 	TombstoneRetention time.Duration
 }
 
-// Default returns the version 1 default bounds, which are also the hard
-// ceilings.
+// Default returns the version 1 default bounds.
 func Default() Limits {
 	return Limits{
 		ArgumentsBytes:     MiB,
@@ -62,9 +64,28 @@ func Default() Limits {
 	}
 }
 
-// Validate reports whether l is within the hard ceilings.
+// HardCeiling returns the implementation ceilings. Profile values may never
+// exceed them.
+func HardCeiling() Limits {
+	return Limits{
+		ArgumentsBytes:     4 * MiB,
+		ArgumentDepth:      64,
+		ResponseBytes:      64 * MiB,
+		ResultBytes:        32 * MiB,
+		EventBytes:         64 * KiB,
+		MaxEvents:          512,
+		EventsBytes:        4 * MiB,
+		AwaitDefault:       30 * time.Second,
+		AwaitMax:           60 * time.Second,
+		PayloadRetention:   30 * 24 * time.Hour,
+		TombstoneRetention: 90 * 24 * time.Hour,
+	}
+}
+
+// Validate reports whether l is within the hard ceilings and internally
+// consistent.
 func (l Limits) Validate() error {
-	ceilings := Default()
+	ceilings := HardCeiling()
 	if err := checkBytes("arguments_bytes", l.ArgumentsBytes, ceilings.ArgumentsBytes); err != nil {
 		return err
 	}
@@ -100,6 +121,9 @@ func (l Limits) Validate() error {
 	}
 	if err := checkDuration("tombstone_retention", l.TombstoneRetention, ceilings.TombstoneRetention); err != nil {
 		return err
+	}
+	if l.TombstoneRetention < l.PayloadRetention {
+		return fmt.Errorf("tombstone_retention %s is below payload_retention %s", l.TombstoneRetention, l.PayloadRetention)
 	}
 	return nil
 }

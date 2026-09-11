@@ -1,6 +1,7 @@
 package contract
 
 import (
+	"bytes"
 	"encoding/json"
 	"testing"
 	"time"
@@ -89,14 +90,14 @@ func TestSubmitOutputSuccessMatchesSpec(t *testing.T) {
 	}
 }
 
-func TestSubmitOutputFailureCarriesOnlyError(t *testing.T) {
+func TestErrorOutputCarriesOnlyError(t *testing.T) {
 	t.Parallel()
 
 	err := NewError(CodeInvalidRequest, "tool is not allowed by the selected profile")
-	got := mustMarshal(t, SubmitOutput{Error: &err})
+	got := mustMarshal(t, ErrorOutput{Error: &err})
 	want := `{"error":{"code":"invalid_request","message":"tool is not allowed by the selected profile","retryable":false}}`
 	if got != want {
-		t.Fatalf("submit output JSON = %s, want %s", got, want)
+		t.Fatalf("error output JSON = %s, want %s", got, want)
 	}
 }
 
@@ -135,8 +136,8 @@ func TestAwaitOutputCompletedMatchesSpec(t *testing.T) {
 		Events:       []Event{},
 		Result: &Result{
 			IsError:           false,
-			Content:           []Content{{Type: "text", Text: "Saved."}},
-			StructuredContent: map[string]any{"saved": true},
+			Content:           []ContentBlock{{Type: "text", Text: "Saved."}},
+			StructuredContent: json.RawMessage(`{"saved":true}`),
 		},
 		CompletedAt: &completedAt,
 	}
@@ -144,6 +145,51 @@ func TestAwaitOutputCompletedMatchesSpec(t *testing.T) {
 	want := `{"submission_id":"sub_opaque","tool":"message","status":"completed","terminal":true,"cursor":"event_cursor","events":[],"result":{"is_error":false,"content":[{"type":"text","text":"Saved."}],"structured_content":{"saved":true}},"completed_at":"2026-09-11T12:05:00Z"}`
 	if got != want {
 		t.Fatalf("await output JSON = %s, want %s", got, want)
+	}
+}
+
+// TestResultRoundTrip proves the normalized result model is lossless for
+// every allowed MCP tool result content block and structured content shape.
+func TestResultRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	fixtures := map[string]string{
+		"text_with_annotations_and_meta": `{"is_error":false,"content":[{"type":"text","text":"Saved.","annotations":[{"audience":["assistant"],"priority":0.5}],"_meta":{"trace":"t-1"}}],"structured_content":{"ok":true},"_meta":{"safe":"yes"}}`,
+		"image":                          `{"is_error":false,"content":[{"type":"image","data":"aGVsbG8=","mimeType":"image/png"}]}`,
+		"audio":                          `{"is_error":false,"content":[{"type":"audio","data":"aGVsbG8=","mimeType":"audio/wav"}]}`,
+		"resource_link":                  `{"is_error":false,"content":[{"type":"resource_link","uri":"file:///tmp/x","name":"x","title":"X","description":"d","mimeType":"text/plain","annotations":[{"priority":1}]}]}`,
+		"embedded_resource":              `{"is_error":false,"content":[{"type":"embedded_resource","resource":{"uri":"file:///tmp/x","mimeType":"text/plain","text":"body"},"annotations":[{"audience":["user"]}]}]}`,
+		"embedded_resource_blob":         `{"is_error":false,"content":[{"type":"embedded_resource","resource":{"uri":"file:///tmp/x","blob":"aGVsbG8="}}]}`,
+		"array_structured_is_error":      `{"is_error":true,"content":[],"structured_content":[1,2,3]}`,
+		"primitive_structured":           `{"is_error":false,"content":[],"structured_content":"done"}`,
+		"null_structured":                `{"is_error":false,"content":[],"structured_content":null}`,
+	}
+	for name, fixture := range fixtures {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+
+			var in Result
+			if err := json.Unmarshal([]byte(fixture), &in); err != nil {
+				t.Fatalf("unmarshal fixture: %v", err)
+			}
+			out, err := json.Marshal(in)
+			if err != nil {
+				t.Fatalf("remarshal: %v", err)
+			}
+
+			var wantValue, gotValue any
+			if err := json.Unmarshal([]byte(fixture), &wantValue); err != nil {
+				t.Fatalf("unmarshal want: %v", err)
+			}
+			if err := json.Unmarshal(out, &gotValue); err != nil {
+				t.Fatalf("unmarshal got: %v", err)
+			}
+			wantJSON, _ := json.Marshal(wantValue)
+			gotJSON, _ := json.Marshal(gotValue)
+			if !bytes.Equal(wantJSON, gotJSON) {
+				t.Fatalf("round trip changed the result:\nwant %s\ngot  %s", wantJSON, gotJSON)
+			}
+		})
 	}
 }
 

@@ -52,10 +52,14 @@ packages will adapt its progress events to the UI their host supports.
 
 ## Current status
 
-This repository is an implementation foundation. The STDIO MCP server starts
-and advertises `submit` and `await`, but both handlers deliberately return a
-structured `not_implemented` tool error until the upstream adapter, durable
-state, authentication, and polling work described in the WIP are implemented.
+This repository is an implementation foundation. The CLI provides
+`serve --profile <name>`, reserved `login` and `logout` stubs, and
+`version [--json]`. `serve` starts the STDIO MCP server, which advertises
+exactly `submit` and `await`; both handlers deliberately return a structured
+`not_implemented` tool error until the upstream adapter, durable state,
+authentication, and polling work described in the WIP are implemented. A named
+profile must exist in the Tama Link configuration directory before `serve`
+starts.
 
 No client or installer should treat this foundation revision as production
 ready.
@@ -71,25 +75,28 @@ make check
 make build
 ```
 
-Run the MCP server over STDIO:
+Run the MCP server over STDIO for a named profile:
 
 ```sh
-go run ./cmd/tama-link serve
+go run ./cmd/tama-link serve --profile tama-app
 ```
 
 Print build information:
 
 ```sh
 go run ./cmd/tama-link version
+go run ./cmd/tama-link version --json
 ```
 
-An eventual Codex-style STDIO registration will invoke:
+A Codex-style STDIO registration invokes the same command, once per profile:
 
 ```text
-tama-link serve --profile memovee
+tama-app    -> tama-link serve --profile tama-app
+tama-system -> tama-link serve --profile tama-system
 ```
 
-The `--profile` contract is specified but is not implemented in this foundation.
+`login --profile <name>` and `logout --profile <name>` are reserved and return
+a not-implemented error in this foundation.
 
 ## Branching
 
