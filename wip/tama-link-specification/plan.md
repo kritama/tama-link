@@ -24,7 +24,7 @@ resolves an open question from that spec, it says so explicitly.
 
 Phase 0 of the spec is ~95% complete in this repository:
 
-- Go module (`go 1.25.0`), `github.com/modelcontextprotocol/go-sdk v1.6.1`;
+- Go module (`go 1.25.0`), `github.com/modelcontextprotocol/go-sdk v1.7.0`;
 - STDIO MCP server exposing exactly `submit` and `await`
   (`internal/server/server.go`);
 - placeholder handlers that fail with `not_implemented`;
@@ -45,9 +45,10 @@ is achievable **only for the downstream (STDIO) side**. For the upstream side it
 is not achievable, because no released Go SDK supports the MCP Tasks protocol
 that current Tama speaks:
 
-- `go-sdk` stable `v1.7.0` (and even pre-release `v1.8.0-pre.2`) expose no
-  `params.task` on `CallToolParams`, and no `tasks/get`, `tasks/result`, or
-  `tasks/cancel` methods; `ClientSession` has no generic raw-request API.
+- The pinned stable `go-sdk v1.7.0` exposes no `params.task` on
+  `CallToolParams`, and no `tasks/get`, `tasks/result`, or `tasks/cancel`
+  methods for the 2025-11-25 experimental Tasks extension that current Tama
+  speaks.
 - Current Tama App's caller contract is entirely task-based: `tools/call` with
   `params.task`, then `tasks/get` / `tasks/result` / `tasks/cancel`, with
   **session-scoped** task IDs.
@@ -56,6 +57,14 @@ Decision: Phase 2 builds a small, reviewed, fixture-tested JSON-RPC 2.0 client
 over streamable HTTP (`internal/upstream`) for the task protocol. The official
 Go SDK remains the downstream STDIO server and is sufficient there (it provides
 tool registration, `GetProgressToken`, and `ServerSession.NotifyProgress`).
+
+`go-sdk v1.7.0` is the initial pin: it is the newest reviewed stable release,
+preserves full backward compatibility with clients negotiating
+`2025-11-25` or earlier, and natively implements the `2026-07-28` protocol
+(stateless per-request `_meta`, `server/discover`, `subscriptions/listen`,
+MRTR `inputResponses`) plus custom JSON-RPC method registration. The Phase 4
+upstream adapter therefore builds on the official SDK directly, using custom
+methods only for the `tasks/*` extension surface.
 
 This is a deliberate, documented deviation from the original spec wording and
 is now recorded in the authoritative specification.
@@ -406,12 +415,14 @@ live tests.
 
 ## Phase 4 — newer (2026-07-28) MCP adapter
 
-- A second upstream adapter implementing the stateless per-request `_meta`
-  protocol from `tama-mcp`: `tools/call` with task policy, `tasks/get` polling,
-  optional `subscriptions/listen` SSE as an optimization, and `tasks/update`
-  for `input_required`.
+- A second upstream adapter built on the pinned `go-sdk v1.7.0`, which natively
+  speaks `2026-07-28`: stateless per-request `_meta`, `tasks/get` polling via
+  custom method registration, optional `subscriptions/listen` as an
+  optimization, and MRTR `inputResponses` for `input_required`.
 - Downstream `submit`/`await` contract unchanged.
-- Define the `input_required` contract behavior (G11) before implementation.
+- Define the `input_required` contract behavior (G11) before implementation;
+  the SDK's MRTR mechanism is the upstream transport for an `await`
+  `input_response`.
 - Expand the published compatibility matrix only after live client tests.
 
 Exit: the 2026-07-28 path is selectable by profile/adapter version and passes
