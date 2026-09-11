@@ -27,30 +27,39 @@ stubs, `version [--json]`, the two-tool STDIO server with placeholder
 `not_implemented` handlers, and an end-to-end test that builds the real
 binary and completes an initialize/`tools/list` handshake.
 
-Phase 1 is in progress. Committed so far:
+Phase 1 is complete. The durable-domain implementation now includes:
 
-- `internal/contract`: stable tool inputs/outputs, the lossless normalized
-  terminal-result model, and the error taxonomy;
+- `internal/contract`: stable tool inputs/outputs, raw lossless MCP content
+  blocks, structured result validation, and the error taxonomy;
 - `internal/submission`: state machine with transition guards and event
   sequence invariants;
 - `internal/limits`: version 1 defaults with separate hard ceilings;
 - `internal/catalog`: pinned descriptors, canonical digests, drift
   verification, and bounded submit-description projection;
-- `internal/profile`: versioned profile loading with secure file validation
-  and effective-limit resolution;
+- `internal/profile`: versioned profile loading with duplicate-key and secure
+  URL validation, profile-isolated state paths and credential namespaces, and
+  effective-limit resolution;
 - `internal/server`: profile-driven MCP server wiring the catalog projection,
   instructions, and the bounded submit `tool` enum;
-- `internal/store`: encrypted SQLite state (D2/D3/D4) with the idempotency
-  index, state-machine transitions, cross-process leases, and D12 retention
-  GC; first-open metadata and idempotent insert are atomic under concurrent
-  access;
+- `internal/store`: encrypted SQLite state (D2/D3/D4) with complete-input
+  idempotency, compare-and-set transitions, bounded progress, atomic terminal
+  capture, lease-guarded worker writes, payload-free D12 GC, and schema and
+  encryption-format migrations; first-open metadata is atomic under concurrent
+  access and ciphertext is bound to its submission and semantic field;
+- `internal/credential`: a profile-scoped platform keyring restricted to the
+  secure OS backend, with missing and unavailable states kept distinct and
+  fail-closed store integration;
+- `internal/worker`: owned lease renewal, cancellation, safe terminal failure,
+  single-winner execution, and restart recovery for `local_replayable` work;
 - the separate-process storage test suite (concurrent migration, competing
   idempotent inserts, busy timeout, exclusive claim, lease recovery after
   death, terminal capture surviving GC, refresh leasing, WAL recovery,
-  integrity).
+  integrity), plus worker cancellation/recovery and legacy encryption migration
+  coverage.
 
-Still remaining in Phase 1: the credential keyring integration and the worker
-lease/recovery logic.
+Phase 2 is next. The downstream `submit` and `await` handlers deliberately
+remain placeholders until the current Tama System and App adapters are wired;
+Phase 1's no-upstream exit criteria are satisfied independently of that work.
 
 ## Key architectural decisions (resolving spec open questions)
 

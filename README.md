@@ -52,14 +52,16 @@ packages will adapt its progress events to the UI their host supports.
 
 ## Current status
 
-This repository is an implementation foundation. The CLI provides
+Phase 1 of the implementation plan is complete. The CLI provides
 `serve --profile <name>`, reserved `login` and `logout` stubs, and
 `version [--json]`. `serve` starts the STDIO MCP server, which advertises
 exactly `submit` and `await`; both handlers deliberately return a structured
-`not_implemented` tool error until the upstream adapter, durable state,
-authentication, and polling work described in the WIP are implemented. A named
-profile must exist in the Tama Link configuration directory before `serve`
-starts.
+`not_implemented` tool error until the Phase 2 upstream adapters,
+authentication, and polling are wired. The Phase 1 foundation now includes the
+validated profile/catalog model, encrypted SQLite submissions, secure keyring
+integration, idempotency, atomic terminal capture, cross-process leases,
+retention, and restart-safe local worker recovery. A named profile must exist
+in the Tama Link configuration directory before `serve` starts.
 
 No client or installer should treat this foundation revision as production
 ready.

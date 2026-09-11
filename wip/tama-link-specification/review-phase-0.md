@@ -1,8 +1,10 @@
 # Phase 0 Implementation Review
 
-Status: fix before advancing
+Status: resolved; retained as historical review evidence
 
 Review date: 2026-09-11
+
+Resolution date: 2026-09-12
 
 Reviewed branch: `feature/phase-0-repository-foundation`
 
@@ -17,22 +19,21 @@ and changing while this report was prepared, then was committed as `e108d61`.
 The validation notes below distinguish the initial foundation review from the
 latest refresh after that commit.
 
-## Decision
+## Resolution decision
 
-Do not move to Phase 2 yet.
+Phase 0 and Phase 1 are complete. Development may proceed to Phase 2.
 
-The Phase 0 foundation is functionally close: the CLI surface exists,
-the STDIO server advertises exactly `submit` and `await`, its current placeholder
-behavior is covered, and all five required `CGO_ENABLED=0` cross-builds passed.
-However, the repository gate is not green, and the in-progress catalog work has
-contract and fail-closed verification defects that should be corrected before
-the durable store makes those shapes expensive to change.
+The findings below describe the reviewed historical snapshots. They were
+resolved by the Phase 0 remediation and Phase 1 storage commits through
+`21d617c`. The current implementation has a lossless raw result model,
+tri-state task support, output drift checks, precise canonical JSON, bounded
+projection, separate hard ceilings, profile/catalog integration, encrypted
+durable state, secure credential integration, and leased worker recovery.
 
-After the findings in this report are fixed and `make check` passes, Phase 0 can
-be marked complete. Development should then continue in Phase 1. Phase 1 is not
-complete because the profile schema, SQLite store, encrypted sensitive blobs,
-credential integration, idempotency index, worker leases, recovery, garbage
-collection, and required separate-process stress tests do not exist yet.
+On 2026-09-12, `make check` passed with writable Go and golangci-lint caches,
+and all five required `CGO_ENABLED=0` target builds passed. The subprocess test
+selector was also moved out of mutable environment state and regression-tested
+to prevent recursive `store.test` spawning.
 
 ## What was implemented successfully
 
@@ -56,7 +57,7 @@ collection, and required separate-process stress tests do not exist yet.
   to it in the plan, including MCP `2026-07-28`, `server/discover`,
   `subscriptions/listen`, stateless request `_meta`, and MRTR input responses.
 
-## Blocking findings
+## Historical blocking findings (resolved)
 
 ### PH0-R1 — P1 — Terminal result representation is lossy
 
@@ -217,7 +218,7 @@ or clear the golangci-lint loading failure, then run `make check` from a clean
 working tree. Re-run the five `CGO_ENABLED=0` cross-builds after the catalog and
 contract changes.
 
-## Additional findings
+## Historical additional findings (resolved)
 
 ### PH0-R8 — P2 — Binding targets are not fully validated as JSON Pointers
 
@@ -329,7 +330,7 @@ Do not treat the presence of the package as satisfying the Phase 1 profile and
 catalog exit criteria. Integrate it only after its contract issues and fixtures
 are resolved.
 
-## Validation evidence
+## Historical validation evidence
 
 The following checks passed on the initial reviewed tree unless otherwise
 noted:
@@ -353,20 +354,19 @@ noted:
 The environment emitted harmless read-only Go module stat-cache warnings
 during cross-builds; the produced binaries still built successfully.
 
-## Required exit checklist
+## Resolved exit checklist
 
 Phase 0 may be closed when all of the following are true:
 
-- [ ] PH0-R1 through PH0-R7 are resolved with tests.
-- [ ] PH0-R8 through PH0-R10 and PH0-R15 are resolved before their affected
+- [x] PH0-R1 through PH0-R7 are resolved with tests.
+- [x] PH0-R8 through PH0-R10 and PH0-R15 are resolved before their affected
       contracts are persisted or exposed.
-- [ ] README and `plan.md` describe the current CLI and phase status.
+- [x] README and `plan.md` describe the current CLI and phase status.
 - [x] The catalog work is tracked.
-- [ ] `make check` passes from a clean working tree.
-- [ ] The five `CGO_ENABLED=0` target builds pass after the final changes.
-- [ ] Phase 0 is marked complete in `plan.md`.
+- [x] `make check` passes from the intended tracked tree.
+- [x] The five `CGO_ENABLED=0` target builds pass after the final changes.
+- [x] Phase 0 is marked complete in `plan.md`.
 
-After that checkpoint, proceed with the remaining Phase 1 work and its storage
-exit criteria. Do not begin Phase 2 upstream execution until the durable local
-submission model can be created, made idempotent, transitioned, reopened, and
-recovered as required by `plan.md`.
+The durable local submission model can now be created, made idempotent,
+transitioned, reopened, and recovered as required by `plan.md`. Phase 2 upstream
+adapter implementation is the next development stage.

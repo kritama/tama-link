@@ -335,6 +335,10 @@ which they return the terminal `submission_expired` error.
 `completed` means Tama Link captured an upstream MCP `CallToolResult`. The
 captured result preserves `isError`, content blocks, structured content, and
 safe `_meta`; a completed operation may therefore contain `is_error: true`.
+Normalized content blocks and safe `_meta` are retained as validated raw JSON,
+not projected through a fixed Go union, so extension fields and content added
+by a compatible MCP revision are not discarded. Endpoint adapters validate the
+wire shape before storage.
 `failed` is reserved for transport, protocol, authentication, local execution,
 or result-capture failure. `outcome_unknown` is reserved for the ambiguous
 result of a non-replayable synchronous mutation and must never be silently
