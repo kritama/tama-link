@@ -131,27 +131,21 @@ func (s *Store) initKey(ctx context.Context, keys KeyProvider) error {
 	return nil
 }
 
-// metaSet writes a metadata row unless it already exists. It reports whether
-// the row was newly created.
+// metaSet writes a metadata row unless it already exists. The conditional
+// insert is a single statement so concurrent first opens resolve safely. It
+// reports whether the row was newly created.
 func (s *Store) metaSet(ctx context.Context, key, value string) (bool, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	res, err := s.db.ExecContext(ctx, `
+		INSERT INTO meta (key, value)
+		SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM meta WHERE key = ?)`, key, value, key)
 	if err != nil {
-		return false, fmt.Errorf("begin metadata write: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var exists int
-	if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM meta WHERE key = ?", key).Scan(&exists); err != nil {
-		return false, fmt.Errorf("read metadata %q: %w", key, err)
-	}
-	if exists > 0 {
-		_ = tx.Rollback()
-		return false, nil
-	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO meta (key, value) VALUES (?, ?)", key, value); err != nil {
 		return false, fmt.Errorf("write metadata %q: %w", key, err)
 	}
-	return true, tx.Commit()
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("write metadata %q: %w", key, err)
+	}
+	return affected == 1, nil
 }
 
 // readMeta loads the version and key identifier from existing metadata.

@@ -69,35 +69,18 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 	}
 	argsHash := hashArguments(sub.Arguments)
 
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
-	if err != nil {
-		return nil, fmt.Errorf("begin idempotent insert: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	var existingID, existingHash string
-	err = tx.QueryRowContext(ctx,
-		"SELECT submission_id, args_hash FROM idempotency WHERE client_request_id = ?",
-		sub.ClientRequestID,
-	).Scan(&existingID, &existingHash)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("read idempotency index: %w", err)
-	}
-	if err == nil {
-		if existingHash != argsHash {
-			return nil, fmt.Errorf("%w: client_request_id %q was used with different arguments",
-				ErrIdempotencyConflict, sub.ClientRequestID)
-		}
-		_ = tx.Rollback()
-		return s.GetSubmission(ctx, existingID)
-	}
-
 	encryptedArgs, err := s.cipher.seal(sub.Arguments)
 	if err != nil {
 		return nil, fmt.Errorf("seal arguments: %w", err)
 	}
 
 	now := s.now().UnixMilli()
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return nil, fmt.Errorf("begin idempotent insert: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	insert := `
 		INSERT INTO submissions (
 			submission_id, client_request_id, tool, strategy, descriptor_digest,
@@ -112,14 +95,40 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 	); err != nil {
 		return nil, fmt.Errorf("insert submission: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO idempotency (client_request_id, args_hash, submission_id, created_at) VALUES (?, ?, ?, ?)`,
-		sub.ClientRequestID, argsHash, sub.ID, now,
-	); err != nil {
+
+	// The conditional insert resolves concurrent first submissions in one
+	// statement: exactly one owner wins the client_request_id.
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO idempotency (client_request_id, args_hash, submission_id, created_at)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(client_request_id) DO NOTHING`, sub.ClientRequestID, argsHash, sub.ID, now)
+	if err != nil {
 		return nil, fmt.Errorf("insert idempotency index: %w", err)
 	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit submission: %w", err)
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return nil, fmt.Errorf("insert idempotency index: %w", err)
+	}
+	if affected == 1 {
+		if err := tx.Commit(); err != nil {
+			return nil, fmt.Errorf("commit submission: %w", err)
+		}
+	} else {
+		// A competing request owns the client_request_id: discard ours and
+		// reconcile against the winner.
+		_ = tx.Rollback()
+		var existingID, existingHash string
+		if err := s.db.QueryRowContext(ctx,
+			"SELECT submission_id, args_hash FROM idempotency WHERE client_request_id = ?",
+			sub.ClientRequestID,
+		).Scan(&existingID, &existingHash); err != nil {
+			return nil, fmt.Errorf("read idempotency index: %w", err)
+		}
+		if existingHash != argsHash {
+			return nil, fmt.Errorf("%w: client_request_id %q was used with different arguments",
+				ErrIdempotencyConflict, sub.ClientRequestID)
+		}
+		return s.GetSubmission(ctx, existingID)
 	}
 
 	created := &Submission{
