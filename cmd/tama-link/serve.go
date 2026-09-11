@@ -3,9 +3,7 @@ package main
 import (
 	"context"
 	"flag"
-	"fmt"
 	"io"
-	"os"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -28,12 +26,13 @@ func runServe(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 		return 2
 	}
 
-	if err := cfg.resolveProfile(); err != nil {
+	p, err := profile.Load(cfg.profileName, cfg.configDir)
+	if err != nil {
 		writef(stderr, "tama-link: %v\n", err)
 		return 2
 	}
 
-	srv := server.New(version.Version)
+	srv := server.New(p, version.Version)
 	if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		writef(stderr, "tama-link: MCP server failed: %v\n", err)
 		return 1
@@ -69,30 +68,4 @@ func parseServeFlags(args []string, stderr io.Writer) (serveConfig, bool) {
 	}
 	cfg.profileName = name
 	return cfg, true
-}
-
-// resolveProfile resolves the configuration directory and verifies the
-// profile file exists. It returns a descriptive error on any failure.
-func (c *serveConfig) resolveProfile() error {
-	configDir, err := profile.ConfigDir(c.configDir)
-	if err != nil {
-		return err
-	}
-	c.configDir = configDir
-
-	path := profile.Path(configDir, c.profileName)
-	info, err := os.Lstat(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return fmt.Errorf("profile %q not found at %s", c.profileName, path)
-		}
-		return fmt.Errorf("read profile %s: %w", path, err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("profile path %s is a directory", path)
-	}
-	if info.Mode()&os.ModeType != 0 {
-		return fmt.Errorf("profile path %s is not a regular file", path)
-	}
-	return nil
 }

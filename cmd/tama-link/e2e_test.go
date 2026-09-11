@@ -12,7 +12,49 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kritama/tama-link/internal/catalog"
+	"github.com/kritama/tama-link/internal/profile"
 )
+
+// demoProfileJSON renders one valid minimal profile for the e2e tests.
+func demoProfileJSON(t *testing.T) []byte {
+	t.Helper()
+
+	op := catalog.Descriptor{
+		Name:        "message",
+		Title:       "Message",
+		Description: "Send one message to Tama.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}`),
+		TaskSupport: catalog.TaskSupportRequired,
+		Strategy:    catalog.StrategyUpstreamTask,
+	}
+	digest, err := op.ComputeDigest()
+	if err != nil {
+		t.Fatalf("compute descriptor digest: %v", err)
+	}
+	op.Digest = digest
+
+	p := profile.Profile{
+		Version:      profile.SchemaVersion,
+		Name:         "demo",
+		Origin:       "https://tama.example",
+		Endpoint:     "https://tama.example/mcp/app",
+		Issuer:       "https://auth.example",
+		Instructions: "Pinned upstream instructions.",
+		Bounds:       profile.Bounds{ProtocolMin: "2025-03-26", ProtocolMax: "2025-11-25"},
+		State:        profile.StateRefs{Database: "default", Credentials: "default"},
+		Operations:   []catalog.Descriptor{op},
+	}
+	if err := p.Validate("demo"); err != nil {
+		t.Fatalf("validate demo profile: %v", err)
+	}
+	data, err := json.Marshal(p)
+	if err != nil {
+		t.Fatalf("marshal demo profile: %v", err)
+	}
+	return data
+}
 
 // buildBinary compiles the real command so the tests exercise the same
 // binary a client would launch.
@@ -65,7 +107,7 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
 		t.Fatalf("create profiles dir: %v", err)
 	}
-	if err := os.WriteFile(filepath.Join(profilesDir, "demo.json"), []byte("{}"), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(profilesDir, "demo.json"), demoProfileJSON(t), 0o600); err != nil {
 		t.Fatalf("write profile: %v", err)
 	}
 
@@ -168,6 +210,7 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 			Name    string `json:"name"`
 			Version string `json:"version"`
 		} `json:"serverInfo"`
+		Instructions string `json:"instructions"`
 	}
 	if err := json.Unmarshal(got.init, &initResult); err != nil {
 		t.Fatalf("unmarshal initialize result: %v", err)
@@ -177,6 +220,10 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	}
 	if initResult.ProtocolVersion != "2025-03-26" {
 		t.Fatalf("protocolVersion = %q, want 2025-03-26", initResult.ProtocolVersion)
+	}
+	if !strings.Contains(initResult.Instructions, "submit") ||
+		!strings.Contains(initResult.Instructions, "Pinned upstream instructions.") {
+		t.Fatalf("instructions = %q, want composed workflow and pinned copy", initResult.Instructions)
 	}
 
 	var toolsResult struct {
@@ -199,5 +246,24 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	slices.Sort(names)
 	if want := []string{"await", "submit"}; !slices.Equal(names, want) {
 		t.Fatalf("tools = %v, want %v", names, want)
+	}
+
+	for _, tool := range toolsResult.Tools {
+		if tool.Name != "submit" {
+			continue
+		}
+		var schema struct {
+			Properties struct {
+				Tool struct {
+					Enum []string `json:"enum"`
+				} `json:"tool"`
+			} `json:"properties"`
+		}
+		if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+			t.Fatalf("unmarshal submit input schema: %v", err)
+		}
+		if want := []string{"message"}; !slices.Equal(schema.Properties.Tool.Enum, want) {
+			t.Fatalf("submit tool enum = %v, want %v", schema.Properties.Tool.Enum, want)
+		}
 	}
 }
