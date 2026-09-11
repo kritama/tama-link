@@ -23,7 +23,8 @@ func runToTerminal(t *testing.T, s *store.Store, id string, terminal submission.
 			t.Fatalf("transition to %s: %v", state, err)
 		}
 	}
-	if _, err := s.Transition(ctx, id, terminal, store.TransitionDetail{}); err != nil {
+	failure := contract.NewError(contract.CodeUpstreamExecutionFailed, "operation failed")
+	if _, err := s.Transition(ctx, id, terminal, store.TransitionDetail{Error: &failure}); err != nil {
 		t.Fatalf("transition to %s: %v", terminal, err)
 	}
 }
@@ -36,10 +37,14 @@ func TestGCSweepsPayloadThenTombstone(t *testing.T) {
 	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
-	runToTerminal(t, s, "sub-1", submission.State(contract.StatusCompleted))
-	result := contract.Result{Content: []contract.ContentBlock{{Type: "text", Text: "done"}}}
-	if _, err := s.CaptureResult(ctx, "sub-1", result); err != nil {
-		t.Fatalf("CaptureResult: %v", err)
+	for _, state := range []submission.State{contract.StatusQueued, contract.StatusRunning} {
+		if _, err := s.Transition(ctx, "sub-1", state, store.TransitionDetail{}); err != nil {
+			t.Fatalf("transition to %s: %v", state, err)
+		}
+	}
+	result := contract.Result{Content: []contract.ContentBlock{[]byte(`{"type":"text","text":"done"}`)}}
+	if _, err := s.Complete(ctx, "sub-1", result); err != nil {
+		t.Fatalf("Complete: %v", err)
 	}
 
 	// After payload retention the payload is cleared and the row becomes a
@@ -59,7 +64,7 @@ func TestGCSweepsPayloadThenTombstone(t *testing.T) {
 	if got.Status != submission.State(contract.StatusExpired) {
 		t.Fatalf("status = %s, want expired", got.Status)
 	}
-	if got.Result != nil || len(got.Events) != 0 {
+	if got.Result != nil || len(got.Events) != 0 || len(got.Arguments) != 0 || got.TaskID != "" || got.ErrorMessage != "" {
 		t.Fatalf("tombstone still carries a payload: %+v", got.Result)
 	}
 

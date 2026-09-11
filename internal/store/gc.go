@@ -47,8 +47,10 @@ func (s *Store) GC(ctx context.Context) (GCSummary, error) {
 // payload-free expired tombstones.
 func (s *Store) expirePayloads(ctx context.Context, tx *sql.Tx, nowMs int64) (GCSummary, error) {
 	query := `
-		UPDATE submissions
-		SET status = ?, events_enc = NULL, result_enc = NULL, updated_at = ?
+			UPDATE submissions
+			SET status = ?, args_enc = NULL, task_id = NULL, events_enc = NULL,
+			    result_enc = NULL, error_code = NULL, error_message = NULL,
+			    updated_at = ?
 		WHERE completed_at IS NOT NULL
 		  AND payload_expires_at IS NOT NULL
 		  AND payload_expires_at <= ?

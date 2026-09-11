@@ -25,11 +25,10 @@ import (
 )
 
 // The separate-process suite runs scenarios in this same test binary:
-// TestMain dispatches on STORE_PROCTEST_SCENARIO, so each spawned process
+// TestMain dispatches on a private command argument, so each spawned process
 // executes real OS-level work against one shared database.
 
 const (
-	envScenario = "STORE_PROCTEST_SCENARIO"
 	envDB       = "STORE_PROCTEST_DB"
 	envKey      = "STORE_PROCTEST_KEY"
 	envSubID    = "STORE_PROCTEST_SUBID"
@@ -38,9 +37,13 @@ const (
 	envGCSweeps = "STORE_PROCTEST_GC"
 )
 
+const scenarioArgPrefix = "--tama-link-store-scenario="
+
 func TestMain(m *testing.M) {
-	if scenario := os.Getenv(envScenario); scenario != "" {
-		os.Exit(runScenario(scenario))
+	for _, arg := range os.Args[1:] {
+		if strings.HasPrefix(arg, scenarioArgPrefix) {
+			os.Exit(runScenario(strings.TrimPrefix(arg, scenarioArgPrefix)))
+		}
 	}
 	os.Exit(m.Run())
 }
@@ -89,8 +92,8 @@ func runProctest(t *testing.T, name string, mutate func(*exec.Cmd)) (int, string
 	if err != nil {
 		t.Fatalf("resolve test binary: %v", err)
 	}
-	cmd := exec.Command(exe)
-	cmd.Env = append(os.Environ(), envScenario+"="+name)
+	cmd := exec.Command(exe, scenarioArgPrefix+name)
+	cmd.Env = os.Environ()
 	if mutate != nil {
 		mutate(cmd)
 	}
@@ -106,9 +109,8 @@ func runProctest(t *testing.T, name string, mutate func(*exec.Cmd)) (int, string
 }
 
 // withProctestEnv appends the scenario database and key paths to the command
-// environment. It must append, not replace, because runProctest has already
-// installed the scenario selector; replacing would drop it and the child
-// would run the full test suite instead of the single scenario.
+// environment. The scenario selector is deliberately a command argument, so
+// accidentally replacing the environment cannot recursively run the suite.
 func withProctestEnv(dbPath, keyPath string, extra ...string) func(*exec.Cmd) {
 	env := append([]string{envDB + "=" + dbPath, envKey + "=" + keyPath}, extra...)
 	return func(cmd *exec.Cmd) { cmd.Env = append(cmd.Env, env...) }
@@ -275,15 +277,14 @@ func runScenario(scenario string) int {
 		for _, state := range []submission.State{
 			submission.State(contract.StatusQueued),
 			submission.State(contract.StatusRunning),
-			submission.State(contract.StatusCompleted),
 		} {
 			if _, err := s.Transition(ctx, subID, state, store.TransitionDetail{}); err != nil {
 				fmt.Fprintf(os.Stderr, "transition %s: %v\n", state, err)
 				return 1
 			}
 		}
-		result := contract.Result{Content: []contract.ContentBlock{{Type: "text", Text: "done"}}}
-		if _, err := s.CaptureResult(ctx, subID, result); err != nil {
+		result := contract.Result{Content: []contract.ContentBlock{[]byte(`{"type":"text","text":"done"}`)}}
+		if _, err := s.Complete(ctx, subID, result); err != nil {
 			fmt.Fprintf(os.Stderr, "capture: %v\n", err)
 			return 1
 		}
@@ -504,7 +505,7 @@ func TestProctestTerminalCaptureSurvivesGC(t *testing.T) {
 	if got.Status != submission.State(contract.StatusCompleted) {
 		t.Fatalf("status = %s, want completed", got.Status)
 	}
-	if got.Result == nil || got.Result.Content[0].Text != "done" {
+	if got.Result == nil || string(got.Result.Content[0]) != `{"type":"text","text":"done"}` {
 		t.Fatal("GC wiped a fresh terminal payload")
 	}
 }
@@ -528,6 +529,16 @@ func TestProctestRefreshLeasing(t *testing.T) {
 	}
 	if !owned {
 		t.Fatal("refresh lease was not released after the refresh finished")
+	}
+}
+
+func TestProctestScenarioSurvivesEnvironmentReplacement(t *testing.T) {
+	st := newScenarioState(t)
+	code, out := runProctest(t, "integrity", func(cmd *exec.Cmd) {
+		cmd.Env = []string{envDB + "=" + st.db, envKey + "=" + st.key}
+	})
+	if code != 0 {
+		t.Fatalf("scenario exited %d after environment replacement: %s", code, out)
 	}
 }
 

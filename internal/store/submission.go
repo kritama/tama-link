@@ -1,6 +1,7 @@
 package store
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -26,7 +27,7 @@ type Submission struct {
 	ArgsHash         string
 	TaskID           string
 	Status           submission.State
-	Sequence         int
+	Sequence         int64
 	Events           []contract.Event
 	Result           *contract.Result
 	ErrorCode        string
@@ -44,7 +45,8 @@ type Submission struct {
 
 // NewSubmission is the input for creating one accepted submission.
 // Arguments must be the validated canonical argument bytes; the idempotency
-// hash is computed over them. Timestamps come from the store clock.
+// hash covers the complete execution identity. Timestamps come from the store
+// clock.
 type NewSubmission struct {
 	ID               string
 	ClientRequestID  string
@@ -64,10 +66,10 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 	if sub.ID == "" || sub.ClientRequestID == "" || sub.Tool == "" {
 		return nil, errors.New("submission id, client request id, and tool are required")
 	}
-	if !json.Valid(sub.Arguments) {
-		return nil, errors.New("arguments are not valid JSON")
+	if err := validateArguments(sub.Arguments, s.limits); err != nil {
+		return nil, err
 	}
-	argsHash := hashArguments(sub.Arguments)
+	argsHash := hashInput(sub)
 
 	encryptedArgs, err := s.cipher.seal(sub.Arguments)
 	if err != nil {
@@ -242,9 +244,26 @@ func (s *Store) decryptSubmission(sub *Submission) error {
 	return nil
 }
 
-// hashArguments hashes the canonical argument bytes for the idempotency
-// index.
-func hashArguments(args json.RawMessage) string {
-	sum := sha256.Sum256(args)
+// hashInput hashes a length-delimited, versioned execution identity. Including
+// the operation and pinned descriptor prevents the same client request ID from
+// silently selecting different work with identical argument bytes.
+func hashInput(sub NewSubmission) string {
+	var input bytes.Buffer
+	input.WriteString("tama-link/idempotency/v1\x00")
+	for _, value := range [][]byte{
+		[]byte(sub.Tool),
+		[]byte(sub.Strategy),
+		[]byte(sub.DescriptorDigest),
+		[]byte(sub.ProtocolVersion),
+		[]byte(sub.AdapterVersion),
+		sub.Arguments,
+	} {
+		_ = input.WriteByte(byte(len(value) >> 24))
+		_ = input.WriteByte(byte(len(value) >> 16))
+		_ = input.WriteByte(byte(len(value) >> 8))
+		_ = input.WriteByte(byte(len(value)))
+		input.Write(value)
+	}
+	sum := sha256.Sum256(input.Bytes())
 	return hex.EncodeToString(sum[:])
 }

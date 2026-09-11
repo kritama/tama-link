@@ -10,6 +10,9 @@ import (
 // acquired when it does not exist, is expired, or is already held by owner.
 // It reports whether owner holds the lease after the call.
 func (s *Store) ClaimLease(ctx context.Context, name, owner string, ttl time.Duration) (bool, error) {
+	if err := validateLease(name, owner, ttl); err != nil {
+		return false, err
+	}
 	nowMs := s.now().UnixMilli()
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO leases (name, owner, expires_at) VALUES (?, ?, ?)
@@ -28,10 +31,13 @@ func (s *Store) ClaimLease(ctx context.Context, name, owner string, ttl time.Dur
 // RenewLease extends the named lease. It reports whether owner holds the
 // lease after the call.
 func (s *Store) RenewLease(ctx context.Context, name, owner string, ttl time.Duration) (bool, error) {
+	if err := validateLease(name, owner, ttl); err != nil {
+		return false, err
+	}
 	nowMs := s.now().UnixMilli()
 	res, err := s.db.ExecContext(ctx,
-		"UPDATE leases SET expires_at = ? WHERE name = ? AND owner = ?",
-		nowMs+ttl.Milliseconds(), name, owner)
+		"UPDATE leases SET expires_at = ? WHERE name = ? AND owner = ? AND expires_at > ?",
+		nowMs+ttl.Milliseconds(), name, owner, nowMs)
 	if err != nil {
 		return false, fmt.Errorf("renew lease %q: %w", name, err)
 	}
@@ -60,7 +66,11 @@ func (s *Store) ReleaseLease(ctx context.Context, name, owner string) error {
 
 // ListLeases returns the named leases held by owner.
 func (s *Store) ListLeases(ctx context.Context, owner string) (map[string]time.Time, error) {
-	rows, err := s.db.QueryContext(ctx, "SELECT name, expires_at FROM leases WHERE owner = ?", owner)
+	if owner == "" {
+		return nil, fmt.Errorf("lease owner is required")
+	}
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT name, expires_at FROM leases WHERE owner = ? AND expires_at > ?", owner, s.now().UnixMilli())
 	if err != nil {
 		return nil, fmt.Errorf("list leases: %w", err)
 	}
@@ -79,4 +89,17 @@ func (s *Store) ListLeases(ctx context.Context, owner string) (map[string]time.T
 		return nil, fmt.Errorf("list leases: %w", err)
 	}
 	return leases, nil
+}
+
+func validateLease(name, owner string, ttl time.Duration) error {
+	if name == "" {
+		return fmt.Errorf("lease name is required")
+	}
+	if owner == "" {
+		return fmt.Errorf("lease owner is required")
+	}
+	if ttl <= 0 {
+		return fmt.Errorf("lease TTL must be positive")
+	}
+	return nil
 }

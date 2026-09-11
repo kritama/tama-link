@@ -59,6 +59,39 @@ func TestLeaseExpiresAfterTTL(t *testing.T) {
 	}
 }
 
+func TestExpiredLeaseCannotBeRenewed(t *testing.T) {
+	t.Parallel()
+
+	keys, clk := newMemKeys(), newClock()
+	s, _ := openTestStore(t, keys, clk)
+	ctx := context.Background()
+	if owned, _ := s.ClaimLease(ctx, "worker", "owner-a", time.Minute); !owned {
+		t.Fatal("first claim failed")
+	}
+	clk.Advance(2 * time.Minute)
+	if renewed, err := s.RenewLease(ctx, "worker", "owner-a", time.Minute); err != nil || renewed {
+		t.Fatalf("renew expired lease = %v, %v; want false, nil", renewed, err)
+	}
+}
+
+func TestLeaseValidatesIdentityAndTTL(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestStore(t, newMemKeys(), newClock())
+	for _, input := range []struct {
+		name, owner string
+		ttl         time.Duration
+	}{
+		{"", "owner", time.Minute},
+		{"worker", "", time.Minute},
+		{"worker", "owner", 0},
+	} {
+		if _, err := s.ClaimLease(context.Background(), input.name, input.owner, input.ttl); err == nil {
+			t.Fatalf("ClaimLease(%q, %q, %s) succeeded", input.name, input.owner, input.ttl)
+		}
+	}
+}
+
 func TestLeaseRenewAndRelease(t *testing.T) {
 	t.Parallel()
 

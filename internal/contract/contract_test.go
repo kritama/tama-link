@@ -136,7 +136,7 @@ func TestAwaitOutputCompletedMatchesSpec(t *testing.T) {
 		Events:       []Event{},
 		Result: &Result{
 			IsError:           false,
-			Content:           []ContentBlock{{Type: "text", Text: "Saved."}},
+			Content:           []ContentBlock{json.RawMessage(`{"type":"text","text":"Saved."}`)},
 			StructuredContent: json.RawMessage(`{"saved":true}`),
 		},
 		CompletedAt: &completedAt,
@@ -154,12 +154,13 @@ func TestResultRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	fixtures := map[string]string{
-		"text_with_annotations_and_meta": `{"is_error":false,"content":[{"type":"text","text":"Saved.","annotations":[{"audience":["assistant"],"priority":0.5}],"_meta":{"trace":"t-1"}}],"structured_content":{"ok":true},"_meta":{"safe":"yes"}}`,
+		"text_with_annotations_and_meta": `{"is_error":false,"content":[{"type":"text","text":"Saved.","annotations":{"audience":["assistant"],"priority":0.5,"lastModified":"2026-09-11T12:00:00Z"},"_meta":{"trace":"t-1"}}],"structured_content":{"ok":true},"_meta":{"safe":"yes"}}`,
 		"image":                          `{"is_error":false,"content":[{"type":"image","data":"aGVsbG8=","mimeType":"image/png"}]}`,
 		"audio":                          `{"is_error":false,"content":[{"type":"audio","data":"aGVsbG8=","mimeType":"audio/wav"}]}`,
-		"resource_link":                  `{"is_error":false,"content":[{"type":"resource_link","uri":"file:///tmp/x","name":"x","title":"X","description":"d","mimeType":"text/plain","annotations":[{"priority":1}]}]}`,
-		"embedded_resource":              `{"is_error":false,"content":[{"type":"embedded_resource","resource":{"uri":"file:///tmp/x","mimeType":"text/plain","text":"body"},"annotations":[{"audience":["user"]}]}]}`,
-		"embedded_resource_blob":         `{"is_error":false,"content":[{"type":"embedded_resource","resource":{"uri":"file:///tmp/x","blob":"aGVsbG8="}}]}`,
+		"resource_link":                  `{"is_error":false,"content":[{"type":"resource_link","uri":"file:///tmp/x","name":"x","title":"X","description":"d","mimeType":"text/plain","size":4,"icons":[{"src":"https://example.com/x.png","mimeType":"image/png"}],"annotations":{"priority":1}}]}`,
+		"embedded_resource":              `{"is_error":false,"content":[{"type":"resource","resource":{"uri":"file:///tmp/x","mimeType":"text/plain","text":"body","_meta":{"etag":"v1"}},"annotations":{"audience":["user"]}}]}`,
+		"embedded_resource_blob":         `{"is_error":false,"content":[{"type":"resource","resource":{"uri":"file:///tmp/x","blob":"aGVsbG8="}}]}`,
+		"unknown_extension_block":        `{"is_error":false,"content":[{"type":"future_content","precise":9007199254740993,"extension":{"nested":true}}]}`,
 		"array_structured_is_error":      `{"is_error":true,"content":[],"structured_content":[1,2,3]}`,
 		"primitive_structured":           `{"is_error":false,"content":[],"structured_content":"done"}`,
 		"null_structured":                `{"is_error":false,"content":[],"structured_content":null}`,

@@ -30,8 +30,11 @@ var (
 	// closed and never falls back to plaintext or a replacement key (D14).
 	ErrStateUnavailable = errors.New("state unavailable")
 	// ErrIdempotencyConflict reports that client_request_id was reused with
-	// different canonical arguments.
+	// different canonical input.
 	ErrIdempotencyConflict = errors.New("idempotency conflict")
+	// ErrConcurrentUpdate reports that another process changed a submission
+	// after it was read and the caller must reload before deciding what to do.
+	ErrConcurrentUpdate = errors.New("concurrent submission update")
 	// ErrResultTooLarge reports that a terminal result exceeds the profile
 	// result bound. The result is never truncated or stored.
 	ErrResultTooLarge = errors.New("result too large")

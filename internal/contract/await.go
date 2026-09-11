@@ -37,39 +37,11 @@ type Event struct {
 	Message      string    `json:"message,omitempty"`
 }
 
-// Annotation is a reviewed content annotation carried with a content block.
-type Annotation struct {
-	Audience []string `json:"audience,omitempty"`
-	Priority *float64 `json:"priority,omitempty"`
-}
-
-// EmbeddedResource is the resource payload of an embedded_resource content
-// block. Text and blob are mutually exclusive upstream.
-type EmbeddedResource struct {
-	URI      string `json:"uri"`
-	MimeType string `json:"mimeType,omitempty"`
-	Text     string `json:"text,omitempty"`
-	Blob     string `json:"blob,omitempty"`
-}
-
-// ContentBlock is the lossless normalized form of one MCP tool result
-// content block. Fields apply per block type: text to Text; data and mimeType
-// to image and audio; uri, name, title, description, and mimeType to
-// resource_link; resource to embedded_resource. Unknown block types keep
-// their type and round-trip their preserved fields.
-type ContentBlock struct {
-	Type        string            `json:"type"`
-	Text        string            `json:"text,omitempty"`
-	Data        string            `json:"data,omitempty"`
-	MimeType    string            `json:"mimeType,omitempty"`
-	URI         string            `json:"uri,omitempty"`
-	Name        string            `json:"name,omitempty"`
-	Title       string            `json:"title,omitempty"`
-	Description string            `json:"description,omitempty"`
-	Resource    *EmbeddedResource `json:"resource,omitempty"`
-	Annotations []Annotation      `json:"annotations,omitempty"`
-	Meta        map[string]any    `json:"_meta,omitempty"`
-}
+// ContentBlock holds one validated MCP content block as raw JSON. Keeping the
+// complete block avoids losing fields added by a newer upstream MCP revision,
+// including extension metadata. Adapters validate the block before it crosses
+// this boundary; the store preserves the accepted bytes without projection.
+type ContentBlock = json.RawMessage
 
 // Result is the captured terminal result of a completed operation. It is a
 // lossless normalized MCP CallToolResult: structured content may be any valid

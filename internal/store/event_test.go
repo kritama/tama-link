@@ -135,7 +135,61 @@ func TestAppendEventsHonoursRetention(t *testing.T) {
 	}
 }
 
-func TestCaptureResultRoundTrip(t *testing.T) {
+func TestAppendEventsKeepsSequenceAfterTrimming(t *testing.T) {
+	keys, clk := newMemKeys(), newClock()
+	lim := limits.Default()
+	lim.MaxEvents = 1
+	s, err := store.Open(context.Background(), t.TempDir()+"/state.db", keys, store.Config{Limits: lim, Now: clk.Now})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	if _, err := s.AppendEvents(context.Background(), "sub-1", []contract.Event{
+		testEvent("sub-1", 1), testEvent("sub-1", 2),
+	}); err != nil {
+		t.Fatalf("AppendEvents: %v", err)
+	}
+	if _, err := s.AppendEvents(context.Background(), "sub-1", []contract.Event{testEvent("sub-1", 2)}); err == nil {
+		t.Fatal("trimmed sequence accepted again")
+	}
+}
+
+func TestAppendEventsRejectsOversizedAndTerminalEvents(t *testing.T) {
+	keys, clk := newMemKeys(), newClock()
+	lim := limits.Default()
+	lim.EventBytes = 128
+	lim.EventsBytes = 128
+	s, err := store.Open(context.Background(), t.TempDir()+"/state.db", keys, store.Config{Limits: lim, Now: clk.Now})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	ctx := context.Background()
+	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	oversized := testEvent("sub-1", 1)
+	oversized.Message = strings.Repeat("x", 256)
+	if _, err := s.AppendEvents(ctx, "sub-1", []contract.Event{oversized}); err == nil {
+		t.Fatal("oversized event accepted")
+	}
+	for _, state := range []submission.State{contract.StatusQueued, contract.StatusRunning} {
+		if _, err := s.Transition(ctx, "sub-1", state, store.TransitionDetail{}); err != nil {
+			t.Fatalf("transition to %s: %v", state, err)
+		}
+	}
+	if _, err := s.Complete(ctx, "sub-1", contract.Result{Content: []contract.ContentBlock{[]byte(`{"type":"text","text":"done"}`)}}); err != nil {
+		t.Fatalf("Complete: %v", err)
+	}
+	if _, err := s.AppendEvents(ctx, "sub-1", []contract.Event{testEvent("sub-1", 1)}); err == nil {
+		t.Fatal("event appended after terminal completion")
+	}
+}
+
+func TestCompleteRoundTrip(t *testing.T) {
 	t.Parallel()
 
 	keys, clk := newMemKeys(), newClock()
@@ -148,7 +202,6 @@ func TestCaptureResultRoundTrip(t *testing.T) {
 	for _, state := range []submission.State{
 		submission.State(contract.StatusQueued),
 		submission.State(contract.StatusRunning),
-		submission.State(contract.StatusCompleted),
 	} {
 		if _, err := s.Transition(ctx, "sub-1", state, store.TransitionDetail{}); err != nil {
 			t.Fatalf("transition to %s: %v", state, err)
@@ -156,24 +209,24 @@ func TestCaptureResultRoundTrip(t *testing.T) {
 	}
 
 	result := contract.Result{
-		Content:           []contract.ContentBlock{{Type: "text", Text: "done"}},
+		Content:           []contract.ContentBlock{[]byte(`{"type":"text","text":"done"}`)},
 		StructuredContent: []byte(`{"ok":true}`),
 	}
-	if _, err := s.CaptureResult(ctx, "sub-1", result); err != nil {
-		t.Fatalf("CaptureResult: %v", err)
+	if _, err := s.Complete(ctx, "sub-1", result); err != nil {
+		t.Fatalf("Complete: %v", err)
 	}
 
 	got, err := s.GetSubmission(ctx, "sub-1")
 	if err != nil {
 		t.Fatalf("GetSubmission: %v", err)
 	}
-	if got.Result == nil || got.Result.Content[0].Text != "done" ||
+	if got.Result == nil || string(got.Result.Content[0]) != `{"type":"text","text":"done"}` ||
 		string(got.Result.StructuredContent) != `{"ok":true}` {
 		t.Fatalf("result = %+v, want round-trip through the encrypted blob", got.Result)
 	}
 }
 
-func TestCaptureResultRequiresTerminalState(t *testing.T) {
+func TestCompleteRequiresRunningState(t *testing.T) {
 	t.Parallel()
 
 	keys, clk := newMemKeys(), newClock()
@@ -183,13 +236,13 @@ func TestCaptureResultRequiresTerminalState(t *testing.T) {
 	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
-	result := contract.Result{Content: []contract.ContentBlock{{Type: "text", Text: "early"}}}
-	if _, err := s.CaptureResult(ctx, "sub-1", result); err == nil {
-		t.Fatal("result captured in a non-terminal state, want error")
+	result := contract.Result{Content: []contract.ContentBlock{[]byte(`{"type":"text","text":"early"}`)}}
+	if _, err := s.Complete(ctx, "sub-1", result); err == nil {
+		t.Fatal("result captured before running, want error")
 	}
 }
 
-func TestCaptureResultEnforcesSizeBound(t *testing.T) {
+func TestCompleteEnforcesSizeBound(t *testing.T) {
 	t.Parallel()
 
 	keys, clk := newMemKeys(), newClock()
@@ -210,16 +263,22 @@ func TestCaptureResultEnforcesSizeBound(t *testing.T) {
 	for _, state := range []submission.State{
 		submission.State(contract.StatusQueued),
 		submission.State(contract.StatusRunning),
-		submission.State(contract.StatusCompleted),
 	} {
 		if _, err := s.Transition(ctx, "sub-1", state, store.TransitionDetail{}); err != nil {
 			t.Fatalf("transition to %s: %v", state, err)
 		}
 	}
 
-	big := contract.Result{Content: []contract.ContentBlock{{Type: "text", Text: strings.Repeat("x", 128)}}}
-	_, err = s.CaptureResult(ctx, "sub-1", big)
+	big := contract.Result{Content: []contract.ContentBlock{[]byte(`{"type":"text","text":"` + strings.Repeat("x", 128) + `"}`)}}
+	_, err = s.Complete(ctx, "sub-1", big)
 	if !errors.Is(err, store.ErrResultTooLarge) {
 		t.Fatalf("oversized result = %v, want ErrResultTooLarge", err)
+	}
+	got, getErr := s.GetSubmission(ctx, "sub-1")
+	if getErr != nil {
+		t.Fatalf("GetSubmission: %v", getErr)
+	}
+	if got.Status != contract.StatusFailed || got.ErrorCode != string(contract.CodeResultTooLarge) || got.Result != nil {
+		t.Fatalf("oversized terminal state = %+v, want failed result_too_large without result", got)
 	}
 }

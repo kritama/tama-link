@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"strconv"
 )
 
 // schemaVersion is the database schema this build reads and writes.
@@ -72,31 +73,51 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 	if _, err := s.db.ExecContext(ctx, createSchema); err != nil {
 		return fmt.Errorf("create schema: %w", err)
 	}
-
-	created, err := s.metaSet(ctx, metaSchemaVersion, fmt.Sprint(schemaVersion))
+	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return err
+		return fmt.Errorf("acquire migration connection: %w", err)
 	}
-	if created {
-		if _, err := s.metaSet(ctx, metaEncryptionFormat, fmt.Sprint(encryptionFormat)); err != nil {
+	defer func() { _ = conn.Close() }()
+	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
+		return fmt.Errorf("begin migration: %w", err)
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
+		}
+	}()
+
+	var schema string
+	err = conn.QueryRowContext(ctx,
+		"SELECT value FROM meta WHERE key = ?", metaSchemaVersion,
+	).Scan(&schema)
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		if err := s.initializeDatabase(ctx, conn, keys); err != nil {
 			return err
 		}
-		return s.initKey(ctx, keys)
+	case err != nil:
+		return fmt.Errorf("read metadata %q: %w", metaSchemaVersion, err)
+	default:
+		if err := s.readMeta(ctx, conn, schema); err != nil {
+			return err
+		}
 	}
+	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
+		return fmt.Errorf("commit migration: %w", err)
+	}
+	committed = true
 
-	if err := s.readMeta(ctx); err != nil {
-		return err
-	}
 	if s.schema != schemaVersion {
 		return fmt.Errorf("%w: database has %d", ErrUnsupportedSchema, s.schema)
 	}
-
 	key, err := keys.GetStateKey(s.keyID)
 	if err != nil {
 		// Fail closed (D14): a missing key or an unavailable backend both make
 		// the encrypted state unreadable. Never generate a replacement key or
 		// fall back to plaintext.
-		return fmt.Errorf("%w: key %q: %v", ErrStateUnavailable, s.keyID, err)
+		return fmt.Errorf("%w: key %q: %w", ErrStateUnavailable, s.keyID, err)
 	}
 	s.cipher, err = newStateCipher(key)
 	if err != nil {
@@ -105,15 +126,16 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 	return nil
 }
 
-// initKey creates the random key for a brand-new database. If the process
-// dies before the metadata commit, the next open simply creates another key;
-// the first database never held data, so the orphaned key is harmless.
-func (s *Store) initKey(ctx context.Context, keys KeyProvider) error {
+// initializeDatabase creates the random key and all metadata while holding the
+// database's write lock. Metadata is committed together by migrate; a failed
+// key creation leaves no partial database identity. If commit fails after the
+// external key write, the unused key is harmless and the next open can retry.
+func (s *Store) initializeDatabase(ctx context.Context, conn *sql.Conn, keys KeyProvider) error {
 	keyID, key, err := keys.CreateStateKey()
 	if err != nil {
 		// Fail closed (D14): without the secure backend the initial key cannot
 		// be established, so the profile state cannot be secured.
-		return fmt.Errorf("%w: create state key: %v", ErrStateUnavailable, err)
+		return fmt.Errorf("%w: create state key: %w", ErrStateUnavailable, err)
 	}
 	if keyID == "" || len(key) != 32 {
 		return fmt.Errorf("state key %q must be 32 bytes", keyID)
@@ -126,39 +148,23 @@ func (s *Store) initKey(ctx context.Context, keys KeyProvider) error {
 		return err
 	}
 	s.cipher = c
-	if _, err := s.metaSet(ctx, metaStateKeyID, keyID); err != nil {
-		return err
+	metadata := []struct{ key, value string }{
+		{metaSchemaVersion, strconv.Itoa(schemaVersion)},
+		{metaEncryptionFormat, strconv.Itoa(encryptionFormat)},
+		{metaStateKeyID, keyID},
+	}
+	for _, item := range metadata {
+		if _, err := conn.ExecContext(ctx, "INSERT INTO meta (key, value) VALUES (?, ?)", item.key, item.value); err != nil {
+			return fmt.Errorf("write metadata %q: %w", item.key, err)
+		}
 	}
 	s.keyID = keyID
+	s.schema = schemaVersion
 	return nil
 }
 
-// metaSet writes a metadata row unless it already exists. The conditional
-// insert is a single statement so concurrent first opens resolve safely. It
-// reports whether the row was newly created.
-func (s *Store) metaSet(ctx context.Context, key, value string) (bool, error) {
-	res, err := s.db.ExecContext(ctx, `
-		INSERT INTO meta (key, value)
-		SELECT ?, ? WHERE NOT EXISTS (SELECT 1 FROM meta WHERE key = ?)`, key, value, key)
-	if err != nil {
-		return false, fmt.Errorf("write metadata %q: %w", key, err)
-	}
-	affected, err := res.RowsAffected()
-	if err != nil {
-		return false, fmt.Errorf("write metadata %q: %w", key, err)
-	}
-	return affected == 1, nil
-}
-
 // readMeta loads the version and key identifier from existing metadata.
-func (s *Store) readMeta(ctx context.Context) error {
-	var schema string
-	if err := s.db.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = ?", metaSchemaVersion).Scan(&schema); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("metadata %q is missing", metaSchemaVersion)
-		}
-		return fmt.Errorf("read metadata %q: %w", metaSchemaVersion, err)
-	}
+func (s *Store) readMeta(ctx context.Context, conn *sql.Conn, schema string) error {
 	version, err := parseSchemaVersion(schema)
 	if err != nil {
 		return err
@@ -166,13 +172,24 @@ func (s *Store) readMeta(ctx context.Context) error {
 	s.schema = version
 
 	var keyID string
-	if err := s.db.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = ?", metaStateKeyID).Scan(&keyID); err != nil {
+	if err := conn.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = ?", metaStateKeyID).Scan(&keyID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return fmt.Errorf("metadata %q is missing", metaStateKeyID)
 		}
 		return fmt.Errorf("read metadata %q: %w", metaStateKeyID, err)
 	}
 	s.keyID = keyID
+
+	var format string
+	if err := conn.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = ?", metaEncryptionFormat).Scan(&format); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("metadata %q is missing", metaEncryptionFormat)
+		}
+		return fmt.Errorf("read metadata %q: %w", metaEncryptionFormat, err)
+	}
+	if format != strconv.Itoa(encryptionFormat) {
+		return fmt.Errorf("unsupported encryption format %q", format)
+	}
 	return nil
 }
 

@@ -205,10 +205,18 @@ func TestOpenFailsClosedWhenBackendDown(t *testing.T) {
 	t.Parallel()
 
 	// A brand-new profile cannot establish its key while the backend is down.
-	if _, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"),
+	newPath := filepath.Join(t.TempDir(), "state.db")
+	if _, err := store.Open(context.Background(), newPath,
 		downKeys{}, store.Config{Limits: limits.Default()}); !errors.Is(err, store.ErrStateUnavailable) {
 		t.Fatalf("Open new DB with backend down = %v, want ErrStateUnavailable", err)
 	}
+	// The failed first open must not leave partial metadata that prevents a
+	// later open after the credential service recovers.
+	recovered, err := store.Open(context.Background(), newPath, newMemKeys(), store.Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("Open after backend recovery: %v", err)
+	}
+	_ = recovered.Close()
 
 	// An existing profile with data also fails closed when the backend is down,
 	// rather than falling back to plaintext or a replacement key.

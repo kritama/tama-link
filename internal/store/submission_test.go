@@ -3,9 +3,11 @@ package store_test
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 
 	"github.com/kritama/tama-link/internal/contract"
+	"github.com/kritama/tama-link/internal/limits"
 	"github.com/kritama/tama-link/internal/store"
 	"github.com/kritama/tama-link/internal/submission"
 )
@@ -83,6 +85,21 @@ func TestCreateIdempotentConflict(t *testing.T) {
 	}
 }
 
+func TestCreateIdempotencyIncludesOperationIdentity(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestStore(t, newMemKeys(), newClock())
+	ctx := context.Background()
+	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	conflict := testSubmission("sub-2", "req-1")
+	conflict.Tool = "review"
+	if _, err := s.CreateSubmission(ctx, conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
+		t.Fatalf("different tool retry = %v, want ErrIdempotencyConflict", err)
+	}
+}
+
 func TestCreateValidatesInput(t *testing.T) {
 	t.Parallel()
 
@@ -110,6 +127,31 @@ func TestCreateValidatesInput(t *testing.T) {
 	invalidJSON.Arguments = []byte(`{"message":`)
 	if _, err := s.CreateSubmission(ctx, invalidJSON); err == nil {
 		t.Fatal("invalid JSON arguments accepted, want error")
+	}
+}
+
+func TestCreateEnforcesArgumentBounds(t *testing.T) {
+	t.Parallel()
+
+	lim := limits.Default()
+	lim.ArgumentsBytes = 16
+	lim.ArgumentDepth = 2
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := store.Open(context.Background(), path, newMemKeys(), store.Config{Limits: lim})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	tooLarge := testSubmission("sub-large", "req-large")
+	tooLarge.Arguments = []byte(`{"message":"this is too large"}`)
+	if _, err := s.CreateSubmission(context.Background(), tooLarge); err == nil {
+		t.Fatal("oversized arguments accepted")
+	}
+	tooDeep := testSubmission("sub-deep", "req-deep")
+	tooDeep.Arguments = []byte(`{"a":{"b":{"c":1}}}`)
+	if _, err := s.CreateSubmission(context.Background(), tooDeep); err == nil {
+		t.Fatal("overly deep arguments accepted")
 	}
 }
 
@@ -141,7 +183,7 @@ func TestTransitionLifecycle(t *testing.T) {
 		t.Fatalf("queued -> running: %v", err)
 	}
 
-	terminal, err := s.Transition(ctx, "sub-1", submission.State(contract.StatusCompleted), store.TransitionDetail{})
+	terminal, err := s.Complete(ctx, "sub-1", contract.Result{Content: []contract.ContentBlock{[]byte(`{"type":"text","text":"done"}`)}})
 	if err != nil {
 		t.Fatalf("running -> completed: %v", err)
 	}
@@ -204,11 +246,14 @@ func TestTerminalStatesAreAbsorbing(t *testing.T) {
 	for _, state := range []submission.State{
 		submission.State(contract.StatusQueued),
 		submission.State(contract.StatusRunning),
-		submission.State(contract.StatusFailed),
 	} {
 		if _, err := s.Transition(ctx, "sub-1", state, store.TransitionDetail{}); err != nil {
 			t.Fatalf("transition to %s: %v", state, err)
 		}
+	}
+	failure := contract.NewError(contract.CodeUpstreamExecutionFailed, "operation failed")
+	if _, err := s.Transition(ctx, "sub-1", contract.StatusFailed, store.TransitionDetail{Error: &failure}); err != nil {
+		t.Fatalf("transition to failed: %v", err)
 	}
 
 	if _, err := s.Transition(ctx, "sub-1", submission.State(contract.StatusCancelled), store.TransitionDetail{}); err == nil {
