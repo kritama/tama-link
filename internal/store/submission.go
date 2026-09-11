@@ -32,6 +32,7 @@ type Submission struct {
 	Result           *contract.Result
 	ErrorCode        string
 	ErrorMessage     string
+	ErrorRetryable   bool
 	ProtocolVersion  string
 	AdapterVersion   string
 	CreatedAt        time.Time
@@ -71,7 +72,7 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 	}
 	argsHash := hashInput(sub)
 
-	encryptedArgs, err := s.cipher.seal(sub.Arguments)
+	encryptedArgs, err := s.cipher.seal(sub.Arguments, sub.ID, "arguments")
 	if err != nil {
 		return nil, fmt.Errorf("seal arguments: %w", err)
 	}
@@ -174,13 +175,14 @@ func scanSubmission(row *sql.Row) (*Submission, error) {
 	var taskID sql.NullString
 	var status string
 	var errorCode, errorMessage sql.NullString
+	var errorRetryable int
 	var completedAt sql.NullInt64
 	var createdMs, updatedMs int64
 
 	err := row.Scan(
 		&sub.ID, &sub.ClientRequestID, &sub.Tool, &sub.Strategy, &sub.DescriptorDigest,
 		&sub.ArgsHash, &argsEnc, &taskID, &status, &sub.Sequence, &eventsEnc, &resultEnc,
-		&errorCode, &errorMessage, &sub.ProtocolVersion, &sub.AdapterVersion,
+		&errorCode, &errorMessage, &errorRetryable, &sub.ProtocolVersion, &sub.AdapterVersion,
 		&createdMs, &updatedMs, &completedAt,
 	)
 	if err != nil {
@@ -202,6 +204,7 @@ func scanSubmission(row *sql.Row) (*Submission, error) {
 	if errorMessage.Valid {
 		sub.ErrorMessage = errorMessage.String
 	}
+	sub.ErrorRetryable = errorRetryable != 0
 	if completedAt.Valid {
 		completed := time.UnixMilli(completedAt.Int64).UTC()
 		sub.CompletedAt = &completed
@@ -213,14 +216,14 @@ func scanSubmission(row *sql.Row) (*Submission, error) {
 // blobs. Empty blobs stay absent.
 func (s *Store) decryptSubmission(sub *Submission) error {
 	if len(sub.encArgs) > 0 {
-		args, err := s.cipher.open(sub.encArgs)
+		args, err := s.cipher.open(sub.encArgs, sub.ID, "arguments")
 		if err != nil {
 			return fmt.Errorf("submission %s arguments: %w", sub.ID, err)
 		}
 		sub.Arguments = args
 	}
 	if len(sub.encEvents) > 0 {
-		events, err := s.cipher.open(sub.encEvents)
+		events, err := s.cipher.open(sub.encEvents, sub.ID, "events")
 		if err != nil {
 			return fmt.Errorf("submission %s events: %w", sub.ID, err)
 		}
@@ -231,7 +234,7 @@ func (s *Store) decryptSubmission(sub *Submission) error {
 		sub.Events = decoded
 	}
 	if len(sub.encResult) > 0 {
-		result, err := s.cipher.open(sub.encResult)
+		result, err := s.cipher.open(sub.encResult, sub.ID, "result")
 		if err != nil {
 			return fmt.Errorf("submission %s result: %w", sub.ID, err)
 		}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/kritama/tama-link/internal/contract"
@@ -294,5 +295,54 @@ func TestTransitionStoresTerminalError(t *testing.T) {
 	}
 	if got.ErrorCode != string(contract.CodeUpstreamUnavailable) || got.ErrorMessage != "upstream is unreachable" {
 		t.Fatalf("terminal error = %q / %q", got.ErrorCode, got.ErrorMessage)
+	}
+	if !got.ErrorRetryable {
+		t.Fatal("terminal retryability was not persisted")
+	}
+}
+
+func TestConcurrentTransitionHasSingleWinner(t *testing.T) {
+	keys := newMemKeys()
+	path := filepath.Join(t.TempDir(), "state.db")
+	first, err := store.Open(context.Background(), path, keys, store.Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("Open first: %v", err)
+	}
+	t.Cleanup(func() { _ = first.Close() })
+	second, err := store.Open(context.Background(), path, keys, store.Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("Open second: %v", err)
+	}
+	t.Cleanup(func() { _ = second.Close() })
+	if _, err := first.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+
+	start := make(chan struct{})
+	errs := make(chan error, 2)
+	var ready sync.WaitGroup
+	ready.Add(2)
+	for _, s := range []*store.Store{first, second} {
+		go func(s *store.Store) {
+			ready.Done()
+			<-start
+			_, err := s.Transition(context.Background(), "sub-1", contract.StatusQueued, store.TransitionDetail{})
+			errs <- err
+		}(s)
+	}
+	ready.Wait()
+	close(start)
+	successes := 0
+	for range 2 {
+		if err := <-errs; err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful transitions = %d, want 1", successes)
+	}
+	got, err := first.GetSubmission(context.Background(), "sub-1")
+	if err != nil || got.Status != contract.StatusQueued {
+		t.Fatalf("final submission = %+v, %v", got, err)
 	}
 }

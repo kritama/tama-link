@@ -42,6 +42,9 @@ func Load(name Name, configDir string) (*Profile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read profile %s: %w", path, err)
 	}
+	if err := rejectDuplicateKeys(data); err != nil {
+		return nil, fmt.Errorf("decode profile %s: %w", path, err)
+	}
 
 	var p Profile
 	dec := json.NewDecoder(bytes.NewReader(data))
@@ -57,4 +60,52 @@ func Load(name Name, configDir string) (*Profile, error) {
 		return nil, fmt.Errorf("profile %q: %w", name, err)
 	}
 	return &p, nil
+}
+
+func rejectDuplicateKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	var walk func() error
+	walk = func() error {
+		token, err := dec.Token()
+		if err != nil {
+			return err
+		}
+		delim, ok := token.(json.Delim)
+		if !ok {
+			return nil
+		}
+		switch delim {
+		case '{':
+			seen := make(map[string]bool)
+			for dec.More() {
+				keyToken, err := dec.Token()
+				if err != nil {
+					return err
+				}
+				key, ok := keyToken.(string)
+				if !ok {
+					return fmt.Errorf("object key is not a string")
+				}
+				if seen[key] {
+					return fmt.Errorf("duplicate object key %q", key)
+				}
+				seen[key] = true
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+		case '[':
+			for dec.More() {
+				if err := walk(); err != nil {
+					return err
+				}
+			}
+		default:
+			return fmt.Errorf("unexpected JSON delimiter %q", delim)
+		}
+		_, err = dec.Token()
+		return err
+	}
+	return walk()
 }

@@ -52,7 +52,7 @@ type Result struct {
 	IsError           bool            `json:"is_error"`
 	Content           []ContentBlock  `json:"content"`
 	StructuredContent json.RawMessage `json:"structured_content,omitempty"`
-	Meta              map[string]any  `json:"_meta,omitempty"`
+	Meta              json.RawMessage `json:"_meta,omitempty"`
 }
 
 // ErrorOutput is the request-level failure envelope for both tools. It

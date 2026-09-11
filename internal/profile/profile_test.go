@@ -81,6 +81,30 @@ func TestLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestStateLocationsRemainProfileIsolated(t *testing.T) {
+	t.Parallel()
+
+	alpha := validProfile()
+	alpha.Name = Name("alpha")
+	beta := validProfile()
+	beta.Name = Name("beta")
+	root := t.TempDir()
+	alphaPath, err := DatabasePath(root, alpha)
+	if err != nil {
+		t.Fatalf("DatabasePath alpha: %v", err)
+	}
+	betaPath, err := DatabasePath(root, beta)
+	if err != nil {
+		t.Fatalf("DatabasePath beta: %v", err)
+	}
+	if alphaPath == betaPath {
+		t.Fatalf("database paths collided: %s", alphaPath)
+	}
+	if CredentialNamespace(alpha) == CredentialNamespace(beta) {
+		t.Fatal("credential namespaces collided")
+	}
+}
+
 func TestLoadPinnedLimits(t *testing.T) {
 	t.Parallel()
 
@@ -169,6 +193,7 @@ func TestLoadRejectsMalformedDocuments(t *testing.T) {
 		{"trailing data", `{"version":1} {"version":1}`, "trailing data"},
 		{"unknown field", `{"version":1,"unexpected":true}`, "unknown field"},
 		{"invalid JSON", `{`, "decode profile"},
+		{"duplicate profile key", `{"version":1,"version":1}`, "duplicate object key"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -204,7 +229,10 @@ func TestValidate(t *testing.T) {
 		{"origin with credentials", func(p *Profile) { p.Origin = "https://user@tama.example" }},
 		{"endpoint host mismatch", func(p *Profile) { p.Endpoint = "https://other.example/mcp/app" }},
 		{"endpoint with credentials", func(p *Profile) { p.Endpoint = "https://user@tama.example/mcp/app" }},
+		{"endpoint with query", func(p *Profile) { p.Endpoint = "https://tama.example/mcp/app?other=true" }},
+		{"endpoint with fragment", func(p *Profile) { p.Endpoint = "https://tama.example/mcp/app#other" }},
 		{"issuer not https", func(p *Profile) { p.Issuer = "http://auth.example" }},
+		{"issuer with query", func(p *Profile) { p.Issuer = "https://auth.example/issuer?other=true" }},
 		{"bounds reversed", func(p *Profile) {
 			p.Bounds = Bounds{ProtocolMin: "2025-11-25", ProtocolMax: "2025-03-26"}
 		}},

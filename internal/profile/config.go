@@ -168,8 +168,8 @@ func checkReference(field, ref string) error {
 	return nil
 }
 
-// checkHTTPS parses value and requires an https URL without credentials.
-// When allowPath is false, path, query, and fragment must be empty.
+// checkHTTPS parses value and requires an https URL without credentials,
+// query, or fragment. When allowPath is false, the path must also be empty.
 func checkHTTPS(field, value string, allowPath bool) (*url.URL, error) {
 	parsed, err := url.Parse(value)
 	if err != nil {
@@ -184,8 +184,11 @@ func checkHTTPS(field, value string, allowPath bool) (*url.URL, error) {
 	if parsed.Hostname() == "" {
 		return nil, fmt.Errorf("%s %q has no host", field, value)
 	}
-	if !allowPath && (parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "") {
-		return nil, fmt.Errorf("%s %q must be an origin without path, query, or fragment", field, value)
+	if parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, fmt.Errorf("%s %q must not contain a query or fragment", field, value)
+	}
+	if !allowPath && parsed.Path != "" {
+		return nil, fmt.Errorf("%s %q must be an origin without a path", field, value)
 	}
 	return parsed, nil
 }

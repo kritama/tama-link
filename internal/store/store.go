@@ -35,6 +35,9 @@ var (
 	// ErrConcurrentUpdate reports that another process changed a submission
 	// after it was read and the caller must reload before deciding what to do.
 	ErrConcurrentUpdate = errors.New("concurrent submission update")
+	// ErrLeaseNotOwned reports that a lease-guarded write no longer belongs to
+	// the caller or its lease has expired.
+	ErrLeaseNotOwned = errors.New("submission lease not owned")
 	// ErrResultTooLarge reports that a terminal result exceeds the profile
 	// result bound. The result is never truncated or stored.
 	ErrResultTooLarge = errors.New("result too large")
@@ -58,6 +61,7 @@ type Store struct {
 	limits limits.Limits
 	schema int
 	keyID  string
+	format int
 	now    func() time.Time
 	closed bool
 }

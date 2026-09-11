@@ -55,15 +55,15 @@ type proctestFileKeys struct {
 	path string
 }
 
-func (f proctestFileKeys) GetStateKey(keyID string) ([]byte, error) {
+func (f proctestFileKeys) GetStateKey(keyID string) ([]byte, bool, error) {
 	if keyID != "shared" {
-		return nil, store.ErrKeyMissing
+		return nil, false, nil
 	}
 	data, err := os.ReadFile(f.path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil, store.ErrKeyMissing
+		return nil, false, nil
 	}
-	return data, err
+	return data, err == nil, err
 }
 
 func (f proctestFileKeys) CreateStateKey() (string, []byte, error) {

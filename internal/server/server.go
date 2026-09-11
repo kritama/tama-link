@@ -29,7 +29,7 @@ const (
 // New creates a client-facing MCP server for one validated profile with
 // exactly the submit and await tools.
 func New(p *profile.Profile, buildVersion string) *mcp.Server {
-	ops := p.Catalog()
+	ops := p.Catalog().Callable()
 
 	instance := mcp.NewServer(
 		&mcp.Implementation{Name: serverName, Version: buildVersion},

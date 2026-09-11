@@ -7,12 +7,7 @@ import (
 	"fmt"
 
 	keyring "github.com/99designs/keyring"
-
-	"github.com/kritama/tama-link/internal/store"
 )
-
-// Compile-time guarantee that a Keyring serves as the store's key provider.
-var _ store.KeyProvider = (*Keyring)(nil)
 
 // stateKeySize is the AES-256 state-encryption key length.
 const stateKeySize = 32
@@ -35,20 +30,20 @@ func newKeyID() (string, error) {
 }
 
 // GetStateKey returns the state key previously created under keyID. It returns
-// store.ErrKeyMissing when the key is absent and ErrUnavailable when the
-// backend is absent or failed. It never generates a replacement key.
-func (k *Keyring) GetStateKey(keyID string) ([]byte, error) {
+// found=false when the key is absent and ErrUnavailable when the backend is
+// absent or failed. It never generates a replacement key.
+func (k *Keyring) GetStateKey(keyID string) ([]byte, bool, error) {
 	item, err := k.kr.Get(k.entryKey(keyID))
 	if errors.Is(err, keyring.ErrKeyNotFound) {
-		return nil, store.ErrKeyMissing
+		return nil, false, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return nil, false, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	if len(item.Data) != stateKeySize {
-		return nil, fmt.Errorf("%w: state key %q has invalid length %d", ErrUnavailable, keyID, len(item.Data))
+		return nil, false, fmt.Errorf("%w: state key %q has invalid length %d", ErrUnavailable, keyID, len(item.Data))
 	}
-	return item.Data, nil
+	return item.Data, true, nil
 }
 
 // CreateStateKey generates a fresh random state key, stores it in the secure
@@ -70,7 +65,7 @@ func (k *Keyring) CreateStateKey() (string, []byte, error) {
 		Description: "Tama Link profile state-encryption key",
 	}
 	if err := k.kr.Set(item); err != nil {
-		return "", nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return "", nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	return keyID, key, nil
 }

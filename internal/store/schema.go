@@ -9,7 +9,7 @@ import (
 )
 
 // schemaVersion is the database schema this build reads and writes.
-const schemaVersion = 1
+const schemaVersion = 2
 
 // Metadata keys.
 const (
@@ -38,8 +38,9 @@ CREATE TABLE IF NOT EXISTS submissions (
     sequence INTEGER NOT NULL DEFAULT 0,
     events_enc BLOB,
     result_enc BLOB,
-    error_code TEXT,
-    error_message TEXT,
+	    error_code TEXT,
+	    error_message TEXT,
+	    error_retryable INTEGER NOT NULL DEFAULT 0,
     protocol_version TEXT NOT NULL DEFAULT '',
     adapter_version TEXT NOT NULL DEFAULT '',
     created_at INTEGER NOT NULL,
@@ -103,6 +104,12 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 		if err := s.readMeta(ctx, conn, schema); err != nil {
 			return err
 		}
+		if s.schema > schemaVersion {
+			return fmt.Errorf("%w: database has %d", ErrUnsupportedSchema, s.schema)
+		}
+		if err := s.upgradeSchema(ctx, conn); err != nil {
+			return err
+		}
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return fmt.Errorf("commit migration: %w", err)
@@ -112,16 +119,41 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 	if s.schema != schemaVersion {
 		return fmt.Errorf("%w: database has %d", ErrUnsupportedSchema, s.schema)
 	}
-	key, err := keys.GetStateKey(s.keyID)
+	key, found, err := keys.GetStateKey(s.keyID)
 	if err != nil {
 		// Fail closed (D14): a missing key or an unavailable backend both make
 		// the encrypted state unreadable. Never generate a replacement key or
 		// fall back to plaintext.
 		return fmt.Errorf("%w: key %q: %w", ErrStateUnavailable, s.keyID, err)
 	}
+	if !found {
+		return fmt.Errorf("%w: key %q is missing from the credential backend", ErrStateUnavailable, s.keyID)
+	}
 	s.cipher, err = newStateCipher(key)
 	if err != nil {
 		return err
+	}
+	if s.format < encryptionFormat {
+		if err := s.migrateEncryption(ctx); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Store) upgradeSchema(ctx context.Context, conn *sql.Conn) error {
+	if s.schema == 1 {
+		if _, err := conn.ExecContext(ctx,
+			"ALTER TABLE submissions ADD COLUMN error_retryable INTEGER NOT NULL DEFAULT 0",
+		); err != nil {
+			return fmt.Errorf("upgrade schema to 2: %w", err)
+		}
+		if _, err := conn.ExecContext(ctx,
+			"UPDATE meta SET value = ? WHERE key = ?", strconv.Itoa(schemaVersion), metaSchemaVersion,
+		); err != nil {
+			return fmt.Errorf("record schema 2: %w", err)
+		}
+		s.schema = 2
 	}
 	return nil
 }
@@ -160,6 +192,7 @@ func (s *Store) initializeDatabase(ctx context.Context, conn *sql.Conn, keys Key
 	}
 	s.keyID = keyID
 	s.schema = schemaVersion
+	s.format = encryptionFormat
 	return nil
 }
 
@@ -187,9 +220,11 @@ func (s *Store) readMeta(ctx context.Context, conn *sql.Conn, schema string) err
 		}
 		return fmt.Errorf("read metadata %q: %w", metaEncryptionFormat, err)
 	}
-	if format != strconv.Itoa(encryptionFormat) {
+	parsedFormat, err := strconv.Atoi(format)
+	if err != nil || parsedFormat < 1 || parsedFormat > encryptionFormat {
 		return fmt.Errorf("unsupported encryption format %q", format)
 	}
+	s.format = parsedFormat
 	return nil
 }
 

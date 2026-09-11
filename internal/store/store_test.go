@@ -28,17 +28,17 @@ func newMemKeys() *memKeys {
 	return &memKeys{keys: map[string][]byte{}}
 }
 
-func (m *memKeys) GetStateKey(keyID string) ([]byte, error) {
+func (m *memKeys) GetStateKey(keyID string) ([]byte, bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.missing {
-		return nil, store.ErrKeyMissing
+		return nil, false, nil
 	}
 	key, ok := m.keys[keyID]
 	if !ok {
-		return nil, store.ErrKeyMissing
+		return nil, false, nil
 	}
-	return key, nil
+	return key, true, nil
 }
 
 func (m *memKeys) CreateStateKey() (string, []byte, error) {
@@ -66,7 +66,7 @@ type downKeys struct{}
 
 var errBackendDown = errors.New("credential backend down")
 
-func (downKeys) GetStateKey(string) ([]byte, error) { return nil, errBackendDown }
+func (downKeys) GetStateKey(string) ([]byte, bool, error) { return nil, false, errBackendDown }
 func (downKeys) CreateStateKey() (string, []byte, error) {
 	return "", nil, errBackendDown
 }

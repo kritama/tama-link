@@ -1,14 +1,19 @@
 package credential
 
 import (
+	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 
 	keyring "github.com/99designs/keyring"
 
+	"github.com/kritama/tama-link/internal/limits"
 	"github.com/kritama/tama-link/internal/store"
 )
+
+var _ store.KeyProvider = (*Keyring)(nil)
 
 // fakeKeyring is an in-memory keyring.Keyring for tests. It can be configured
 // to fail Get or Set to exercise the fail-closed paths.
@@ -81,9 +86,12 @@ func TestStateKeyRoundTrip(t *testing.T) {
 		t.Fatal("empty key id")
 	}
 
-	got, err := kr.GetStateKey(keyID)
+	got, found, err := kr.GetStateKey(keyID)
 	if err != nil {
 		t.Fatalf("GetStateKey: %v", err)
+	}
+	if !found {
+		t.Fatal("created key reported missing")
 	}
 	if string(got) != string(key) {
 		t.Fatal("round-trip key mismatch")
@@ -93,9 +101,9 @@ func TestStateKeyRoundTrip(t *testing.T) {
 func TestGetStateKeyMissing(t *testing.T) {
 	kr := newWith("alpha", newFakeKeyring())
 
-	_, err := kr.GetStateKey("v1-never-created")
-	if !errors.Is(err, store.ErrKeyMissing) {
-		t.Fatalf("GetStateKey absent = %v, want store.ErrKeyMissing", err)
+	_, found, err := kr.GetStateKey("v1-never-created")
+	if err != nil || found {
+		t.Fatalf("GetStateKey absent = found %v, error %v; want false, nil", found, err)
 	}
 }
 
@@ -111,8 +119,8 @@ func TestProfileIsolation(t *testing.T) {
 
 	// The same key identifier under a different profile must not resolve to
 	// alpha's key.
-	if _, err := beta.GetStateKey(keyID); !errors.Is(err, store.ErrKeyMissing) {
-		t.Fatalf("cross-profile GetStateKey = %v, want store.ErrKeyMissing", err)
+	if _, found, err := beta.GetStateKey(keyID); err != nil || found {
+		t.Fatalf("cross-profile GetStateKey = found %v, error %v; want false, nil", found, err)
 	}
 }
 
@@ -121,7 +129,7 @@ func TestGetStateKeyBackendUnavailable(t *testing.T) {
 	fake.failGet = true
 	kr := newWith("alpha", fake)
 
-	_, err := kr.GetStateKey("v1-abc")
+	_, _, err := kr.GetStateKey("v1-abc")
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("GetStateKey backend-down = %v, want ErrUnavailable", err)
 	}
@@ -144,7 +152,7 @@ func TestGetStateKeyCorruptLength(t *testing.T) {
 		t.Fatalf("seed: %v", err)
 	}
 
-	_, err := kr.GetStateKey("v1-bad")
+	_, _, err := kr.GetStateKey("v1-bad")
 	if !errors.Is(err, ErrUnavailable) {
 		t.Fatalf("corrupt-length GetStateKey = %v, want ErrUnavailable", err)
 	}
@@ -154,4 +162,22 @@ func TestNewRequiresProfile(t *testing.T) {
 	if _, err := New(""); err == nil {
 		t.Fatal("New(\"\") succeeded, want error")
 	}
+}
+
+func TestKeyringSecuresStore(t *testing.T) {
+	backend := newFakeKeyring()
+	keys := newWith("profile/state", backend)
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := store.Open(context.Background(), path, keys, store.Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	reopened, err := store.Open(context.Background(), path, keys, store.Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	_ = reopened.Close()
 }

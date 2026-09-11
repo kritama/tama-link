@@ -102,3 +102,20 @@ func userStateDir() (string, error) {
 func Path(configDir string, name Name) string {
 	return filepath.Join(configDir, ProfilesDirName, name.String()+ProfileFileSuffix)
 }
+
+// DatabasePath returns the canonical profile-isolated SQLite path. The
+// profile name remains an outer namespace even when two profiles use the same
+// database reference.
+func DatabasePath(stateDir string, p *Profile) (string, error) {
+	root, err := StateDir(stateDir)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(root, ProfilesDirName, p.Name.String(), p.State.Database+".db"), nil
+}
+
+// CredentialNamespace returns the canonical profile-isolated credential
+// namespace. State references cannot collapse two named profiles together.
+func CredentialNamespace(p *Profile) string {
+	return p.Name.String() + "/" + p.State.Credentials
+}

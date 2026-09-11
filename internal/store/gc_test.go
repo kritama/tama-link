@@ -11,24 +11,6 @@ import (
 	"github.com/kritama/tama-link/internal/submission"
 )
 
-func runToTerminal(t *testing.T, s *store.Store, id string, terminal submission.State) {
-	t.Helper()
-
-	ctx := context.Background()
-	for _, state := range []submission.State{
-		submission.State(contract.StatusQueued),
-		submission.State(contract.StatusRunning),
-	} {
-		if _, err := s.Transition(ctx, id, state, store.TransitionDetail{}); err != nil {
-			t.Fatalf("transition to %s: %v", state, err)
-		}
-	}
-	failure := contract.NewError(contract.CodeUpstreamExecutionFailed, "operation failed")
-	if _, err := s.Transition(ctx, id, terminal, store.TransitionDetail{Error: &failure}); err != nil {
-		t.Fatalf("transition to %s: %v", terminal, err)
-	}
-}
-
 func TestGCSweepsPayloadThenTombstone(t *testing.T) {
 	keys, clk := newMemKeys(), newClock()
 	s, _ := openTestStore(t, keys, clk)

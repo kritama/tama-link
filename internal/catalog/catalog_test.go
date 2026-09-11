@@ -57,6 +57,24 @@ func TestCatalogFindAndNames(t *testing.T) {
 	}
 }
 
+func TestCallableExcludesUnsupportedOperations(t *testing.T) {
+	t.Parallel()
+
+	c := Catalog{Operations: []Descriptor{
+		testDescriptor(t, func(d *Descriptor) { d.Name = "message" }),
+		testDescriptor(t, func(d *Descriptor) {
+			d.Name = "review"
+			d.Strategy = StrategyUnsupported
+		}),
+	}}
+	if names := c.Callable().Names(); !slices.Equal(names, []string{"message"}) {
+		t.Fatalf("Callable names = %v, want [message]", names)
+	}
+	if !slices.Equal(c.Names(), []string{"message", "review"}) {
+		t.Fatal("Callable mutated the pinned catalog")
+	}
+}
+
 func TestSignaturesProjectClientSchema(t *testing.T) {
 	t.Parallel()
 

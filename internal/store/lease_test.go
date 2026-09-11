@@ -2,8 +2,12 @@ package store_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
+
+	"github.com/kritama/tama-link/internal/contract"
+	"github.com/kritama/tama-link/internal/store"
 )
 
 func TestLeaseClaimIsExclusive(t *testing.T) {
@@ -35,6 +39,36 @@ func TestLeaseClaimIsExclusive(t *testing.T) {
 	}
 	if !renewed {
 		t.Fatal("owner did not re-acquire its own live lease")
+	}
+}
+
+func TestExpiredWorkerCannotCaptureTerminalResult(t *testing.T) {
+	t.Parallel()
+
+	keys, clk := newMemKeys(), newClock()
+	s, _ := openTestStore(t, keys, clk)
+	ctx := context.Background()
+	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	for _, state := range []contract.Status{contract.StatusQueued, contract.StatusRunning} {
+		if _, err := s.Transition(ctx, "sub-1", state, store.TransitionDetail{}); err != nil {
+			t.Fatalf("transition to %s: %v", state, err)
+		}
+	}
+	if owned, err := s.ClaimLease(ctx, "submission/sub-1", "owner-a", time.Minute); err != nil || !owned {
+		t.Fatalf("ClaimLease = %v, %v", owned, err)
+	}
+	clk.Advance(2 * time.Minute)
+	result := contract.Result{Content: []contract.ContentBlock{[]byte(`{"type":"text","text":"done"}`)}}
+	if _, err := s.CompleteLeased(ctx, "sub-1", "submission/sub-1", "owner-a", result); !errors.Is(err, store.ErrLeaseNotOwned) {
+		t.Fatalf("stale CompleteLeased = %v, want ErrLeaseNotOwned", err)
+	}
+	if owned, err := s.ClaimLease(ctx, "submission/sub-1", "owner-b", time.Minute); err != nil || !owned {
+		t.Fatalf("replacement ClaimLease = %v, %v", owned, err)
+	}
+	if _, err := s.CompleteLeased(ctx, "sub-1", "submission/sub-1", "owner-b", result); err != nil {
+		t.Fatalf("replacement CompleteLeased: %v", err)
 	}
 }
 

@@ -39,6 +39,11 @@ func (s *Store) Transition(ctx context.Context, id string, to submission.State, 
 	if !submission.Terminal(to) && detail.Error != nil {
 		return nil, fmt.Errorf("non-terminal state %s cannot carry an error", to)
 	}
+	if detail.Error != nil {
+		if err := detail.Error.Validate(); err != nil {
+			return nil, fmt.Errorf("terminal error: %w", err)
+		}
+	}
 
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -64,8 +69,8 @@ func (s *Store) Transition(ctx context.Context, id string, to submission.State, 
 		args = append(args, detail.TaskID)
 	}
 	if detail.Error != nil {
-		clauses = append(clauses, "error_code = ?", "error_message = ?")
-		args = append(args, string(detail.Error.Code), detail.Error.Message)
+		clauses = append(clauses, "error_code = ?", "error_message = ?", "error_retryable = ?")
+		args = append(args, string(detail.Error.Code), detail.Error.Message, detail.Error.Retryable)
 	}
 	if submission.Terminal(to) {
 		completedMs := nowMs
@@ -126,7 +131,7 @@ func (s *Store) AppendEvents(ctx context.Context, id string, events []contract.E
 	if err != nil {
 		return nil, fmt.Errorf("encode events: %w", err)
 	}
-	sealed, err := s.cipher.seal(encoded)
+	sealed, err := s.cipher.seal(encoded, id, "events")
 	if err != nil {
 		return nil, fmt.Errorf("seal events: %w", err)
 	}
@@ -154,19 +159,55 @@ func (s *Store) AppendEvents(ctx context.Context, id string, events []contract.E
 // entire result. An oversized result atomically becomes a terminal failure;
 // terminal result bytes are never truncated or written in a later transaction.
 func (s *Store) Complete(ctx context.Context, id string, result contract.Result) (*Submission, error) {
+	return s.complete(ctx, id, result, nil)
+}
+
+// CompleteLeased performs Complete only while owner holds a live lease. The
+// lease check and terminal write share one transaction, preventing a stale
+// worker from publishing a result after ownership moved to another process.
+func (s *Store) CompleteLeased(
+	ctx context.Context,
+	id, leaseName, owner string,
+	result contract.Result,
+) (*Submission, error) {
+	return s.complete(ctx, id, result, &leaseIdentity{name: leaseName, owner: owner})
+}
+
+func (s *Store) complete(ctx context.Context, id string, result contract.Result, lease *leaseIdentity) (*Submission, error) {
+	if err := result.Validate(); err != nil {
+		return nil, fmt.Errorf("validate result: %w", err)
+	}
 	encoded, err := json.Marshal(result)
 	if err != nil {
 		return nil, fmt.Errorf("encode result: %w", err)
 	}
 	if int64(len(encoded)) > int64(s.limits.ResultBytes) {
 		failure := contract.NewError(contract.CodeResultTooLarge, "The upstream operation completed, but its result exceeded the configured storage limit.")
-		sub, transitionErr := s.finish(ctx, id, contract.StatusFailed, nil, &failure)
+		sub, transitionErr := s.finish(ctx, id, contract.StatusFailed, nil, &failure, lease)
 		if transitionErr != nil {
 			return nil, transitionErr
 		}
 		return sub, fmt.Errorf("%w: %d bytes exceeds %d", ErrResultTooLarge, len(encoded), s.limits.ResultBytes)
 	}
-	return s.finish(ctx, id, contract.StatusCompleted, encoded, nil)
+	return s.finish(ctx, id, contract.StatusCompleted, encoded, nil, lease)
+}
+
+// FailLeased records a safe terminal failure while owner still holds the live
+// submission lease.
+func (s *Store) FailLeased(
+	ctx context.Context,
+	id, leaseName, owner string,
+	failure contract.Error,
+) (*Submission, error) {
+	if err := failure.Validate(); err != nil {
+		return nil, fmt.Errorf("terminal error: %w", err)
+	}
+	return s.finish(ctx, id, contract.StatusFailed, nil, &failure, &leaseIdentity{name: leaseName, owner: owner})
+}
+
+type leaseIdentity struct {
+	name  string
+	owner string
 }
 
 func (s *Store) finish(
@@ -175,12 +216,27 @@ func (s *Store) finish(
 	to submission.State,
 	encodedResult []byte,
 	failure *contract.Error,
+	lease *leaseIdentity,
 ) (*Submission, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("begin terminal capture: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if lease != nil {
+		var held int
+		err := tx.QueryRowContext(ctx, `
+			SELECT 1 FROM leases
+			WHERE name = ? AND owner = ? AND expires_at > ?`,
+			lease.name, lease.owner, s.now().UnixMilli(),
+		).Scan(&held)
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, ErrLeaseNotOwned
+		}
+		if err != nil {
+			return nil, fmt.Errorf("check terminal lease: %w", err)
+		}
+	}
 
 	sub, err := s.loadEncrypted(ctx, tx, id)
 	if err != nil {
@@ -192,22 +248,24 @@ func (s *Store) finish(
 
 	var sealed []byte
 	if encodedResult != nil {
-		sealed, err = s.cipher.seal(encodedResult)
+		sealed, err = s.cipher.seal(encodedResult, id, "result")
 		if err != nil {
 			return nil, fmt.Errorf("seal result: %w", err)
 		}
 	}
 	nowMs := s.now().UnixMilli()
 	var errorCode, errorMessage any
+	errorRetryable := false
 	if failure != nil {
 		errorCode, errorMessage = string(failure.Code), failure.Message
+		errorRetryable = failure.Retryable
 	}
 	result, err := tx.ExecContext(ctx, `
 		UPDATE submissions
-		SET status = ?, result_enc = ?, error_code = ?, error_message = ?,
+		SET status = ?, result_enc = ?, error_code = ?, error_message = ?, error_retryable = ?,
 		    completed_at = ?, payload_expires_at = ?, tombstone_expires_at = ?, updated_at = ?
 		WHERE submission_id = ? AND status = ?`,
-		string(to), sealed, errorCode, errorMessage,
+		string(to), sealed, errorCode, errorMessage, errorRetryable,
 		nowMs, nowMs+int64(s.limits.PayloadRetention/time.Millisecond),
 		nowMs+int64(s.limits.TombstoneRetention/time.Millisecond), nowMs,
 		id, string(sub.Status),
@@ -249,7 +307,7 @@ func (s *Store) loadEncrypted(ctx context.Context, tx *sql.Tx, id string) (*Subm
 const submissionQuery = `
 		SELECT submission_id, client_request_id, tool, strategy, descriptor_digest,
 		       args_hash, args_enc, task_id, status, sequence, events_enc, result_enc,
-		       error_code, error_message, protocol_version, adapter_version,
+		       error_code, error_message, error_retryable, protocol_version, adapter_version,
 		       created_at, updated_at, completed_at
 		FROM submissions WHERE submission_id = ?`
 

@@ -56,7 +56,7 @@ func New(profile string) (*Keyring, error) {
 	}
 	kr, err := keyring.Open(cfg)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", ErrUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	return &Keyring{kr: kr, prefix: profile + "/"}, nil
 }

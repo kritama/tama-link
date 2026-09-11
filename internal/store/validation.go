@@ -32,9 +32,10 @@ func jsonDepth(data []byte) int {
 				escaped = false
 				continue
 			}
-			if char == '\\' {
+			switch char {
+			case '\\':
 				escaped = true
-			} else if char == '"' {
+			case '"':
 				inString = false
 			}
 			continue

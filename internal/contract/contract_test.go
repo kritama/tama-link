@@ -194,6 +194,24 @@ func TestResultRoundTrip(t *testing.T) {
 	}
 }
 
+func TestResultValidation(t *testing.T) {
+	t.Parallel()
+
+	for name, result := range map[string]Result{
+		"primitive content": {Content: []ContentBlock{json.RawMessage(`"text"`)}},
+		"missing type":      {Content: []ContentBlock{json.RawMessage(`{"text":"hello"}`)}},
+		"invalid structured": {
+			Content:           []ContentBlock{},
+			StructuredContent: json.RawMessage(`{`),
+		},
+		"primitive meta": {Content: []ContentBlock{}, Meta: json.RawMessage(`1`)},
+	} {
+		if err := result.Validate(); err == nil {
+			t.Fatalf("%s result accepted", name)
+		}
+	}
+}
+
 func TestAwaitOutputFailedMatchesSpec(t *testing.T) {
 	t.Parallel()
 

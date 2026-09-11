@@ -224,6 +224,14 @@ func TestCompleteRoundTrip(t *testing.T) {
 		string(got.Result.StructuredContent) != `{"ok":true}` {
 		t.Fatalf("result = %+v, want round-trip through the encrypted blob", got.Result)
 	}
+	other := contract.Result{Content: []contract.ContentBlock{[]byte(`{"type":"text","text":"other"}`)}}
+	if _, err := s.Complete(ctx, "sub-1", other); err == nil {
+		t.Fatal("second completion overwrote terminal result")
+	}
+	stable, err := s.GetSubmission(ctx, "sub-1")
+	if err != nil || string(stable.Result.Content[0]) != `{"type":"text","text":"done"}` {
+		t.Fatalf("stable result = %+v, %v", stable.Result, err)
+	}
 }
 
 func TestCompleteRequiresRunningState(t *testing.T) {

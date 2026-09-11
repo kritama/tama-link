@@ -53,3 +53,16 @@ func (c Catalog) Names() []string {
 	slices.Sort(names)
 	return names
 }
+
+// Callable returns the operations that Tama Link can currently execute.
+// Unsupported descriptors remain pinned for explicit policy documentation but
+// are not advertised as valid submit choices.
+func (c Catalog) Callable() Catalog {
+	operations := make([]Descriptor, 0, len(c.Operations))
+	for _, operation := range c.Operations {
+		if operation.Strategy != StrategyUnsupported {
+			operations = append(operations, operation)
+		}
+	}
+	return Catalog{Operations: operations}
+}
