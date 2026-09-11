@@ -22,29 +22,29 @@ const (
 // Limits holds the effective bounds for one profile.
 type Limits struct {
 	// ArgumentsBytes bounds one canonicalized argument document.
-	ArgumentsBytes Bytes
+	ArgumentsBytes Bytes `json:"arguments_bytes"`
 	// ArgumentDepth bounds canonical argument nesting.
-	ArgumentDepth int
+	ArgumentDepth int `json:"argument_depth"`
 	// ResponseBytes bounds one upstream response body.
-	ResponseBytes Bytes
+	ResponseBytes Bytes `json:"response_bytes"`
 	// ResultBytes bounds one stored normalized terminal result.
-	ResultBytes Bytes
+	ResultBytes Bytes `json:"result_bytes"`
 	// EventBytes bounds one progress event.
-	EventBytes Bytes
+	EventBytes Bytes `json:"event_bytes"`
 	// MaxEvents bounds retained progress events per submission.
-	MaxEvents int
+	MaxEvents int `json:"max_events"`
 	// EventsBytes bounds total retained event data per submission.
-	EventsBytes Bytes
+	EventsBytes Bytes `json:"events_bytes"`
 	// AwaitDefault is the default long-poll duration.
-	AwaitDefault time.Duration
+	AwaitDefault time.Duration `json:"await_default"`
 	// AwaitMax bounds one long-poll duration.
-	AwaitMax time.Duration
+	AwaitMax time.Duration `json:"await_max"`
 	// PayloadRetention bounds how long terminal payloads are retained after
 	// completion.
-	PayloadRetention time.Duration
+	PayloadRetention time.Duration `json:"payload_retention"`
 	// TombstoneRetention bounds how long payload-free expiry tombstones are
 	// retained after completion. It must cover the payload retention.
-	TombstoneRetention time.Duration
+	TombstoneRetention time.Duration `json:"tombstone_retention"`
 }
 
 // Default returns the version 1 default bounds.
