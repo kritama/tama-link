@@ -4,6 +4,10 @@
 
 Tama Link targets Go 1.25. Use the versions pinned in `mise.toml`.
 
+Repository-wide implementation conventions are defined in `AGENTS.md`. In
+particular, keep Go packages and files small, cohesive, and aligned with the
+boundaries in the implementation plan.
+
 ```sh
 mise install
 make check
