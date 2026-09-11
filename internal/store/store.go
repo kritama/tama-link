@@ -10,12 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"os"
 	"time"
-
-	// Registers the pure-Go SQLite driver, which keeps CGO_ENABLED=0 builds
-	// working.
-	_ "modernc.org/sqlite"
 
 	"github.com/kritama/tama-link/internal/limits"
 )
@@ -63,15 +58,23 @@ type Store struct {
 	keyID  string
 	format int
 	now    func() time.Time
+	path   *statePath
 	closed bool
 }
 
 // Open opens (creating when absent) the profile state database at path.
 // The key provider supplies the state encryption key.
 func Open(ctx context.Context, path string, keys KeyProvider, cfg Config) (*Store, error) {
-	if err := ensureStateFile(path); err != nil {
+	securedPath, err := secureStatePath(path)
+	if err != nil {
 		return nil, err
 	}
+	closePath := true
+	defer func() {
+		if closePath {
+			_ = securedPath.Close()
+		}
+	}()
 	if err := cfg.Limits.Validate(); err != nil {
 		return nil, fmt.Errorf("store limits: %w", err)
 	}
@@ -80,20 +83,17 @@ func Open(ctx context.Context, path string, keys KeyProvider, cfg Config) (*Stor
 		now = time.Now
 	}
 
-	sqlDB, err := sql.Open("sqlite", dsn(path))
+	sqlDB, err := openSQLite(ctx, securedPath)
 	if err != nil {
-		return nil, fmt.Errorf("open state database %s: %w", path, err)
-	}
-	if err := sqlDB.PingContext(ctx); err != nil {
-		_ = sqlDB.Close()
-		return nil, fmt.Errorf("open state database %s: %w", path, err)
+		return nil, err
 	}
 
-	s := &Store{db: sqlDB, limits: cfg.Limits, now: now}
+	s := &Store{db: sqlDB, limits: cfg.Limits, now: now, path: securedPath}
 	if err := s.migrate(ctx, keys); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
 	}
+	closePath = false
 	return s, nil
 }
 
@@ -103,45 +103,5 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.closed = true
-	return s.db.Close()
-}
-
-// ensureStateFile enforces the secure-file rules before opening: the path
-// must not be a directory or a special file, an existing database must be a
-// regular file (never a symlink) restricted to 0600, and a missing file is
-// created 0600.
-func ensureStateFile(path string) error {
-	info, err := os.Lstat(path)
-	if err != nil {
-		if !os.IsNotExist(err) {
-			return fmt.Errorf("read state database %s: %w", path, err)
-		}
-		file, createErr := os.OpenFile(path, os.O_CREATE|os.O_RDONLY, 0o600)
-		if createErr != nil {
-			return fmt.Errorf("create state database %s: %w", path, createErr)
-		}
-		_ = file.Close()
-		return nil
-	}
-	if info.IsDir() {
-		return fmt.Errorf("state database %s is a directory", path)
-	}
-	if info.Mode()&os.ModeType != 0 {
-		return fmt.Errorf("state database %s is not a regular file", path)
-	}
-	if info.Mode().Perm() != 0o600 {
-		if err := os.Chmod(path, 0o600); err != nil {
-			return fmt.Errorf("restrict state database %s: %w", path, err)
-		}
-	}
-	return nil
-}
-
-// dsn configures busy handling, WAL journaling, and durable-but-fast
-// synchronous writes for the pure-Go driver.
-func dsn(path string) string {
-	return "file:" + path +
-		"?_pragma=busy_timeout(5000)" +
-		"&_pragma=journal_mode(WAL)" +
-		"&_pragma=synchronous(NORMAL)"
+	return errors.Join(s.db.Close(), s.path.Close())
 }

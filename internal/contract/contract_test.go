@@ -72,6 +72,31 @@ func TestSubmitInputOmitsEmptyFields(t *testing.T) {
 	}
 }
 
+func TestDecodeSubmitInputPreservesJSONNumbers(t *testing.T) {
+	t.Parallel()
+
+	raw := json.RawMessage(`{"tool":"message","arguments":{"identifier":9007199254740993}}`)
+	input, err := DecodeSubmitInput(raw)
+	if err != nil {
+		t.Fatalf("DecodeSubmitInput: %v", err)
+	}
+	if got, want := string(input.Arguments), `{"identifier":9007199254740993}`; got != want {
+		t.Fatalf("arguments = %s, want %s", got, want)
+	}
+}
+
+func TestDecodeSubmitInputDefaultsArguments(t *testing.T) {
+	t.Parallel()
+
+	input, err := DecodeSubmitInput(json.RawMessage(`{"tool":"message"}`))
+	if err != nil {
+		t.Fatalf("DecodeSubmitInput: %v", err)
+	}
+	if got := string(input.Arguments); got != `{}` {
+		t.Fatalf("arguments = %s, want {}", got)
+	}
+}
+
 func TestSubmitOutputSuccessMatchesSpec(t *testing.T) {
 	t.Parallel()
 

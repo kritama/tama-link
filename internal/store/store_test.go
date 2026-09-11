@@ -287,3 +287,29 @@ func TestOpenTightensPermissions(t *testing.T) {
 		t.Fatalf("state file mode = %o, want 600 after open", info.Mode().Perm())
 	}
 }
+
+func TestOpenTightensParentPermissions(t *testing.T) {
+	t.Parallel()
+
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows directory access is enforced by ACLs and the pinned handle")
+	}
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "state.db")
+	s, err := store.Open(context.Background(), path, newMemKeys(), store.Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	_ = s.Close()
+
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("state parent mode = %o, want 700 after open", info.Mode().Perm())
+	}
+}

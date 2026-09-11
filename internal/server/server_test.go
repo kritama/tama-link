@@ -10,6 +10,7 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/kritama/tama-link/internal/catalog"
+	"github.com/kritama/tama-link/internal/contract"
 	"github.com/kritama/tama-link/internal/profile"
 )
 
@@ -47,11 +48,16 @@ func testProfile() *profile.Profile {
 
 func connectTestServer(t *testing.T, p *profile.Profile) *mcp.ClientSession {
 	t.Helper()
+	return connectServer(t, New(p, "test"))
+}
+
+func connectServer(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
+	t.Helper()
 
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 
-	serverSession, err := New(p, "test").Connect(ctx, serverTransport, nil)
+	serverSession, err := srv.Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatalf("connect server: %v", err)
 	}
@@ -65,6 +71,41 @@ func connectTestServer(t *testing.T, p *profile.Profile) *mcp.ClientSession {
 	t.Cleanup(func() { _ = clientSession.Close() })
 
 	return clientSession
+}
+
+func TestSubmitPreservesJSONNumbersAcrossMCPBoundary(t *testing.T) {
+	t.Parallel()
+
+	var captured json.RawMessage
+	operation := func(
+		_ context.Context,
+		_ *mcp.CallToolRequest,
+		input contract.SubmitInput,
+	) (*mcp.CallToolResult, any, error) {
+		captured = append(captured[:0], input.Arguments...)
+		return &mcp.CallToolResult{}, map[string]any{"accepted": true}, nil
+	}
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+	server.AddTool(
+		&mcp.Tool{Name: contract.ToolSubmit, InputSchema: submitInputSchema([]string{"message"})},
+		submitHandler([]string{"message"}, operation),
+	)
+	client := connectServer(t, server)
+
+	raw := json.RawMessage(`{"tool":"message","arguments":{"identifier":9007199254740993}}`)
+	result, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      contract.ToolSubmit,
+		Arguments: raw,
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("CallTool returned tool error: %+v", result)
+	}
+	if got, want := string(captured), `{"identifier":9007199254740993}`; got != want {
+		t.Fatalf("captured arguments = %s, want %s", got, want)
+	}
 }
 
 func TestServerExposesOnlySubmitAndAwait(t *testing.T) {

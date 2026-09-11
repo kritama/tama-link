@@ -36,11 +36,11 @@ func New(p *profile.Profile, buildVersion string) *mcp.Server {
 		&mcp.ServerOptions{Instructions: composeInstructions(p.Instructions)},
 	)
 
-	mcp.AddTool(instance, &mcp.Tool{
+	instance.AddTool(&mcp.Tool{
 		Name:        contract.ToolSubmit,
 		Description: composeSubmitDescription(ops),
 		InputSchema: submitInputSchema(ops.Names()),
-	}, submit)
+	}, submitHandler(ops.Names(), submit))
 
 	mcp.AddTool(instance, &mcp.Tool{
 		Name:        contract.ToolAwait,

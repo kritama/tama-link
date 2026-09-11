@@ -12,7 +12,7 @@ import (
 
 func TestOpenMigratesSchemaVersionOne(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
-	db, err := sql.Open("sqlite", dsn(path))
+	db, err := sql.Open("sqlite", sqliteURI(path))
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}

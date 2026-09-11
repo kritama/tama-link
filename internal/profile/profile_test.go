@@ -81,6 +81,31 @@ func TestLoadRoundTrip(t *testing.T) {
 	}
 }
 
+func TestLoadPreservesAnnotationNumbers(t *testing.T) {
+	t.Parallel()
+
+	configDir := t.TempDir()
+	p := validProfile()
+	p.Operations[0].Annotations = map[string]any{
+		"revision": json.Number("9007199254740993"),
+	}
+	digest, err := p.Operations[0].ComputeDigest()
+	if err != nil {
+		t.Fatalf("ComputeDigest: %v", err)
+	}
+	p.Operations[0].Digest = digest
+	writeProfile(t, configDir, p)
+
+	loaded, err := Load(Name("tama-app"), configDir)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	got, ok := loaded.Operations[0].Annotations["revision"].(json.Number)
+	if !ok || got.String() != "9007199254740993" {
+		t.Fatalf("annotation revision = %T(%v), want exact json.Number", loaded.Operations[0].Annotations["revision"], got)
+	}
+}
+
 func TestStateLocationsRemainProfileIsolated(t *testing.T) {
 	t.Parallel()
 

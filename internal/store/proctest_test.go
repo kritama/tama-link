@@ -127,32 +127,12 @@ func newScenarioState(t *testing.T) scenarioState {
 	return scenarioState{db: filepath.Join(dir, "state.db"), key: filepath.Join(dir, "key")}
 }
 
-// proctestOpen opens the store, retrying with backoff. The first process to
-// open a brand-new database performs the one-time DELETE->WAL journal-mode
-// transition under an exclusive lock; a process that arrives mid-transition
-// gets SQLITE_BUSY on Ping. Once the database is persistently in WAL mode a
-// later open is a no-op, so a short retry lets contended openers converge.
-func openScenarioStore(ctx context.Context, db string, keys proctestFileKeys) (*store.Store, error) {
-	var (
-		s   *store.Store
-		err error
-	)
-	for attempt := 0; attempt < 20; attempt++ {
-		s, err = store.Open(ctx, db, keys, store.Config{Limits: limits.Default()})
-		if err == nil {
-			return s, nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-	return nil, err
-}
-
 func runScenario(scenario string) int {
 	db := os.Getenv(envDB)
 	keys := proctestFileKeys{path: os.Getenv(envKey)}
 	ctx := context.Background()
 
-	s, err := openScenarioStore(ctx, db, keys)
+	s, err := store.Open(ctx, db, keys, store.Config{Limits: limits.Default()})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "open: %v\n", err)
 		return 1

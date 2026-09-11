@@ -48,6 +48,7 @@ func Load(name Name, configDir string) (*Profile, error) {
 
 	var p Profile
 	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&p); err != nil {
 		return nil, fmt.Errorf("decode profile %s: %w", path, err)
