@@ -92,11 +92,11 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 	}
 
 	key, err := keys.GetStateKey(s.keyID)
-	if errors.Is(err, ErrKeyMissing) {
-		return fmt.Errorf("%w: key %q is missing from the credential backend", ErrStateUnavailable, s.keyID)
-	}
 	if err != nil {
-		return fmt.Errorf("read state key: %w", err)
+		// Fail closed (D14): a missing key or an unavailable backend both make
+		// the encrypted state unreadable. Never generate a replacement key or
+		// fall back to plaintext.
+		return fmt.Errorf("%w: key %q: %v", ErrStateUnavailable, s.keyID, err)
 	}
 	s.cipher, err = newStateCipher(key)
 	if err != nil {
@@ -111,7 +111,9 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 func (s *Store) initKey(ctx context.Context, keys KeyProvider) error {
 	keyID, key, err := keys.CreateStateKey()
 	if err != nil {
-		return fmt.Errorf("create state key: %w", err)
+		// Fail closed (D14): without the secure backend the initial key cannot
+		// be established, so the profile state cannot be secured.
+		return fmt.Errorf("%w: create state key: %v", ErrStateUnavailable, err)
 	}
 	if keyID == "" || len(key) != 32 {
 		return fmt.Errorf("state key %q must be 32 bytes", keyID)

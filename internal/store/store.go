@@ -24,9 +24,10 @@ import (
 var (
 	// ErrNotFound reports that a submission does not exist in this profile.
 	ErrNotFound = errors.New("submission not found")
-	// ErrStateUnavailable reports that encrypted state exists but its key is
-	// missing or the credential backend is unavailable. The store fails
-	// closed and never falls back to plaintext or a replacement key.
+	// ErrStateUnavailable reports that the profile state cannot be secured or
+	// read: its key is missing from the credential backend, the backend is
+	// unavailable, or the initial key could not be created. The store fails
+	// closed and never falls back to plaintext or a replacement key (D14).
 	ErrStateUnavailable = errors.New("state unavailable")
 	// ErrIdempotencyConflict reports that client_request_id was reused with
 	// different canonical arguments.

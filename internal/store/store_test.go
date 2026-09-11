@@ -60,6 +60,17 @@ func (m *memKeys) count() int {
 	return len(m.keys)
 }
 
+// downKeys simulates an unavailable credential backend: every key operation
+// fails with an error that is not ErrKeyMissing.
+type downKeys struct{}
+
+var errBackendDown = errors.New("credential backend down")
+
+func (downKeys) GetStateKey(string) ([]byte, error) { return nil, errBackendDown }
+func (downKeys) CreateStateKey() (string, []byte, error) {
+	return "", nil, errBackendDown
+}
+
 // clock is a deterministic test clock.
 type clock struct {
 	mu sync.Mutex
@@ -187,6 +198,30 @@ func TestOpenFailsClosedWithoutKey(t *testing.T) {
 	t.Cleanup(func() { _ = reopened.Close() })
 	if _, err := reopened.GetSubmission(context.Background(), "sub-1"); err != nil {
 		t.Fatalf("database damaged by failed open: %v", err)
+	}
+}
+
+func TestOpenFailsClosedWhenBackendDown(t *testing.T) {
+	t.Parallel()
+
+	// A brand-new profile cannot establish its key while the backend is down.
+	if _, err := store.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"),
+		downKeys{}, store.Config{Limits: limits.Default()}); !errors.Is(err, store.ErrStateUnavailable) {
+		t.Fatalf("Open new DB with backend down = %v, want ErrStateUnavailable", err)
+	}
+
+	// An existing profile with data also fails closed when the backend is down,
+	// rather than falling back to plaintext or a replacement key.
+	keys := newMemKeys()
+	s, path := openTestStore(t, keys, newClock())
+	if _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if _, err := store.Open(context.Background(), path, downKeys{}, store.Config{Limits: limits.Default()}); !errors.Is(err, store.ErrStateUnavailable) {
+		t.Fatalf("Open existing DB with backend down = %v, want ErrStateUnavailable", err)
 	}
 }
 
