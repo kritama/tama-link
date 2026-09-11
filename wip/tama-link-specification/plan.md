@@ -35,12 +35,22 @@ Phase 1 is in progress. Committed so far:
   sequence invariants;
 - `internal/limits`: version 1 defaults with separate hard ceilings;
 - `internal/catalog`: pinned descriptors, canonical digests, drift
-  verification, and bounded submit-description projection.
+  verification, and bounded submit-description projection;
+- `internal/profile`: versioned profile loading with secure file validation
+  and effective-limit resolution;
+- `internal/server`: profile-driven MCP server wiring the catalog projection,
+  instructions, and the bounded submit `tool` enum;
+- `internal/store`: encrypted SQLite state (D2/D3/D4) with the idempotency
+  index, state-machine transitions, cross-process leases, and D12 retention
+  GC; first-open metadata and idempotent insert are atomic under concurrent
+  access;
+- the separate-process storage test suite (concurrent migration, competing
+  idempotent inserts, busy timeout, exclusive claim, lease recovery after
+  death, terminal capture surviving GC, refresh leasing, WAL recovery,
+  integrity).
 
-Still remaining in Phase 1: profile loading/validation with the catalog and
-limits wired into the server, the encrypted SQLite store with the idempotency
-index, the credential keyring integration, the worker lease/recovery logic,
-and the separate-process storage test suite.
+Still remaining in Phase 1: the credential keyring integration and the worker
+lease/recovery logic.
 
 ## Key architectural decisions (resolving spec open questions)
 
