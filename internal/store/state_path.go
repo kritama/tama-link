@@ -8,7 +8,7 @@ import (
 )
 
 // statePath pins handles to the profile directory and database inode. SQLite
-// connections verify this identity before running any file-mutating PRAGMA.
+// connections open through the pinned file identity rather than this pathname.
 type statePath struct {
 	name   string
 	parent *os.File
@@ -20,7 +20,11 @@ func secureStatePath(path string) (*statePath, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve state database %s: %w", path, err)
 	}
-	parent, file, err := openStateHandles(filepath.Dir(absolute), filepath.Base(absolute))
+	parentPath := filepath.Dir(absolute)
+	if err := os.MkdirAll(parentPath, 0o700); err != nil {
+		return nil, fmt.Errorf("create state database parent %s: %w", parentPath, err)
+	}
+	parent, file, err := openStateHandles(parentPath, filepath.Base(absolute))
 	if err != nil {
 		return nil, classifyStatePathError(absolute, err)
 	}
@@ -53,27 +57,6 @@ func (p *statePath) validateHandles() error {
 	}
 	if err := p.file.Chmod(0o600); err != nil {
 		return fmt.Errorf("restrict state database %s: %w", p.name, err)
-	}
-	return nil
-}
-
-// Verify confirms that the current pathname still names the inode pinned by
-// the no-follow handle. It is called immediately before and after every
-// physical SQLite connection opens, before connection PRAGMAs may write.
-func (p *statePath) Verify() error {
-	linkInfo, err := os.Lstat(p.name)
-	if err != nil {
-		return fmt.Errorf("verify state database %s: %w", p.name, err)
-	}
-	if !linkInfo.Mode().IsRegular() {
-		return fmt.Errorf("state database %s is not a regular file", p.name)
-	}
-	heldInfo, err := p.file.Stat()
-	if err != nil {
-		return fmt.Errorf("inspect open state database %s: %w", p.name, err)
-	}
-	if !os.SameFile(heldInfo, linkInfo) {
-		return fmt.Errorf("state database %s changed while opening", p.name)
 	}
 	return nil
 }

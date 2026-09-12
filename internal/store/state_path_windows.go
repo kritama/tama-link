@@ -9,6 +9,12 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func sqlitePinnedPath(path *statePath) string {
+	// The pinned file handle excludes FILE_SHARE_DELETE, so Windows cannot
+	// replace this pathname while Store is open.
+	return path.name
+}
+
 func openStateHandles(parentPath, base string) (*os.File, *os.File, error) {
 	parent, err := openWindowsHandle(
 		parentPath,

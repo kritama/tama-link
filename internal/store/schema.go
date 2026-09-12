@@ -95,6 +95,17 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 	).Scan(&schema)
 	switch {
 	case errors.Is(err, sql.ErrNoRows):
+		empty, checkErr := databaseIsEmpty(ctx, conn)
+		if checkErr != nil {
+			return checkErr
+		}
+		if !empty {
+			return fmt.Errorf(
+				"%w: metadata %q is missing from a nonempty database",
+				ErrStateUnavailable,
+				metaSchemaVersion,
+			)
+		}
 		if err := s.initializeDatabase(ctx, conn, keys); err != nil {
 			return err
 		}
@@ -139,6 +150,21 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 		}
 	}
 	return nil
+}
+
+func databaseIsEmpty(ctx context.Context, conn *sql.Conn) (bool, error) {
+	const query = `
+SELECT NOT EXISTS (
+    SELECT 1 FROM meta
+    UNION ALL SELECT 1 FROM submissions
+    UNION ALL SELECT 1 FROM idempotency
+    UNION ALL SELECT 1 FROM leases
+)`
+	var empty bool
+	if err := conn.QueryRowContext(ctx, query).Scan(&empty); err != nil {
+		return false, fmt.Errorf("check database initialization state: %w", err)
+	}
+	return empty, nil
 }
 
 func (s *Store) upgradeSchema(ctx context.Context, conn *sql.Conn) error {

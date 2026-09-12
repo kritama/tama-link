@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"os"
 )
 
 // maxProfileFileBytes bounds one profile document on disk.
@@ -21,25 +20,11 @@ func Load(name Name, configDir string) (*Profile, error) {
 	}
 
 	path := Path(dir, name)
-	info, err := os.Lstat(path)
+	data, err := readProfileFile(path)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if isNotExist(err) {
 			return nil, fmt.Errorf("profile %q not found at %s", name, path)
 		}
-		return nil, fmt.Errorf("read profile %s: %w", path, err)
-	}
-	if info.IsDir() {
-		return nil, fmt.Errorf("profile path %s is a directory", path)
-	}
-	if info.Mode()&os.ModeType != 0 {
-		return nil, fmt.Errorf("profile path %s is not a regular file", path)
-	}
-	if info.Size() > maxProfileFileBytes {
-		return nil, fmt.Errorf("profile %s exceeds %d bytes", path, maxProfileFileBytes)
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
 		return nil, fmt.Errorf("read profile %s: %w", path, err)
 	}
 	if err := rejectDuplicateKeys(data); err != nil {

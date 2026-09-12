@@ -3,8 +3,10 @@ package store_test
 import (
 	"context"
 	"crypto/rand"
+	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -141,6 +143,26 @@ func TestOpenCreatesDatabaseAndKey(t *testing.T) {
 	}
 }
 
+func TestOpenCreatesCanonicalProfileDirectory(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	path := filepath.Join(root, "profiles", "tama-app", "default.db")
+	s, err := store.Open(context.Background(), path, newMemKeys(), store.Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("Open canonical path: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+
+	info, err := os.Stat(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("stat profile state directory: %v", err)
+	}
+	if runtime.GOOS != "windows" && info.Mode().Perm() != 0o700 {
+		t.Fatalf("profile state directory mode = %o, want 700", info.Mode().Perm())
+	}
+}
+
 func TestOpenReopensExistingDatabase(t *testing.T) {
 	keys := newMemKeys()
 	clk := newClock()
@@ -198,6 +220,50 @@ func TestOpenFailsClosedWithoutKey(t *testing.T) {
 	t.Cleanup(func() { _ = reopened.Close() })
 	if _, err := reopened.GetSubmission(context.Background(), "sub-1"); err != nil {
 		t.Fatalf("database damaged by failed open: %v", err)
+	}
+}
+
+func TestOpenFailsClosedWhenNonemptyDatabaseLosesMetadata(t *testing.T) {
+	keys := newMemKeys()
+	s, path := openTestStore(t, keys, newClock())
+	if _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	uri := (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
+	db, err := sql.Open("sqlite", uri)
+	if err != nil {
+		t.Fatalf("open raw database: %v", err)
+	}
+	if _, err := db.Exec("DELETE FROM meta"); err != nil {
+		t.Fatalf("remove metadata: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close raw database: %v", err)
+	}
+
+	_, err = store.Open(context.Background(), path, keys, store.Config{Limits: limits.Default()})
+	if !errors.Is(err, store.ErrStateUnavailable) {
+		t.Fatalf("Open missing metadata = %v, want ErrStateUnavailable", err)
+	}
+	if keys.count() != 1 {
+		t.Fatalf("state keys = %d, want the original key only", keys.count())
+	}
+
+	db, err = sql.Open("sqlite", uri)
+	if err != nil {
+		t.Fatalf("reopen raw database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var submissions int
+	if err := db.QueryRow("SELECT COUNT(*) FROM submissions").Scan(&submissions); err != nil {
+		t.Fatalf("count preserved submissions: %v", err)
+	}
+	if submissions != 1 {
+		t.Fatalf("submissions after failed open = %d, want 1", submissions)
 	}
 }
 

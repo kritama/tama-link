@@ -5,9 +5,17 @@ package store
 import (
 	"fmt"
 	"os"
+	"strconv"
+	"syscall"
 
 	"golang.org/x/sys/unix"
 )
+
+func sqlitePinnedPath(path *statePath) string {
+	// /dev/fd resolves through the descriptor already opened with openat and
+	// O_NOFOLLOW, so SQLite cannot select a replacement at path.name.
+	return "/dev/fd/" + strconv.FormatUint(uint64(path.file.Fd()), 10)
+}
 
 func openStateHandles(parentPath, base string) (*os.File, *os.File, error) {
 	parentFD, err := unix.Open(parentPath, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
@@ -23,6 +31,15 @@ func openStateHandles(parentPath, base string) (*os.File, *os.File, error) {
 	if !info.IsDir() {
 		_ = parent.Close()
 		return nil, nil, fmt.Errorf("not a directory")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		_ = parent.Close()
+		return nil, nil, fmt.Errorf("inspect owner of state database parent %s", parentPath)
+	}
+	if int(stat.Uid) != os.Geteuid() {
+		_ = parent.Close()
+		return nil, nil, fmt.Errorf("state database parent %s is not owned by the current user", parentPath)
 	}
 	if info.Mode().Perm()&0o077 != 0 {
 		if err := parent.Chmod(0o700); err != nil {

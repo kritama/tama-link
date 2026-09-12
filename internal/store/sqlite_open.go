@@ -21,21 +21,13 @@ const (
 	sqliteLocked = 6
 )
 
-type verifiedConnector struct {
+type configuringConnector struct {
 	driver.Connector
-	path *statePath
 }
 
-func (c verifiedConnector) Connect(ctx context.Context) (driver.Conn, error) {
-	if err := c.path.Verify(); err != nil {
-		return nil, err
-	}
+func (c configuringConnector) Connect(ctx context.Context) (driver.Conn, error) {
 	connection, err := c.Connector.Connect(ctx)
 	if err != nil {
-		return nil, err
-	}
-	if err := c.path.Verify(); err != nil {
-		_ = connection.Close()
 		return nil, err
 	}
 	if err := configureSQLite(ctx, connection); err != nil {
@@ -46,11 +38,11 @@ func (c verifiedConnector) Connect(ctx context.Context) (driver.Conn, error) {
 }
 
 func openSQLite(ctx context.Context, path *statePath) (*sql.DB, error) {
-	base, err := sqlite.NewConnector(sqliteURI(path.name))
+	base, err := sqlite.NewConnector(sqliteURI(sqlitePinnedPath(path)))
 	if err != nil {
 		return nil, fmt.Errorf("open state database %s: %w", path.name, err)
 	}
-	connector := verifiedConnector{Connector: base, path: path}
+	connector := configuringConnector{Connector: base}
 	deadline := time.Now().Add(openRetryLimit)
 
 	for {

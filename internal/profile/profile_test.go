@@ -207,6 +207,43 @@ func TestLoadRejectsSymlink(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsNonPrivatePermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows profile access is enforced through handles and ownership")
+	}
+
+	tests := []struct {
+		name  string
+		chmod func(string) error
+	}{
+		{
+			name: "profile directory",
+			chmod: func(configDir string) error {
+				return os.Chmod(filepath.Join(configDir, ProfilesDirName), 0o770)
+			},
+		},
+		{
+			name: "profile file",
+			chmod: func(configDir string) error {
+				return os.Chmod(Path(configDir, Name("tama-app")), 0o660)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			configDir := t.TempDir()
+			writeProfile(t, configDir, validProfile())
+			if err := test.chmod(configDir); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := Load(Name("tama-app"), configDir); err == nil ||
+				!strings.Contains(err.Error(), "permissions") {
+				t.Fatalf("Load with non-private permissions = %v", err)
+			}
+		})
+	}
+}
+
 func TestLoadRejectsMalformedDocuments(t *testing.T) {
 	t.Parallel()
 
