@@ -70,6 +70,25 @@ func TestCreateIdempotentHit(t *testing.T) {
 	}
 }
 
+func TestCreateExactRetryReusesSubmission(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestStore(t, newMemKeys(), newClock())
+	ctx := context.Background()
+	input := testSubmission("sub-1", "req-1")
+	first, err := s.CreateSubmission(ctx, input)
+	if err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	retry, err := s.CreateSubmission(ctx, input)
+	if err != nil {
+		t.Fatalf("exact idempotent retry: %v", err)
+	}
+	if retry.ID != first.ID || retry.ClientRequestID != first.ClientRequestID {
+		t.Fatalf("retry = %+v, want original %+v", retry, first)
+	}
+}
+
 func TestCreateCanonicalizesArgumentsBeforeIdempotency(t *testing.T) {
 	t.Parallel()
 

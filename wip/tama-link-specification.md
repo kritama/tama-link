@@ -401,9 +401,14 @@ downstream client disconnected.
 
 The store must tolerate multiple Tama Link processes opening the same profile.
 SQLite uses WAL mode, bounded busy handling, transactional idempotency, and
-lease-based worker ownership. Schema migration, job claiming, terminal capture,
-garbage collection, and OAuth refresh coordination must be safe across
-processes, not merely goroutines.
+lease-based worker ownership. The database file and its `-wal` and `-shm`
+sidecars are opened or created without following links inside the validated
+private profile directory before WAL is enabled. Schema migration, job
+claiming, terminal capture, garbage collection, and OAuth refresh coordination
+must be safe across processes, not merely goroutines. An existing database
+whose declared schema is missing a required durable table or column fails
+closed; startup must not silently recreate the missing object and lose its
+durable index or ownership state.
 
 ## Operation catalog and instruction projection
 
@@ -553,6 +558,7 @@ The planned non-secret profile contains:
 
 ```text
 profile version
+canonical profile digest
 Tama protected-resource origin
 MCP endpoint
 expected authorization-server issuer
@@ -567,6 +573,14 @@ timeouts, size limits, and retention policy
 
 The Memovee CLI owns creation and reconciliation of its profile. Tama Link
 validates profiles but does not start containers or create root users.
+
+The profile digest is `sha256:` followed by the lowercase SHA-256 digest of the
+canonical JSON encoding of the complete non-secret profile, excluding the
+`digest` field itself. Canonicalization ignores insignificant whitespace and
+object-key order while preserving JSON number literals. If a digest is present,
+Tama Link always verifies it. A profile that raises any version 1 default limit
+must include a matching digest; omission or mismatch fails closed until the
+profile owner reconciles and rewrites the profile.
 
 OAuth behavior must follow protected-resource metadata and authorization-server
 discovery. Browser authorization and consent remain user-visible. Tokens must

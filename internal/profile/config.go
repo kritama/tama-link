@@ -49,6 +49,9 @@ type Profile struct {
 	Limits *limits.Limits `json:"limits,omitempty"`
 	// Operations is the pinned approved-operation catalog.
 	Operations []catalog.Descriptor `json:"operations"`
+	// Digest reconciles the complete non-secret profile configuration. It is
+	// required when any profile limit exceeds the version 1 default.
+	Digest string `json:"digest,omitempty"`
 }
 
 // Bounds holds the protocol versions the profile is compatible with,
@@ -128,7 +131,8 @@ func (p *Profile) Validate(expected Name) error {
 	if err := p.State.Valid(); err != nil {
 		return err
 	}
-	if err := p.EffectiveLimits().Validate(); err != nil {
+	effectiveLimits := p.EffectiveLimits()
+	if err := effectiveLimits.Validate(); err != nil {
 		return err
 	}
 	if len(p.Operations) == 0 {
@@ -144,7 +148,30 @@ func (p *Profile) Validate(expected Name) error {
 		}
 		seen[op.Name] = true
 	}
+	if p.Digest != "" {
+		if err := p.CheckDigest(); err != nil {
+			return err
+		}
+	}
+	if raisesDefaultLimits(effectiveLimits) && p.Digest == "" {
+		return fmt.Errorf("profile digest is required when limits exceed defaults")
+	}
 	return nil
+}
+
+func raisesDefaultLimits(got limits.Limits) bool {
+	defaults := limits.Default()
+	return got.ArgumentsBytes > defaults.ArgumentsBytes ||
+		got.ArgumentDepth > defaults.ArgumentDepth ||
+		got.ResponseBytes > defaults.ResponseBytes ||
+		got.ResultBytes > defaults.ResultBytes ||
+		got.EventBytes > defaults.EventBytes ||
+		got.MaxEvents > defaults.MaxEvents ||
+		got.EventsBytes > defaults.EventsBytes ||
+		got.AwaitDefault > defaults.AwaitDefault ||
+		got.AwaitMax > defaults.AwaitMax ||
+		got.PayloadRetention > defaults.PayloadRetention ||
+		got.TombstoneRetention > defaults.TombstoneRetention
 }
 
 // Valid reports whether both references are safe opaque names.

@@ -360,6 +360,55 @@ func TestValidateAcceptsPinnedLimits(t *testing.T) {
 	}
 }
 
+func TestValidateRaisedLimitsRequireReconciledDigest(t *testing.T) {
+	t.Parallel()
+
+	p := validProfile()
+	raised := limits.Default()
+	raised.ArgumentsBytes = 2 * limits.MiB
+	p.Limits = &raised
+
+	if err := p.Validate(Name("tama-app")); err == nil || !strings.Contains(err.Error(), "digest is required") {
+		t.Fatalf("Validate() without digest = %v, want required-digest error", err)
+	}
+	p.Digest = "sha256:stale"
+	if err := p.Validate(Name("tama-app")); err == nil || !strings.Contains(err.Error(), "digest mismatch") {
+		t.Fatalf("Validate() with stale digest = %v, want mismatch", err)
+	}
+	digest, err := p.ComputeDigest()
+	if err != nil {
+		t.Fatalf("ComputeDigest: %v", err)
+	}
+	p.Digest = digest
+	if err := p.Validate(Name("tama-app")); err != nil {
+		t.Fatalf("Validate() with reconciled digest: %v", err)
+	}
+}
+
+func TestProfileDigestIsCanonical(t *testing.T) {
+	t.Parallel()
+
+	first := validProfile()
+	second := validProfile()
+	first.Operations[0].InputSchema = json.RawMessage(`{
+		"required": ["message"],
+		"properties": {"message": {"type": "string"}},
+		"type": "object"
+	}`)
+	second.Operations[0].InputSchema = json.RawMessage(`{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}`)
+	firstDigest, err := first.ComputeDigest()
+	if err != nil {
+		t.Fatalf("first ComputeDigest: %v", err)
+	}
+	secondDigest, err := second.ComputeDigest()
+	if err != nil {
+		t.Fatalf("second ComputeDigest: %v", err)
+	}
+	if firstDigest != secondDigest {
+		t.Fatalf("canonical digests differ: %s != %s", firstDigest, secondDigest)
+	}
+}
+
 func TestBoundsValid(t *testing.T) {
 	t.Parallel()
 

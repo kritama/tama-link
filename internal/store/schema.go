@@ -18,7 +18,8 @@ const (
 	metaStateKeyID       = "state_key_id"
 )
 
-// createSchema creates every table if it does not exist. It is idempotent.
+// createSchema creates every table for a brand-new empty database. Existing
+// databases are validated and migrated without repairing missing objects.
 const createSchema = `
 CREATE TABLE IF NOT EXISTS meta (
     key TEXT PRIMARY KEY,
@@ -85,33 +86,30 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
-	if _, err := conn.ExecContext(ctx, createSchema); err != nil {
-		return fmt.Errorf("create schema: %w", err)
+	empty, err := databaseIsEmpty(ctx, conn)
+	if err != nil {
+		return err
 	}
-
-	var schema string
-	err = conn.QueryRowContext(ctx,
-		"SELECT value FROM meta WHERE key = ?", metaSchemaVersion,
-	).Scan(&schema)
-	switch {
-	case errors.Is(err, sql.ErrNoRows):
-		empty, checkErr := databaseIsEmpty(ctx, conn)
-		if checkErr != nil {
-			return checkErr
-		}
-		if !empty {
-			return fmt.Errorf(
-				"%w: metadata %q is missing from a nonempty database",
-				ErrStateUnavailable,
-				metaSchemaVersion,
-			)
+	if empty {
+		if _, err := conn.ExecContext(ctx, createSchema); err != nil {
+			return fmt.Errorf("create schema: %w", err)
 		}
 		if err := s.initializeDatabase(ctx, conn, keys); err != nil {
 			return err
 		}
-	case err != nil:
-		return fmt.Errorf("read metadata %q: %w", metaSchemaVersion, err)
-	default:
+	} else {
+		if err := validateRequiredTables(ctx, conn); err != nil {
+			return err
+		}
+		var schema string
+		if err := conn.QueryRowContext(ctx,
+			"SELECT value FROM meta WHERE key = ?", metaSchemaVersion,
+		).Scan(&schema); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: metadata %q is missing", ErrStateUnavailable, metaSchemaVersion)
+			}
+			return fmt.Errorf("read metadata %q: %w", metaSchemaVersion, err)
+		}
 		if err := s.readMeta(ctx, conn, schema); err != nil {
 			return err
 		}
@@ -119,6 +117,9 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 			return fmt.Errorf("%w: database has %d", ErrUnsupportedSchema, s.schema)
 		}
 		if err := s.upgradeSchema(ctx, conn); err != nil {
+			return err
+		}
+		if err := validateCurrentSchema(ctx, conn); err != nil {
 			return err
 		}
 	}
@@ -150,24 +151,6 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 		}
 	}
 	return nil
-}
-
-func databaseIsEmpty(ctx context.Context, conn *sql.Conn) (bool, error) {
-	const query = `
-SELECT NOT EXISTS (
-	SELECT 1 FROM sqlite_schema
-	WHERE name NOT LIKE 'sqlite_%'
-	  AND name NOT IN ('meta', 'submissions', 'idempotency', 'leases')
-	UNION ALL SELECT 1 FROM meta
-	UNION ALL SELECT 1 FROM submissions
-    UNION ALL SELECT 1 FROM idempotency
-    UNION ALL SELECT 1 FROM leases
-)`
-	var empty bool
-	if err := conn.QueryRowContext(ctx, query).Scan(&empty); err != nil {
-		return false, fmt.Errorf("check database initialization state: %w", err)
-	}
-	return empty, nil
 }
 
 // initializeDatabase creates the random key and all metadata while holding the

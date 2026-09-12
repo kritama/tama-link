@@ -37,15 +37,18 @@ Phase 1 is complete. The durable-domain implementation now includes:
 - `internal/catalog`: pinned descriptors, canonical digests, drift
   verification, and bounded submit-description projection;
 - `internal/profile`: versioned profile loading with duplicate-key and secure
-  URL validation, profile-isolated state paths and credential namespaces, and
-  effective-limit resolution;
+  URL validation, profile-isolated state paths and credential namespaces,
+  effective-limit resolution, and canonical whole-profile digest enforcement
+  whenever a profile raises a default limit;
 - `internal/server`: profile-driven MCP server wiring the catalog projection,
   instructions, and the bounded submit `tool` enum;
 - `internal/store`: encrypted SQLite state (D2/D3/D4) with complete-input
   idempotency, compare-and-set transitions, bounded progress, atomic terminal
   capture, lease-guarded worker writes, payload-free D12 GC, and schema and
   encryption-format migrations; first-open metadata is atomic under concurrent
-  access and ciphertext is bound to its submission and semantic field;
+  access, incomplete declared schemas fail closed, SQLite sidecars are secured
+  before WAL is enabled, and ciphertext is bound to its submission and semantic
+  field;
 - `internal/credential`: a profile-scoped platform keyring restricted to the
   secure OS backend, with missing and unavailable states kept distinct and
   fail-closed store integration;
@@ -97,11 +100,14 @@ is now recorded in the authoritative specification.
 ### D2. Local persistence is SQLite via a pure-Go driver
 
 Use `modernc.org/sqlite` (pure Go) so the existing `CGO_ENABLED=0` cross-builds
-keep working. Each profile uses an isolated database. The state store holds the
-minimum durable state the spec permits and adds the **canonical upstream
-request** (see D3). SQLite is authoritative for Tama Link's client-facing
-submission lifecycle and for locally executed System operations; it does not
-replace Tama's existing durable App graph submission.
+keep working. Each profile uses an isolated database. The main database and WAL
+sidecars are validated or securely created without following links inside the
+private profile directory. Existing declared schemas are validated before any
+migration and are never repaired with `CREATE TABLE IF NOT EXISTS`. The state
+store holds the minimum durable state the spec permits and adds the **canonical
+upstream request** (see D3). SQLite is authoritative for Tama Link's
+client-facing submission lifecycle and for locally executed System operations;
+it does not replace Tama's existing durable App graph submission.
 
 ### D3. Persist the canonical upstream request, not just the task ID
 
@@ -253,7 +259,10 @@ The initial default limits are:
   `submission_expired` tombstone retained for 30 days after completion.
 
 A profile may lower these defaults. Raising them requires explicit values
-within implementation hard ceilings and a reconciled profile digest.
+within implementation hard ceilings and a reconciled profile digest. The
+digest is SHA-256 over canonical JSON for the complete non-secret profile with
+the digest field omitted. Tama Link verifies every supplied digest and requires
+one whenever any effective limit exceeds its version 1 default.
 
 If Tama Link observes a completed upstream operation but cannot store its
 normalized result within the limit, the local submission becomes terminal

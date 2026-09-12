@@ -147,6 +147,39 @@ func TestOpenRejectsUnrelatedDatabaseWithoutPollutingIt(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsCurrentSchemaWithMissingDurableTable(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "state.db")
+	keys := &migrationKeys{}
+	s, err := Open(context.Background(), path, keys, Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("create database: %v", err)
+	}
+	if _, err := s.db.Exec("DROP TABLE idempotency"); err != nil {
+		t.Fatalf("drop idempotency: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+
+	if _, err := Open(context.Background(), path, keys, Config{Limits: limits.Default()}); !errors.Is(err, ErrStateUnavailable) {
+		t.Fatalf("Open missing durable table = %v, want ErrStateUnavailable", err)
+	}
+	db, err := sql.Open("sqlite", sqliteURI(path))
+	if err != nil {
+		t.Fatalf("open raw database: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'idempotency'`).Scan(&count); err != nil {
+		t.Fatalf("inspect rejected schema: %v", err)
+	}
+	if count != 0 {
+		t.Fatal("Open silently recreated the missing idempotency table")
+	}
+}
+
 func TestOpenRejectsMalformedSchemaVersions(t *testing.T) {
 	for _, version := range []string{"2garbage", "2.0", "2 3", " 2", "2 "} {
 		t.Run(version, func(t *testing.T) {

@@ -76,3 +76,33 @@ func TestStatePathRejectsSymlinkedParent(t *testing.T) {
 		t.Fatal("secureStatePath accepted a symlinked parent")
 	}
 }
+
+func TestStatePathRejectsSymlinkedSQLiteSidecars(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+
+	for _, suffix := range []string{"-wal", "-shm"} {
+		t.Run(suffix, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "state.db")
+			target := filepath.Join(t.TempDir(), "target")
+			if err := os.WriteFile(target, []byte("unchanged"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(target, path+suffix); err != nil {
+				t.Fatalf("create sidecar symlink: %v", err)
+			}
+			if _, err := secureStatePath(path); err == nil {
+				t.Fatalf("secureStatePath accepted symlinked %s sidecar", suffix)
+			}
+			content, err := os.ReadFile(target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(content) != "unchanged" {
+				t.Fatalf("sidecar target was modified: %q", content)
+			}
+		})
+	}
+}

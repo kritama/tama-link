@@ -5,6 +5,7 @@ package store
 import (
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"github.com/kritama/tama-link/internal/windowsacl"
 	"golang.org/x/sys/windows"
@@ -66,6 +67,15 @@ func openWindowsHandle(path string, access, creation, attributes uint32) (*os.Fi
 		return nil, fmt.Errorf("path is a reparse point")
 	}
 	return os.NewFile(uintptr(handle), path), nil
+}
+
+func openSQLiteSidecar(path *statePath, base string) (*os.File, error) {
+	return openWindowsHandle(
+		filepath.Join(filepath.Dir(path.name), base),
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.OPEN_ALWAYS,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+	)
 }
 
 func validatePrivateStateDir(path string, file *os.File, _ os.FileInfo) error {

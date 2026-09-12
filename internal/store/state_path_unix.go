@@ -75,6 +75,14 @@ func openStateAt(parentFD int, base string) (int, error) {
 	return unix.Openat(parentFD, base, flags, 0)
 }
 
+func openSQLiteSidecar(path *statePath, base string) (*os.File, error) {
+	fd, err := openStateAt(int(path.parent.Fd()), base)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(fd), base), nil
+}
+
 func validatePrivateStateDir(path string, _ *os.File, info os.FileInfo) error {
 	if info.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("state database parent %s permissions %04o are not private", path, info.Mode().Perm())

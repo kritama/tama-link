@@ -33,6 +33,10 @@ func secureStatePath(path string) (*statePath, error) {
 		_ = secured.Close()
 		return nil, err
 	}
+	if err := secured.secureSQLiteSidecars(); err != nil {
+		_ = secured.Close()
+		return nil, err
+	}
 	return secured, nil
 }
 
@@ -66,6 +70,39 @@ func (p *statePath) Close() error {
 		return nil
 	}
 	return errors.Join(p.file.Close(), p.parent.Close())
+}
+
+// secureSQLiteSidecars rejects links and special files before SQLite enables
+// WAL mode. The private, pinned parent directory prevents another principal
+// from replacing the checked entries before SQLite opens them.
+func (p *statePath) secureSQLiteSidecars() error {
+	base := filepath.Base(p.name)
+	for _, suffix := range []string{"-wal", "-shm"} {
+		name := base + suffix
+		file, err := openSQLiteSidecar(p, name)
+		if err != nil {
+			return fmt.Errorf("open SQLite sidecar %s without following links: %w", p.name+suffix, err)
+		}
+		path := p.name + suffix
+		info, statErr := file.Stat()
+		if statErr == nil && !info.Mode().IsRegular() {
+			statErr = fmt.Errorf("is not a regular file")
+		}
+		if statErr == nil {
+			statErr = file.Chmod(0o600)
+		}
+		if statErr == nil {
+			statErr = validatePrivateStateFile(path, file, info)
+		}
+		closeErr := file.Close()
+		if statErr != nil {
+			return fmt.Errorf("secure SQLite sidecar %s: %w", path, statErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close SQLite sidecar %s: %w", path, closeErr)
+		}
+	}
+	return nil
 }
 
 func classifyStatePathError(path string, err error) error {

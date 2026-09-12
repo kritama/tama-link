@@ -96,6 +96,48 @@ func TestGCNeverTouchesNonTerminalSubmissions(t *testing.T) {
 	}
 }
 
+func TestGCClearsPayloadFromAlreadyExpiredSubmission(t *testing.T) {
+	t.Parallel()
+
+	keys, clk := newMemKeys(), newClock()
+	s, _ := openTestStore(t, keys, clk)
+	ctx := context.Background()
+	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	if _, err := s.Transition(ctx, "sub-1", contract.StatusQueued, store.TransitionDetail{TaskID: "task-1"}); err != nil {
+		t.Fatalf("queue: %v", err)
+	}
+	if _, err := s.Transition(ctx, "sub-1", contract.StatusRunning, store.TransitionDetail{}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	if _, err := s.AppendEvents(ctx, "sub-1", []contract.Event{testEvent("sub-1", 1)}); err != nil {
+		t.Fatalf("AppendEvents: %v", err)
+	}
+	failure := contract.NewError(contract.CodeSubmissionExpired, "The upstream task expired.")
+	failure.Retryable = true
+	if _, err := s.Transition(ctx, "sub-1", contract.StatusExpired, store.TransitionDetail{Error: &failure}); err != nil {
+		t.Fatalf("expire: %v", err)
+	}
+
+	clk.Advance(7*24*time.Hour + time.Minute)
+	summary, err := s.GC(ctx)
+	if err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	if summary.Expired != 1 {
+		t.Fatalf("GC summary = %+v, want one cleared expired payload", summary)
+	}
+	got, err := s.GetSubmission(ctx, "sub-1")
+	if err != nil {
+		t.Fatalf("GetSubmission: %v", err)
+	}
+	if len(got.Arguments) != 0 || len(got.Events) != 0 || got.TaskID != "" ||
+		got.ErrorCode != "" || got.ErrorMessage != "" || got.ErrorRetryable {
+		t.Fatalf("expired tombstone still carries payload: %+v", got)
+	}
+}
+
 func TestCheckIntegrity(t *testing.T) {
 	t.Parallel()
 
