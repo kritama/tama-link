@@ -182,6 +182,28 @@ func TestConcurrentRunnerCannotDuplicateWork(t *testing.T) {
 	}
 }
 
+func TestConcurrentRunOnSameRunnerCannotDuplicateWork(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s := openStore(t, path, newMemoryKeys())
+	t.Cleanup(func() { _ = s.Close() })
+	createReplayable(t, s, "sub-1")
+	exec := &executor{started: make(chan struct{}, 1), release: make(chan struct{})}
+	runner, _ := worker.New(s, exec, worker.Config{Owner: "worker-a", LeaseTTL: time.Second})
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(context.Background(), "sub-1") }()
+	<-exec.started
+	if err := runner.Run(context.Background(), "sub-1"); !errors.Is(err, worker.ErrLeaseHeld) {
+		t.Fatalf("reentrant Run = %v, want ErrLeaseHeld", err)
+	}
+	close(exec.release)
+	if err := <-done; err != nil {
+		t.Fatalf("first Run: %v", err)
+	}
+	if exec.count() != 1 {
+		t.Fatalf("executor calls = %d, want 1", exec.count())
+	}
+}
+
 func TestCancelledRunRemainsRecoverable(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	s := openStore(t, path, newMemoryKeys())

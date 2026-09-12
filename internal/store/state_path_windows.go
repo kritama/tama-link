@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/kritama/tama-link/internal/windowsacl"
 	"golang.org/x/sys/windows"
 )
 
@@ -67,9 +68,10 @@ func openWindowsHandle(path string, access, creation, attributes uint32) (*os.Fi
 	return os.NewFile(uintptr(handle), path), nil
 }
 
-func validatePrivateStateDir(_ string, _ os.FileInfo) error {
-	// Holding the directory handle without FILE_SHARE_DELETE prevents another
-	// process from replacing it while this store is open. Windows access is
-	// otherwise governed by the directory's ACL rather than Unix mode bits.
-	return nil
+func validatePrivateStateDir(path string, file *os.File, _ os.FileInfo) error {
+	return windowsacl.ValidatePrivate(path, windows.Handle(file.Fd()))
+}
+
+func validatePrivateStateFile(path string, file *os.File, _ os.FileInfo) error {
+	return windowsacl.ValidatePrivate(path, windows.Handle(file.Fd()))
 }

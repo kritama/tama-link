@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-func (r *Runner) renew(ctx context.Context, cancel context.CancelFunc, leaseName string, done chan<- error) {
+func (r *Runner) renew(ctx context.Context, cancel context.CancelFunc, leaseName, leaseOwner string, done chan<- error) {
 	interval := r.ttl / 3
 	if interval <= 0 {
 		interval = time.Millisecond
@@ -19,7 +19,7 @@ func (r *Runner) renew(ctx context.Context, cancel context.CancelFunc, leaseName
 			done <- nil
 			return
 		case <-ticker.C:
-			owned, err := r.state.RenewLease(ctx, leaseName, r.owner, r.ttl)
+			owned, err := r.state.RenewLease(ctx, leaseName, leaseOwner, r.ttl)
 			if err != nil {
 				cancel()
 				done <- fmt.Errorf("%w: %w", ErrLeaseLost, err)

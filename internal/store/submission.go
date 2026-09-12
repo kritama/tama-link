@@ -259,8 +259,6 @@ func hashInput(sub NewSubmission) string {
 		[]byte(sub.Tool),
 		[]byte(sub.Strategy),
 		[]byte(sub.DescriptorDigest),
-		[]byte(sub.ProtocolVersion),
-		[]byte(sub.AdapterVersion),
 		sub.Arguments,
 	} {
 		_ = input.WriteByte(byte(len(value) >> 24))

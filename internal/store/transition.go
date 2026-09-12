@@ -205,11 +205,6 @@ func (s *Store) FailLeased(
 	return s.finish(ctx, id, contract.StatusFailed, nil, &failure, &leaseIdentity{name: leaseName, owner: owner})
 }
 
-type leaseIdentity struct {
-	name  string
-	owner string
-}
-
 func (s *Store) finish(
 	ctx context.Context,
 	id string,
@@ -224,17 +219,8 @@ func (s *Store) finish(
 	}
 	defer func() { _ = tx.Rollback() }()
 	if lease != nil {
-		var held int
-		err := tx.QueryRowContext(ctx, `
-			SELECT 1 FROM leases
-			WHERE name = ? AND owner = ? AND expires_at > ?`,
-			lease.name, lease.owner, s.now().UnixMilli(),
-		).Scan(&held)
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, ErrLeaseNotOwned
-		}
-		if err != nil {
-			return nil, fmt.Errorf("check terminal lease: %w", err)
+		if err := s.requireLiveLease(ctx, tx, *lease); err != nil {
+			return nil, err
 		}
 	}
 

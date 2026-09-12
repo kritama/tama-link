@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/kritama/tama-link/internal/contract"
 	"github.com/kritama/tama-link/internal/limits"
@@ -128,6 +129,30 @@ func TestCreateIdempotencyIncludesOperationIdentity(t *testing.T) {
 	}
 }
 
+func TestCreateIdempotencyIgnoresRuntimeVersions(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestStore(t, newMemKeys(), newClock())
+	ctx := context.Background()
+	first, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1"))
+	if err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	retry := testSubmission("sub-2", "req-1")
+	retry.ProtocolVersion = "2026-07-28"
+	retry.AdapterVersion = "tama014/2"
+	got, err := s.CreateSubmission(ctx, retry)
+	if err != nil {
+		t.Fatalf("retry after runtime version change: %v", err)
+	}
+	if got.ID != first.ID {
+		t.Fatalf("retry returned %q, want original %q", got.ID, first.ID)
+	}
+	if got.ProtocolVersion != first.ProtocolVersion || got.AdapterVersion != first.AdapterVersion {
+		t.Fatalf("retry changed persisted recovery versions: %+v", got)
+	}
+}
+
 func TestCreateValidatesInput(t *testing.T) {
 	t.Parallel()
 
@@ -234,6 +259,36 @@ func TestTransitionLifecycle(t *testing.T) {
 	}
 	if got.CompletedAt == nil {
 		t.Fatal("completed at not persisted")
+	}
+}
+
+func TestReplaceRunningTaskIDRequiresLiveLease(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestStore(t, newMemKeys(), newClock())
+	ctx := context.Background()
+	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	if _, err := s.Transition(ctx, "sub-1", contract.StatusQueued, store.TransitionDetail{}); err != nil {
+		t.Fatalf("queue submission: %v", err)
+	}
+	if _, err := s.Transition(ctx, "sub-1", contract.StatusRunning, store.TransitionDetail{TaskID: "stale-task"}); err != nil {
+		t.Fatalf("start submission: %v", err)
+	}
+	leaseName := "submission/sub-1"
+	if owned, err := s.ClaimLease(ctx, leaseName, "owner-a", time.Minute); err != nil || !owned {
+		t.Fatalf("ClaimLease = %v, %v", owned, err)
+	}
+	if _, err := s.ReplaceTaskIDLeased(ctx, "sub-1", "owner-b", "wrong-task"); !errors.Is(err, store.ErrLeaseNotOwned) {
+		t.Fatalf("replace without lease = %v, want ErrLeaseNotOwned", err)
+	}
+	got, err := s.ReplaceTaskIDLeased(ctx, "sub-1", "owner-a", "fresh-task")
+	if err != nil {
+		t.Fatalf("ReplaceTaskIDLeased: %v", err)
+	}
+	if got.Status != contract.StatusRunning || got.TaskID != "fresh-task" {
+		t.Fatalf("reattached submission = status %s, task %q", got.Status, got.TaskID)
 	}
 }
 

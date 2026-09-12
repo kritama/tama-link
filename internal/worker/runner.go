@@ -5,6 +5,8 @@ package worker
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -70,7 +72,11 @@ func New(state State, executor Executor, cfg Config) (*Runner, error) {
 // Run owns and executes one locally replayable submission.
 func (r *Runner) Run(ctx context.Context, id string) (runErr error) {
 	leaseName := "submission/" + id
-	owned, err := r.state.ClaimLease(ctx, leaseName, r.owner, r.ttl)
+	leaseOwner, err := invocationOwner(r.owner)
+	if err != nil {
+		return fmt.Errorf("create lease owner for submission %s: %w", id, err)
+	}
+	owned, err := r.state.ClaimLease(ctx, leaseName, leaseOwner, r.ttl)
 	if err != nil {
 		return fmt.Errorf("claim submission %s: %w", id, err)
 	}
@@ -80,14 +86,14 @@ func (r *Runner) Run(ctx context.Context, id string) (runErr error) {
 	defer func() {
 		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), r.ttl)
 		defer cancelRelease()
-		if err := r.state.ReleaseLease(releaseCtx, leaseName, r.owner); runErr == nil && err != nil {
+		if err := r.state.ReleaseLease(releaseCtx, leaseName, leaseOwner); runErr == nil && err != nil {
 			runErr = fmt.Errorf("release submission %s: %w", id, err)
 		}
 	}()
 
 	execCtx, cancel := context.WithCancel(ctx)
 	renewed := make(chan error, 1)
-	go r.renew(execCtx, cancel, leaseName, renewed)
+	go r.renew(execCtx, cancel, leaseName, leaseOwner, renewed)
 
 	sub, err := r.prepare(execCtx, id)
 	if err == nil {
@@ -95,10 +101,10 @@ func (r *Runner) Run(ctx context.Context, id string) (runErr error) {
 		var executeErr error
 		result, executeErr = r.executor.Execute(execCtx, sub)
 		if executeErr == nil {
-			_, err = r.state.CompleteLeased(execCtx, id, leaseName, r.owner, result)
+			_, err = r.state.CompleteLeased(execCtx, id, leaseName, leaseOwner, result)
 		} else if execCtx.Err() == nil {
 			failure := contract.NewError(contract.CodeUpstreamExecutionFailed, "The local operation could not be completed.")
-			if _, transitionErr := r.state.FailLeased(execCtx, id, leaseName, r.owner, failure); transitionErr != nil {
+			if _, transitionErr := r.state.FailLeased(execCtx, id, leaseName, leaseOwner, failure); transitionErr != nil {
 				err = transitionErr
 			} else {
 				err = fmt.Errorf("execute submission %s: %w", id, executeErr)
@@ -116,6 +122,14 @@ func (r *Runner) Run(ctx context.Context, id string) (runErr error) {
 		return ctx.Err()
 	}
 	return err
+}
+
+func invocationOwner(base string) (string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	return base + "/" + hex.EncodeToString(nonce[:]), nil
 }
 
 // Recover executes all pending locally replayable submissions. Live leases are

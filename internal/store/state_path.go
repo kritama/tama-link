@@ -44,7 +44,7 @@ func (p *statePath) validateHandles() error {
 	if !parentInfo.IsDir() {
 		return fmt.Errorf("state database parent %s is not a directory", filepath.Dir(p.name))
 	}
-	if err := validatePrivateStateDir(filepath.Dir(p.name), parentInfo); err != nil {
+	if err := validatePrivateStateDir(filepath.Dir(p.name), p.parent, parentInfo); err != nil {
 		return err
 	}
 
@@ -58,7 +58,7 @@ func (p *statePath) validateHandles() error {
 	if err := p.file.Chmod(0o600); err != nil {
 		return fmt.Errorf("restrict state database %s: %w", p.name, err)
 	}
-	return nil
+	return validatePrivateStateFile(p.name, p.file, fileInfo)
 }
 
 func (p *statePath) Close() error {

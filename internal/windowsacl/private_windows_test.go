@@ -1,6 +1,6 @@
 //go:build windows
 
-package profile
+package windowsacl
 
 import (
 	"fmt"
@@ -9,7 +9,7 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-func TestValidateProfileDACL(t *testing.T) {
+func TestValidateDACL(t *testing.T) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		t.Fatalf("GetTokenUser: %v", err)
@@ -34,9 +34,9 @@ func TestValidateProfileDACL(t *testing.T) {
 			if err != nil {
 				t.Fatalf("DACL: %v", err)
 			}
-			err = validateProfileDACL("profile", dacl, user.User.Sid)
+			err = validateDACL("path", dacl, user.User.Sid)
 			if (err != nil) != test.wantErr {
-				t.Fatalf("validateProfileDACL() error = %v, wantErr %v", err, test.wantErr)
+				t.Fatalf("validateDACL() error = %v, wantErr %v", err, test.wantErr)
 			}
 		})
 	}
