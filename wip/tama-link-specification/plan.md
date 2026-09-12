@@ -262,7 +262,10 @@ A profile may lower these defaults. Raising them requires explicit values
 within implementation hard ceilings and a reconciled profile digest. The
 digest is SHA-256 over canonical JSON for the complete non-secret profile with
 the digest field omitted. Tama Link verifies every supplied digest and requires
-one whenever any effective limit exceeds its version 1 default.
+one whenever any effective limit exceeds its version 1 default. Lowered limits
+apply only to new acceptance: exact retries are canonicalized within the hard
+ceilings and reconciled against the durable idempotency index first, so a
+profile update cannot strand already accepted work.
 
 If Tama Link observes a completed upstream operation but cannot store its
 normalized result within the limit, the local submission becomes terminal

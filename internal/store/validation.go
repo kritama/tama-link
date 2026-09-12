@@ -16,13 +16,20 @@ func canonicalArguments(arguments json.RawMessage, lim limits.Limits) (json.RawM
 	if err != nil {
 		return nil, fmt.Errorf("arguments are not valid JSON: %w", err)
 	}
-	if int64(len(canonical)) > int64(lim.ArgumentsBytes) {
-		return nil, fmt.Errorf("arguments exceed %d bytes", lim.ArgumentsBytes)
-	}
-	if depth := jsonDepth(canonical); depth > lim.ArgumentDepth {
-		return nil, fmt.Errorf("arguments depth %d exceeds %d", depth, lim.ArgumentDepth)
+	if err := validateCanonicalArguments(canonical, lim); err != nil {
+		return nil, err
 	}
 	return canonical, nil
+}
+
+func validateCanonicalArguments(arguments json.RawMessage, lim limits.Limits) error {
+	if int64(len(arguments)) > int64(lim.ArgumentsBytes) {
+		return fmt.Errorf("arguments exceed %d bytes", lim.ArgumentsBytes)
+	}
+	if depth := jsonDepth(arguments); depth > lim.ArgumentDepth {
+		return fmt.Errorf("arguments depth %d exceeds %d", depth, lim.ArgumentDepth)
+	}
+	return nil
 }
 
 // jsonDepth counts object and array nesting. The input is known-valid JSON,

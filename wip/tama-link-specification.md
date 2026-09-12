@@ -194,6 +194,10 @@ Requirements:
   substitute a profile-global or process-global conversation identity.
 - Repeating the same `client_request_id` with equivalent canonical input must
   return the original submission.
+- Lowering a profile limit must not make an already accepted idempotent request
+  unrecoverable. Tama Link canonicalizes and reconciles an existing request
+  within implementation hard ceilings before applying current profile limits;
+  those current limits govern only genuinely new acceptance.
 - Reusing it with different input must fail with `idempotency_conflict`.
 - Success means Tama Link durably accepted responsibility for the operation in
   its local store, not that Tama accepted or completed it.

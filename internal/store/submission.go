@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/kritama/tama-link/internal/contract"
+	"github.com/kritama/tama-link/internal/limits"
 	"github.com/kritama/tama-link/internal/submission"
 )
 
@@ -67,17 +68,15 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 	if sub.ID == "" || sub.ClientRequestID == "" || sub.Tool == "" {
 		return nil, errors.New("submission id, client request id, and tool are required")
 	}
-	arguments, err := canonicalArguments(sub.Arguments, s.limits)
+	// Canonicalize within the implementation ceiling before applying the
+	// current profile limits. Existing idempotency records remain recoverable
+	// when a profile later lowers its acceptance limits.
+	arguments, err := canonicalArguments(sub.Arguments, limits.HardCeiling())
 	if err != nil {
 		return nil, err
 	}
 	sub.Arguments = arguments
 	argsHash := hashInput(sub)
-
-	encryptedArgs, err := s.cipher.seal(arguments, sub.ID, "arguments")
-	if err != nil {
-		return nil, fmt.Errorf("seal arguments: %w", err)
-	}
 
 	now := s.now().UnixMilli()
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -103,6 +102,13 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 	}
 	if affected == 0 {
 		return s.reconcileIdempotentSubmission(ctx, tx, sub.ClientRequestID, argsHash)
+	}
+	if err := validateCanonicalArguments(arguments, s.limits); err != nil {
+		return nil, err
+	}
+	encryptedArgs, err := s.cipher.seal(arguments, sub.ID, "arguments")
+	if err != nil {
+		return nil, fmt.Errorf("seal arguments: %w", err)
 	}
 
 	insert := `

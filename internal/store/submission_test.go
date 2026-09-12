@@ -89,6 +89,84 @@ func TestCreateExactRetryReusesSubmission(t *testing.T) {
 	}
 }
 
+func TestCreateRetrySurvivesLoweredArgumentLimits(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name      string
+		arguments []byte
+		lower     func(*limits.Limits)
+	}{
+		{
+			name:      "bytes",
+			arguments: []byte(`{"message":"larger than sixteen bytes"}`),
+			lower: func(l *limits.Limits) {
+				l.ArgumentsBytes = 16
+			},
+		},
+		{
+			name:      "depth",
+			arguments: []byte(`{"a":{"b":{"c":1}}}`),
+			lower: func(l *limits.Limits) {
+				l.ArgumentDepth = 2
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+
+			ctx := context.Background()
+			keys := newMemKeys()
+			path := filepath.Join(t.TempDir(), "state.db")
+			initial, err := store.Open(ctx, path, keys, store.Config{Limits: limits.Default()})
+			if err != nil {
+				t.Fatalf("Open initial store: %v", err)
+			}
+			input := testSubmission("sub-1", "req-1")
+			input.Arguments = test.arguments
+			created, err := initial.CreateSubmission(ctx, input)
+			if err != nil {
+				t.Fatalf("CreateSubmission: %v", err)
+			}
+			if err := initial.Close(); err != nil {
+				t.Fatalf("close initial store: %v", err)
+			}
+
+			lowered := limits.Default()
+			test.lower(&lowered)
+			reopened, err := store.Open(ctx, path, keys, store.Config{Limits: lowered})
+			if err != nil {
+				t.Fatalf("Open with lowered limits: %v", err)
+			}
+			t.Cleanup(func() { _ = reopened.Close() })
+
+			retry := input
+			retry.ID = "sub-2"
+			got, err := reopened.CreateSubmission(ctx, retry)
+			if err != nil {
+				t.Fatalf("retry after lowering limits: %v", err)
+			}
+			if got.ID != created.ID {
+				t.Fatalf("retry returned %q, want original %q", got.ID, created.ID)
+			}
+			conflict := input
+			conflict.ID = "sub-conflict"
+			conflict.Tool = "other"
+			if _, err := reopened.CreateSubmission(ctx, conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
+				t.Fatalf("conflicting retry = %v, want ErrIdempotencyConflict", err)
+			}
+
+			fresh := input
+			fresh.ID = "sub-3"
+			fresh.ClientRequestID = "req-2"
+			if _, err := reopened.CreateSubmission(ctx, fresh); err == nil {
+				t.Fatal("new submission exceeding lowered limits was accepted")
+			}
+		})
+	}
+}
+
 func TestCreateCanonicalizesArgumentsBeforeIdempotency(t *testing.T) {
 	t.Parallel()
 
