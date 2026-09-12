@@ -55,6 +55,22 @@ func (l losingState) RenewLease(context.Context, string, string, time.Duration) 
 	return false, nil
 }
 
+type blockedRenewState struct {
+	*store.Store
+	deadline chan time.Duration
+}
+
+func (s blockedRenewState) RenewLease(ctx context.Context, _ string, _ string, _ time.Duration) (bool, error) {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		s.deadline <- 0
+	} else {
+		s.deadline <- time.Until(deadline)
+	}
+	<-ctx.Done()
+	return false, ctx.Err()
+}
+
 func (e *executor) Execute(ctx context.Context, _ *store.Submission) (contract.Result, error) {
 	e.mu.Lock()
 	e.calls++
@@ -261,5 +277,32 @@ func TestLeaseLossCancelsExecution(t *testing.T) {
 	}
 	if got.Status != contract.StatusRunning || got.Result != nil {
 		t.Fatalf("lease-lost submission = %+v, want recoverable running state", got)
+	}
+}
+
+func TestBlockedRenewalCancelsBeforeLeaseExpiry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s := openStore(t, path, newMemoryKeys())
+	t.Cleanup(func() { _ = s.Close() })
+	createReplayable(t, s, "sub-1")
+
+	const ttl = 90 * time.Millisecond
+	deadlines := make(chan time.Duration, 1)
+	state := blockedRenewState{Store: s, deadline: deadlines}
+	runner, err := worker.New(state, &executor{release: make(chan struct{})}, worker.Config{
+		Owner: "worker-a", LeaseTTL: ttl,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- runner.Run(context.Background(), "sub-1") }()
+
+	deadline := <-deadlines
+	if deadline <= 0 || deadline > ttl/2 {
+		t.Fatalf("renewal deadline = %s, want a bounded deadline before lease expiry", deadline)
+	}
+	if err := <-done; !errors.Is(err, worker.ErrLeaseLost) {
+		t.Fatalf("Run after blocked renewal = %v, want ErrLeaseLost", err)
 	}
 }

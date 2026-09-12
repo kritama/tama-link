@@ -9,17 +9,23 @@ import (
 func (r *Runner) renew(ctx context.Context, cancel context.CancelFunc, leaseName, leaseOwner string, done chan<- error) {
 	interval := r.ttl / 3
 	if interval <= 0 {
-		interval = time.Millisecond
+		interval = r.ttl
 	}
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			done <- nil
 			return
-		case <-ticker.C:
-			owned, err := r.state.RenewLease(ctx, leaseName, leaseOwner, r.ttl)
+		case <-timer.C:
+			renewCtx, stopRenew := context.WithTimeout(ctx, interval)
+			owned, err := r.state.RenewLease(renewCtx, leaseName, leaseOwner, r.ttl)
+			stopRenew()
+			if ctx.Err() != nil {
+				done <- nil
+				return
+			}
 			if err != nil {
 				cancel()
 				done <- fmt.Errorf("%w: %w", ErrLeaseLost, err)
@@ -30,6 +36,7 @@ func (r *Runner) renew(ctx context.Context, cancel context.CancelFunc, leaseName
 				done <- ErrLeaseLost
 				return
 			}
+			timer.Reset(interval)
 		}
 	}
 }
