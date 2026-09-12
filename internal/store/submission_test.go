@@ -69,6 +69,33 @@ func TestCreateIdempotentHit(t *testing.T) {
 	}
 }
 
+func TestCreateCanonicalizesArgumentsBeforeIdempotency(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestStore(t, newMemKeys(), newClock())
+	ctx := context.Background()
+	first := testSubmission("sub-1", "req-1")
+	first.Arguments = []byte(`{ "z": 9007199254740993, "nested": {"b": 2, "a": 1} }`)
+	created, err := s.CreateSubmission(ctx, first)
+	if err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	want := `{"nested":{"a":1,"b":2},"z":9007199254740993}`
+	if string(created.Arguments) != want {
+		t.Fatalf("canonical arguments = %s, want %s", created.Arguments, want)
+	}
+
+	retry := testSubmission("sub-2", "req-1")
+	retry.Arguments = []byte("{\n\t\"nested\": {\"a\":1, \"b\":2}, \"z\":9007199254740993\n}")
+	got, err := s.CreateSubmission(ctx, retry)
+	if err != nil {
+		t.Fatalf("equivalent idempotent retry: %v", err)
+	}
+	if got.ID != created.ID {
+		t.Fatalf("retry returned %q, want original %q", got.ID, created.ID)
+	}
+}
+
 func TestCreateIdempotentConflict(t *testing.T) {
 	t.Parallel()
 
@@ -128,6 +155,12 @@ func TestCreateValidatesInput(t *testing.T) {
 	invalidJSON.Arguments = []byte(`{"message":`)
 	if _, err := s.CreateSubmission(ctx, invalidJSON); err == nil {
 		t.Fatal("invalid JSON arguments accepted, want error")
+	}
+
+	duplicateKey := testSubmission("sub-duplicate", "req-duplicate")
+	duplicateKey.Arguments = []byte(`{"message":"first","message":"second"}`)
+	if _, err := s.CreateSubmission(ctx, duplicateKey); err == nil {
+		t.Fatal("duplicate argument key accepted, want error")
 	}
 }
 

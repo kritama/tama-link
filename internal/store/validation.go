@@ -2,23 +2,27 @@ package store
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 
+	"github.com/kritama/tama-link/internal/jsonvalue"
 	"github.com/kritama/tama-link/internal/limits"
 )
 
-func validateArguments(arguments json.RawMessage, lim limits.Limits) error {
-	if !json.Valid(arguments) {
-		return errors.New("arguments are not valid JSON")
+func canonicalArguments(arguments json.RawMessage, lim limits.Limits) (json.RawMessage, error) {
+	if len(arguments) == 0 {
+		return nil, fmt.Errorf("arguments are not valid JSON")
 	}
-	if int64(len(arguments)) > int64(lim.ArgumentsBytes) {
-		return fmt.Errorf("arguments exceed %d bytes", lim.ArgumentsBytes)
+	canonical, err := jsonvalue.Canonical(arguments)
+	if err != nil {
+		return nil, fmt.Errorf("arguments are not valid JSON: %w", err)
 	}
-	if depth := jsonDepth(arguments); depth > lim.ArgumentDepth {
-		return fmt.Errorf("arguments depth %d exceeds %d", depth, lim.ArgumentDepth)
+	if int64(len(canonical)) > int64(lim.ArgumentsBytes) {
+		return nil, fmt.Errorf("arguments exceed %d bytes", lim.ArgumentsBytes)
 	}
-	return nil
+	if depth := jsonDepth(canonical); depth > lim.ArgumentDepth {
+		return nil, fmt.Errorf("arguments depth %d exceeds %d", depth, lim.ArgumentDepth)
+	}
+	return canonical, nil
 }
 
 // jsonDepth counts object and array nesting. The input is known-valid JSON,

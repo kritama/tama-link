@@ -71,9 +71,6 @@ CREATE TABLE IF NOT EXISTS leases (
 // database must find its stored key in the credential backend or the open
 // fails closed.
 func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
-	if _, err := s.db.ExecContext(ctx, createSchema); err != nil {
-		return fmt.Errorf("create schema: %w", err)
-	}
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
 		return fmt.Errorf("acquire migration connection: %w", err)
@@ -88,6 +85,9 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 			_, _ = conn.ExecContext(context.Background(), "ROLLBACK")
 		}
 	}()
+	if _, err := conn.ExecContext(ctx, createSchema); err != nil {
+		return fmt.Errorf("create schema: %w", err)
+	}
 
 	var schema string
 	err = conn.QueryRowContext(ctx,
@@ -155,8 +155,11 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 func databaseIsEmpty(ctx context.Context, conn *sql.Conn) (bool, error) {
 	const query = `
 SELECT NOT EXISTS (
-    SELECT 1 FROM meta
-    UNION ALL SELECT 1 FROM submissions
+	SELECT 1 FROM sqlite_schema
+	WHERE name NOT LIKE 'sqlite_%'
+	  AND name NOT IN ('meta', 'submissions', 'idempotency', 'leases')
+	UNION ALL SELECT 1 FROM meta
+	UNION ALL SELECT 1 FROM submissions
     UNION ALL SELECT 1 FROM idempotency
     UNION ALL SELECT 1 FROM leases
 )`
@@ -165,23 +168,6 @@ SELECT NOT EXISTS (
 		return false, fmt.Errorf("check database initialization state: %w", err)
 	}
 	return empty, nil
-}
-
-func (s *Store) upgradeSchema(ctx context.Context, conn *sql.Conn) error {
-	if s.schema == 1 {
-		if _, err := conn.ExecContext(ctx,
-			"ALTER TABLE submissions ADD COLUMN error_retryable INTEGER NOT NULL DEFAULT 0",
-		); err != nil {
-			return fmt.Errorf("upgrade schema to 2: %w", err)
-		}
-		if _, err := conn.ExecContext(ctx,
-			"UPDATE meta SET value = ? WHERE key = ?", strconv.Itoa(schemaVersion), metaSchemaVersion,
-		); err != nil {
-			return fmt.Errorf("record schema 2: %w", err)
-		}
-		s.schema = 2
-	}
-	return nil
 }
 
 // initializeDatabase creates the random key and all metadata while holding the
@@ -255,8 +241,8 @@ func (s *Store) readMeta(ctx context.Context, conn *sql.Conn, schema string) err
 }
 
 func parseSchemaVersion(value string) (int, error) {
-	var version int
-	if _, err := fmt.Sscanf(value, "%d", &version); err != nil || version <= 0 {
+	version, err := strconv.Atoi(value)
+	if err != nil || version <= 0 {
 		return 0, fmt.Errorf("metadata schema version %q is not a positive integer", value)
 	}
 	return version, nil

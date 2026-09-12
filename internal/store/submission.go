@@ -67,12 +67,14 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 	if sub.ID == "" || sub.ClientRequestID == "" || sub.Tool == "" {
 		return nil, errors.New("submission id, client request id, and tool are required")
 	}
-	if err := validateArguments(sub.Arguments, s.limits); err != nil {
+	arguments, err := canonicalArguments(sub.Arguments, s.limits)
+	if err != nil {
 		return nil, err
 	}
+	sub.Arguments = arguments
 	argsHash := hashInput(sub)
 
-	encryptedArgs, err := s.cipher.seal(sub.Arguments, sub.ID, "arguments")
+	encryptedArgs, err := s.cipher.seal(arguments, sub.ID, "arguments")
 	if err != nil {
 		return nil, fmt.Errorf("seal arguments: %w", err)
 	}
