@@ -141,6 +141,9 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 	if !found {
 		return fmt.Errorf("%w: key %q is missing from the credential backend", ErrStateUnavailable, s.keyID)
 	}
+	if len(key) != stateKeySize {
+		return fmt.Errorf("%w: key %q must be %d bytes, got %d", ErrStateUnavailable, s.keyID, stateKeySize, len(key))
+	}
 	s.cipher, err = newStateCipher(key)
 	if err != nil {
 		return err
@@ -164,8 +167,8 @@ func (s *Store) initializeDatabase(ctx context.Context, conn *sql.Conn, keys Key
 		// be established, so the profile state cannot be secured.
 		return fmt.Errorf("%w: create state key: %w", ErrStateUnavailable, err)
 	}
-	if keyID == "" || len(key) != 32 {
-		return fmt.Errorf("state key %q must be 32 bytes", keyID)
+	if keyID == "" || len(key) != stateKeySize {
+		return fmt.Errorf("state key %q must be %d bytes", keyID, stateKeySize)
 	}
 	if len(keyID) > maxKeyID {
 		return fmt.Errorf("state key identifier exceeds %d bytes", maxKeyID)

@@ -192,13 +192,13 @@ func (d Descriptor) Validate() error {
 	if !d.TaskSupport.Valid() {
 		return fmt.Errorf("descriptor %q has unknown task support %q", d.Name, d.TaskSupport)
 	}
-	if err := checkObjectSchema("input_schema", d.InputSchema, false); err != nil {
+	if err := checkSchema("input_schema", d.InputSchema, false, true); err != nil {
 		return err
 	}
-	if err := checkObjectSchema("client_schema", d.ClientSchema, true); err != nil {
+	if err := checkSchema("client_schema", d.ClientSchema, true, true); err != nil {
 		return err
 	}
-	if err := checkObjectSchema("output_schema", d.OutputSchema, true); err != nil {
+	if err := checkSchema("output_schema", d.OutputSchema, true, false); err != nil {
 		return err
 	}
 	targets := make(map[string]bool, len(d.Bindings))
@@ -214,7 +214,7 @@ func (d Descriptor) Validate() error {
 	return d.CheckDigest()
 }
 
-func checkObjectSchema(field string, raw json.RawMessage, optional bool) error {
+func checkSchema(field string, raw json.RawMessage, optional, requireObjectType bool) error {
 	if len(raw) == 0 {
 		if optional {
 			return nil
@@ -232,8 +232,12 @@ func checkObjectSchema(field string, raw json.RawMessage, optional bool) error {
 	if err := json.Unmarshal(canonicalized, &value); err != nil {
 		return fmt.Errorf("%s is not valid JSON: %w", field, err)
 	}
-	if _, ok := value.(map[string]any); !ok {
+	object, ok := value.(map[string]any)
+	if !ok {
 		return fmt.Errorf("%s must be a JSON object", field)
+	}
+	if schemaType, ok := object["type"].(string); requireObjectType && (!ok || schemaType != "object") {
+		return fmt.Errorf("%s must declare type object", field)
 	}
 	return nil
 }

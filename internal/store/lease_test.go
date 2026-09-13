@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/kritama/tama-link/internal/contract"
+	"github.com/kritama/tama-link/internal/limits"
 	"github.com/kritama/tama-link/internal/store"
 )
 
@@ -39,6 +40,32 @@ func TestLeaseClaimIsExclusive(t *testing.T) {
 	}
 	if !renewed {
 		t.Fatal("owner did not re-acquire its own live lease")
+	}
+}
+
+func TestLeaseClaimDoesNotReportOwnershipAfterItsDeadline(t *testing.T) {
+	base := time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)
+	calls := 0
+	now := func() time.Time {
+		calls++
+		if calls == 1 {
+			return base
+		}
+		return base.Add(2 * time.Minute)
+	}
+	path := t.TempDir() + "/state.db"
+	s, err := store.Open(context.Background(), path, newMemKeys(), store.Config{Limits: limits.Default(), Now: now})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	owned, err := s.ClaimLease(context.Background(), "worker", "owner-a", time.Minute)
+	if err != nil {
+		t.Fatalf("ClaimLease: %v", err)
+	}
+	if owned {
+		t.Fatal("ClaimLease reported ownership after the written deadline elapsed")
 	}
 }
 
@@ -119,6 +146,7 @@ func TestLeaseValidatesIdentityAndTTL(t *testing.T) {
 		{"", "owner", time.Minute},
 		{"worker", "", time.Minute},
 		{"worker", "owner", 0},
+		{"worker", "owner", time.Nanosecond},
 	} {
 		if _, err := s.ClaimLease(context.Background(), input.name, input.owner, input.ttl); err == nil {
 			t.Fatalf("ClaimLease(%q, %q, %s) succeeded", input.name, input.owner, input.ttl)

@@ -12,6 +12,12 @@ func canonicalArguments(arguments json.RawMessage, lim limits.Limits) (json.RawM
 	if len(arguments) == 0 {
 		return nil, fmt.Errorf("arguments are not valid JSON")
 	}
+	// Reject excessive nesting before the recursive canonicalizer constructs a
+	// value tree. The raw scan is conservative; canonicalization below remains
+	// authoritative for JSON validity.
+	if depth := jsonDepth(arguments); depth > lim.ArgumentDepth {
+		return nil, fmt.Errorf("arguments depth %d exceeds %d", depth, lim.ArgumentDepth)
+	}
 	canonical, err := jsonvalue.Canonical(arguments)
 	if err != nil {
 		return nil, fmt.Errorf("arguments are not valid JSON: %w", err)

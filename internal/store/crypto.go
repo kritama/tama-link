@@ -25,6 +25,10 @@ const encryptionFormat = 2
 // maxKeyID bounds the non-secret key identifier stored in metadata.
 const maxKeyID = 128
 
+// stateKeySize is the only accepted state-key size. Accepting another valid
+// AES key size would silently weaken the documented AES-256 state format.
+const stateKeySize = 32
+
 // stateCipher seals and opens sensitive submission blobs with AES-256-GCM.
 // Each blob is a random 96-bit nonce followed by the ciphertext.
 type stateCipher struct {

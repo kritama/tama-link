@@ -109,6 +109,11 @@ func TestDescriptorValidate(t *testing.T) {
 	if err := testDescriptor(t).Validate(); err != nil {
 		t.Fatalf("valid descriptor rejected: %v", err)
 	}
+	if err := testDescriptor(t, func(d *Descriptor) {
+		d.OutputSchema = json.RawMessage(`{"type":"array","items":{"type":"string"}}`)
+	}).Validate(); err != nil {
+		t.Fatalf("array output schema rejected: %v", err)
+	}
 
 	tests := []struct {
 		name   string
@@ -122,6 +127,7 @@ func TestDescriptorValidate(t *testing.T) {
 		{"missing input schema", func(d *Descriptor) { d.InputSchema = nil }},
 		{"invalid schema JSON", func(d *Descriptor) { d.InputSchema = json.RawMessage(`{"type":`) }},
 		{"non-object schema", func(d *Descriptor) { d.InputSchema = json.RawMessage(`["object"]`) }},
+		{"non-object schema type", func(d *Descriptor) { d.InputSchema = json.RawMessage(`{"type":"string"}`) }},
 		{"oversized schema", func(d *Descriptor) {
 			d.InputSchema = json.RawMessage(`{"pad":"` + strings.Repeat("x", maxSchemaBytes) + `"}`)
 		}},

@@ -14,10 +14,11 @@ func (s *Store) ClaimLease(ctx context.Context, name, owner string, ttl time.Dur
 		return false, err
 	}
 	nowMs := s.now().UnixMilli()
+	expiresAt := nowMs + ttl.Milliseconds()
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO leases (name, owner, expires_at) VALUES (?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at
-		WHERE leases.expires_at <= ? OR leases.owner = excluded.owner`, name, owner, nowMs+ttl.Milliseconds(), nowMs)
+		WHERE leases.expires_at <= ? OR leases.owner = excluded.owner`, name, owner, expiresAt, nowMs)
 	if err != nil {
 		return false, fmt.Errorf("claim lease %q: %w", name, err)
 	}
@@ -25,7 +26,7 @@ func (s *Store) ClaimLease(ctx context.Context, name, owner string, ttl time.Dur
 	if err != nil {
 		return false, fmt.Errorf("claim lease %q: %w", name, err)
 	}
-	return affected == 1, nil
+	return affected == 1 && s.now().UnixMilli() < expiresAt, nil
 }
 
 // RenewLease extends the named lease. It reports whether owner holds the
@@ -35,9 +36,10 @@ func (s *Store) RenewLease(ctx context.Context, name, owner string, ttl time.Dur
 		return false, err
 	}
 	nowMs := s.now().UnixMilli()
+	expiresAt := nowMs + ttl.Milliseconds()
 	res, err := s.db.ExecContext(ctx,
 		"UPDATE leases SET expires_at = ? WHERE name = ? AND owner = ? AND expires_at > ?",
-		nowMs+ttl.Milliseconds(), name, owner, nowMs)
+		expiresAt, name, owner, nowMs)
 	if err != nil {
 		return false, fmt.Errorf("renew lease %q: %w", name, err)
 	}
@@ -45,7 +47,7 @@ func (s *Store) RenewLease(ctx context.Context, name, owner string, ttl time.Dur
 	if err != nil {
 		return false, fmt.Errorf("renew lease %q: %w", name, err)
 	}
-	return affected == 1, nil
+	return affected == 1 && s.now().UnixMilli() < expiresAt, nil
 }
 
 // ReleaseLease removes the named lease when owner holds it.
@@ -98,8 +100,8 @@ func validateLease(name, owner string, ttl time.Duration) error {
 	if owner == "" {
 		return fmt.Errorf("lease owner is required")
 	}
-	if ttl <= 0 {
-		return fmt.Errorf("lease TTL must be positive")
+	if ttl < time.Millisecond {
+		return fmt.Errorf("lease TTL must be at least %s", time.Millisecond)
 	}
 	return nil
 }

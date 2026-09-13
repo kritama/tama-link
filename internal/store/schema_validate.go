@@ -70,5 +70,44 @@ func validateCurrentSchema(ctx context.Context, conn *sql.Conn) error {
 		}
 		_ = rows.Close()
 	}
+	return validatePrimaryKeys(ctx, conn)
+}
+
+func validatePrimaryKeys(ctx context.Context, conn *sql.Conn) error {
+	expected := []struct {
+		table, column string
+	}{
+		{"meta", "key"},
+		{"submissions", "submission_id"},
+		{"idempotency", "client_request_id"},
+		{"leases", "name"},
+	}
+	for _, key := range expected {
+		rows, err := conn.QueryContext(ctx, "SELECT name, pk FROM pragma_table_info(?) WHERE pk > 0", key.table)
+		if err != nil {
+			return fmt.Errorf("%w: inspect primary key for %s: %v", ErrStateUnavailable, key.table, err)
+		}
+		var columns []string
+		for rows.Next() {
+			var column string
+			var position int
+			if err := rows.Scan(&column, &position); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("%w: inspect primary key for %s: %v", ErrStateUnavailable, key.table, err)
+			}
+			columns = append(columns, column)
+		}
+		rowsErr := rows.Err()
+		closeErr := rows.Close()
+		if rowsErr != nil {
+			return fmt.Errorf("%w: inspect primary key for %s: %v", ErrStateUnavailable, key.table, rowsErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("%w: close primary key inspection for %s: %v", ErrStateUnavailable, key.table, closeErr)
+		}
+		if len(columns) != 1 || columns[0] != key.column {
+			return fmt.Errorf("%w: table %s must have primary key %s", ErrStateUnavailable, key.table, key.column)
+		}
+	}
 	return nil
 }

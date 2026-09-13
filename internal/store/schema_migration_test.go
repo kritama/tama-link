@@ -180,6 +180,34 @@ func TestOpenRejectsCurrentSchemaWithMissingDurableTable(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsCurrentSchemaWithoutIdempotencyPrimaryKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	keys := &migrationKeys{}
+	s, err := Open(context.Background(), path, keys, Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("create database: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		ALTER TABLE idempotency RENAME TO idempotency_original;
+		CREATE TABLE idempotency (
+			client_request_id TEXT NOT NULL,
+			args_hash TEXT NOT NULL,
+			submission_id TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		);
+		DROP TABLE idempotency_original;
+	`); err != nil {
+		t.Fatalf("remove idempotency primary key: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+
+	if _, err := Open(context.Background(), path, keys, Config{Limits: limits.Default()}); !errors.Is(err, ErrStateUnavailable) {
+		t.Fatalf("Open without idempotency primary key = %v, want ErrStateUnavailable", err)
+	}
+}
+
 func TestOpenRejectsMalformedSchemaVersions(t *testing.T) {
 	for _, version := range []string{"2garbage", "2.0", "2 3", " 2", "2 "} {
 		t.Run(version, func(t *testing.T) {

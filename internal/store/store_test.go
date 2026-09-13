@@ -62,6 +62,54 @@ func (m *memKeys) count() int {
 	return len(m.keys)
 }
 
+func TestStoreCloseIsConcurrentSafe(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := store.Open(context.Background(), path, newMemKeys(), store.Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	const callers = 32
+	errors := make(chan error, callers)
+	var calls sync.WaitGroup
+	for range callers {
+		calls.Add(1)
+		go func() {
+			defer calls.Done()
+			errors <- s.Close()
+		}()
+	}
+	calls.Wait()
+	close(errors)
+	for err := range errors {
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	}
+}
+
+func TestOpenRejectsWrongSizedExistingStateKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	keys := newMemKeys()
+	s, err := store.Open(context.Background(), path, keys, store.Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	keys.mu.Lock()
+	for keyID := range keys.keys {
+		keys.keys[keyID] = make([]byte, 16)
+	}
+	keys.mu.Unlock()
+
+	if _, err := store.Open(context.Background(), path, keys, store.Config{Limits: limits.Default()}); !errors.Is(err, store.ErrStateUnavailable) {
+		t.Fatalf("Open with non-AES-256 key = %v, want ErrStateUnavailable", err)
+	}
+}
+
 // downKeys simulates an unavailable credential backend: every key operation
 // fails with an error that is not ErrKeyMissing.
 type downKeys struct{}

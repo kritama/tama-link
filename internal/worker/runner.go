@@ -63,8 +63,8 @@ func New(state State, executor Executor, cfg Config) (*Runner, error) {
 	if cfg.Owner == "" {
 		return nil, errors.New("worker owner is required")
 	}
-	if cfg.LeaseTTL <= 0 {
-		return nil, errors.New("worker lease TTL must be positive")
+	if cfg.LeaseTTL < time.Millisecond {
+		return nil, fmt.Errorf("worker lease TTL must be at least %s", time.Millisecond)
 	}
 	return &Runner{state: state, executor: executor, owner: cfg.Owner, ttl: cfg.LeaseTTL}, nil
 }

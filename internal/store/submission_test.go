@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -283,6 +284,12 @@ func TestCreateValidatesInput(t *testing.T) {
 	duplicateKey.Arguments = []byte(`{"message":"first","message":"second"}`)
 	if _, err := s.CreateSubmission(ctx, duplicateKey); err == nil {
 		t.Fatal("duplicate argument key accepted, want error")
+	}
+
+	excessiveDepth := testSubmission("sub-excessive-depth", "req-excessive-depth")
+	excessiveDepth.Arguments = []byte(strings.Repeat("[", 1_000) + "0" + strings.Repeat("]", 1_000))
+	if _, err := s.CreateSubmission(ctx, excessiveDepth); err == nil || !strings.Contains(err.Error(), "arguments depth") {
+		t.Fatalf("excessively nested arguments = %v, want bounded depth error", err)
 	}
 }
 

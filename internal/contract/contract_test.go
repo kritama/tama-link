@@ -223,13 +223,25 @@ func TestResultValidation(t *testing.T) {
 	t.Parallel()
 
 	for name, result := range map[string]Result{
+		"missing content":   {},
 		"primitive content": {Content: []ContentBlock{json.RawMessage(`"text"`)}},
 		"missing type":      {Content: []ContentBlock{json.RawMessage(`{"text":"hello"}`)}},
+		"duplicate content type": {
+			Content: []ContentBlock{json.RawMessage(`{"type":"text","type":"image"}`)},
+		},
 		"invalid structured": {
 			Content:           []ContentBlock{},
 			StructuredContent: json.RawMessage(`{`),
 		},
+		"duplicate structured key": {
+			Content:           []ContentBlock{},
+			StructuredContent: json.RawMessage(`{"ok":true,"ok":false}`),
+		},
 		"primitive meta": {Content: []ContentBlock{}, Meta: json.RawMessage(`1`)},
+		"duplicate meta key": {
+			Content: []ContentBlock{},
+			Meta:    json.RawMessage(`{"trace":"first","trace":"second"}`),
+		},
 	} {
 		if err := result.Validate(); err == nil {
 			t.Fatalf("%s result accepted", name)

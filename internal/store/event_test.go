@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -33,6 +34,7 @@ func TestAppendEventsRoundTrip(t *testing.T) {
 	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
+	clk.Advance(time.Minute)
 
 	got, err := s.AppendEvents(ctx, "sub-1", []contract.Event{
 		testEvent("sub-1", 1),
@@ -43,6 +45,9 @@ func TestAppendEventsRoundTrip(t *testing.T) {
 	}
 	if got.Sequence != 2 {
 		t.Fatalf("sequence = %d, want 2", got.Sequence)
+	}
+	if got.UpdatedAt != clk.Now() {
+		t.Fatalf("updated_at = %s, want %s", got.UpdatedAt, clk.Now())
 	}
 
 	fetched, err := s.GetSubmission(ctx, "sub-1")
@@ -132,6 +137,34 @@ func TestAppendEventsHonoursRetention(t *testing.T) {
 	}
 	if got.Events[0].Sequence != 3 || got.Events[2].Sequence != 5 {
 		t.Fatalf("retained sequences = %+v, want 3 through 5", got.Events)
+	}
+}
+
+func TestAppendEventsCountsStoredArrayOverhead(t *testing.T) {
+	keys, clk := newMemKeys(), newClock()
+	event := testEvent("sub-1", 1)
+	encoded, err := json.Marshal(event)
+	if err != nil {
+		t.Fatalf("Marshal event: %v", err)
+	}
+	lim := limits.Default()
+	lim.EventsBytes = limits.Bytes(len(encoded) + 1)
+
+	s, err := store.Open(context.Background(), t.TempDir()+"/state.db", keys, store.Config{Limits: lim, Now: clk.Now})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	if _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+
+	got, err := s.AppendEvents(context.Background(), "sub-1", []contract.Event{event})
+	if err != nil {
+		t.Fatalf("AppendEvents: %v", err)
+	}
+	if got.Sequence != 1 || len(got.Events) != 0 {
+		t.Fatalf("retained event state = sequence %d, events %d; want sequence 1 and no oversized array", got.Sequence, len(got.Events))
 	}
 }
 

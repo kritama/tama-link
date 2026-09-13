@@ -10,6 +10,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/kritama/tama-link/internal/limits"
@@ -51,15 +52,16 @@ type Config struct {
 // Store is one open profile state database. A Store is safe for concurrent
 // use by multiple goroutines and may be opened by multiple processes.
 type Store struct {
-	db     *sql.DB
-	cipher stateCipher
-	limits limits.Limits
-	schema int
-	keyID  string
-	format int
-	now    func() time.Time
-	path   *statePath
-	closed bool
+	db        *sql.DB
+	cipher    stateCipher
+	limits    limits.Limits
+	schema    int
+	keyID     string
+	format    int
+	now       func() time.Time
+	path      *statePath
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // Open opens (creating when absent) the profile state database at path.
@@ -99,9 +101,8 @@ func Open(ctx context.Context, path string, keys KeyProvider, cfg Config) (*Stor
 
 // Close releases the database.
 func (s *Store) Close() error {
-	if s.closed {
-		return nil
-	}
-	s.closed = true
-	return errors.Join(s.db.Close(), s.path.Close())
+	s.closeOnce.Do(func() {
+		s.closeErr = errors.Join(s.db.Close(), s.path.Close())
+	})
+	return s.closeErr
 }

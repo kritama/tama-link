@@ -275,8 +275,13 @@ func TestLeaseLossCancelsExecution(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetSubmission: %v", err)
 	}
-	if got.Status != contract.StatusRunning || got.Result != nil {
-		t.Fatalf("lease-lost submission = %+v, want recoverable running state", got)
+	if got.Result != nil || (got.Status != contract.StatusAccepted &&
+		got.Status != contract.StatusQueued && got.Status != contract.StatusRunning) {
+		t.Fatalf("lease-lost submission = %+v, want a recoverable nonterminal state", got)
+	}
+	runnable, err := s.ListRunnable(context.Background(), string(catalog.StrategyLocalReplayable))
+	if err != nil || len(runnable) != 1 || runnable[0] != "sub-1" {
+		t.Fatalf("runnable after lease loss = %v, %v; want sub-1", runnable, err)
 	}
 }
 

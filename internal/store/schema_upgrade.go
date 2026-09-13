@@ -23,9 +23,13 @@ func (s *Store) upgradeSchema(ctx context.Context, conn *sql.Conn) error {
 			return fmt.Errorf("upgrade schema %d to %d: %w", from, from+1, err)
 		}
 		s.schema++
-		if _, err := conn.ExecContext(ctx,
+		updated, err := conn.ExecContext(ctx,
 			"UPDATE meta SET value = ? WHERE key = ?", strconv.Itoa(s.schema), metaSchemaVersion,
-		); err != nil {
+		)
+		if err != nil {
+			return fmt.Errorf("record schema %d: %w", s.schema, err)
+		}
+		if err := requireUpdated(updated); err != nil {
 			return fmt.Errorf("record schema %d: %w", s.schema, err)
 		}
 	}
