@@ -120,6 +120,52 @@ func TestLeaseExpiresAfterTTL(t *testing.T) {
 	}
 }
 
+func TestLeaseClaimDoesNotExpireBeforeMillisecondTTL(t *testing.T) {
+	t.Parallel()
+
+	clk := newClock()
+	clk.Advance(999*time.Microsecond + 500*time.Nanosecond)
+	s, _ := openTestStore(t, newMemKeys(), clk)
+	ctx := context.Background()
+	if owned, err := s.ClaimLease(ctx, "worker", "owner-a", time.Millisecond); err != nil || !owned {
+		t.Fatalf("ClaimLease = %t, %v", owned, err)
+	}
+
+	clk.Advance(500 * time.Microsecond)
+	if owned, err := s.ClaimLease(ctx, "worker", "owner-b", time.Millisecond); err != nil || owned {
+		t.Fatalf("early competing ClaimLease = %t, %v; want false, nil", owned, err)
+	}
+	clk.Advance(2 * time.Millisecond)
+	if owned, err := s.ClaimLease(ctx, "worker", "owner-b", time.Millisecond); err != nil || !owned {
+		t.Fatalf("expired competing ClaimLease = %t, %v; want true, nil", owned, err)
+	}
+}
+
+func TestLeaseRenewDoesNotExpireBeforeMillisecondTTL(t *testing.T) {
+	t.Parallel()
+
+	clk := newClock()
+	clk.Advance(999*time.Microsecond + 500*time.Nanosecond)
+	s, _ := openTestStore(t, newMemKeys(), clk)
+	ctx := context.Background()
+	if owned, err := s.ClaimLease(ctx, "worker", "owner-a", time.Millisecond); err != nil || !owned {
+		t.Fatalf("ClaimLease = %t, %v", owned, err)
+	}
+	clk.Advance(400 * time.Microsecond)
+	if owned, err := s.RenewLease(ctx, "worker", "owner-a", time.Millisecond); err != nil || !owned {
+		t.Fatalf("RenewLease = %t, %v", owned, err)
+	}
+
+	clk.Advance(700 * time.Microsecond)
+	if owned, err := s.ClaimLease(ctx, "worker", "owner-b", time.Millisecond); err != nil || owned {
+		t.Fatalf("early competing ClaimLease = %t, %v; want false, nil", owned, err)
+	}
+	clk.Advance(2 * time.Millisecond)
+	if owned, err := s.ClaimLease(ctx, "worker", "owner-b", time.Millisecond); err != nil || !owned {
+		t.Fatalf("expired competing ClaimLease = %t, %v; want true, nil", owned, err)
+	}
+}
+
 func TestExpiredLeaseCannotBeRenewed(t *testing.T) {
 	t.Parallel()
 

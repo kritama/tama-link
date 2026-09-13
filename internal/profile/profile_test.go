@@ -302,6 +302,9 @@ func TestValidate(t *testing.T) {
 			p.Bounds = Bounds{ProtocolMin: "soon", ProtocolMax: "2025-03-26"}
 		}},
 		{"state reference with slash", func(p *Profile) { p.State.Database = "../other" }},
+		{"database reference with colon", func(p *Profile) { p.State.Database = "state:private" }},
+		{"database reference with uppercase", func(p *Profile) { p.State.Database = "State" }},
+		{"database reference using Windows device", func(p *Profile) { p.State.Database = "con" }},
 		{"state reference dot", func(p *Profile) { p.State.Credentials = "." }},
 		{"partial limits", func(p *Profile) {
 			p.Limits = &limits.Limits{ArgumentsBytes: 32 * limits.KiB}

@@ -77,6 +77,25 @@ func TestStatePathRejectsSymlinkedParent(t *testing.T) {
 	}
 }
 
+func TestStatePathRejectsSymlinkedAncestor(t *testing.T) {
+	if os.PathSeparator == '\\' {
+		t.Skip("symlink creation requires elevated privileges on Windows")
+	}
+
+	realAncestor := t.TempDir()
+	ancestorLink := filepath.Join(t.TempDir(), "state")
+	if err := os.Symlink(realAncestor, ancestorLink); err != nil {
+		t.Fatalf("create ancestor symlink: %v", err)
+	}
+	path := filepath.Join(ancestorLink, "profiles", "tama-app", "state.db")
+	if _, err := secureStatePath(path); err == nil {
+		t.Fatal("secureStatePath accepted a symlinked ancestor")
+	}
+	if _, err := os.Stat(filepath.Join(realAncestor, "profiles")); !os.IsNotExist(err) {
+		t.Fatalf("symlink target was modified: %v", err)
+	}
+}
+
 func TestStatePathRejectsSymlinkedSQLiteSidecars(t *testing.T) {
 	if os.PathSeparator == '\\' {
 		t.Skip("symlink creation requires elevated privileges on Windows")

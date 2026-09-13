@@ -3,12 +3,15 @@ package profile
 import (
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/kritama/tama-link/internal/catalog"
 	"github.com/kritama/tama-link/internal/limits"
 )
+
+var databaseReferencePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$`)
 
 const (
 	// SchemaVersion is the profile document version this build understands.
@@ -176,10 +179,29 @@ func raisesDefaultLimits(got limits.Limits) bool {
 
 // Valid reports whether both references are safe opaque names.
 func (s StateRefs) Valid() error {
-	if err := checkReference("database", s.Database); err != nil {
+	if err := checkDatabaseReference(s.Database); err != nil {
 		return err
 	}
 	return checkReference("credentials", s.Credentials)
+}
+
+func checkDatabaseReference(ref string) error {
+	if err := checkReference("database", ref); err != nil {
+		return err
+	}
+	if !databaseReferencePattern.MatchString(ref) || windowsReservedDatabaseReference(ref) {
+		return fmt.Errorf("database reference %q is not a portable filename", ref)
+	}
+	return nil
+}
+
+func windowsReservedDatabaseReference(ref string) bool {
+	switch ref {
+	case "aux", "con", "nul", "prn":
+		return true
+	}
+	return len(ref) == 4 && (strings.HasPrefix(ref, "com") || strings.HasPrefix(ref, "lpt")) &&
+		ref[3] >= '1' && ref[3] <= '9'
 }
 
 func checkReference(field, ref string) error {

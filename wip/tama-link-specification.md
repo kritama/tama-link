@@ -577,6 +577,11 @@ profile-isolated state and credential-store references
 timeouts, size limits, and retention policy
 ```
 
+Database references are portable lowercase filenames: one to 64 lowercase
+letters, digits, or hyphens, beginning and ending with a letter or digit. They
+must not use Windows reserved device names. Credential-store references remain
+opaque names but may not contain path separators or traversal components.
+
 The Memovee CLI owns creation and reconciliation of its profile. Tama Link
 validates profiles but does not start containers or create root users.
 

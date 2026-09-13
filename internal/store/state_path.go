@@ -10,9 +10,14 @@ import (
 // statePath pins handles to the profile directory and database inode. SQLite
 // connections open through the pinned file identity rather than this pathname.
 type statePath struct {
-	name   string
-	parent *os.File
-	file   *os.File
+	name string
+	stateHandles
+}
+
+type stateHandles struct {
+	ancestors []*os.File
+	parent    *os.File
+	file      *os.File
 }
 
 func secureStatePath(path string) (*statePath, error) {
@@ -21,14 +26,11 @@ func secureStatePath(path string) (*statePath, error) {
 		return nil, fmt.Errorf("resolve state database %s: %w", path, err)
 	}
 	parentPath := filepath.Dir(absolute)
-	if err := os.MkdirAll(parentPath, 0o700); err != nil {
-		return nil, fmt.Errorf("create state database parent %s: %w", parentPath, err)
-	}
-	parent, file, err := openStateHandles(parentPath, filepath.Base(absolute))
+	handles, err := openStateHandles(parentPath, filepath.Base(absolute))
 	if err != nil {
 		return nil, classifyStatePathError(absolute, err)
 	}
-	secured := &statePath{name: absolute, parent: parent, file: file}
+	secured := &statePath{name: absolute, stateHandles: handles}
 	if err := secured.validateHandles(); err != nil {
 		_ = secured.Close()
 		return nil, err
@@ -69,7 +71,17 @@ func (p *statePath) Close() error {
 	if p == nil {
 		return nil
 	}
-	return errors.Join(p.file.Close(), p.parent.Close())
+	errs := []error{p.file.Close(), p.parent.Close()}
+	for index := len(p.ancestors) - 1; index >= 0; index-- {
+		errs = append(errs, p.ancestors[index].Close())
+	}
+	return errors.Join(errs...)
+}
+
+func closeStateDirectories(directories []*os.File) {
+	for index := len(directories) - 1; index >= 0; index-- {
+		_ = directories[index].Close()
+	}
 }
 
 // secureSQLiteSidecars rejects links and special files before SQLite enables

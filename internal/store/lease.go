@@ -13,8 +13,9 @@ func (s *Store) ClaimLease(ctx context.Context, name, owner string, ttl time.Dur
 	if err := validateLease(name, owner, ttl); err != nil {
 		return false, err
 	}
-	nowMs := s.now().UnixMilli()
-	expiresAt := nowMs + ttl.Milliseconds()
+	now := s.now()
+	nowMs := now.UnixMilli()
+	expiresAt := leaseDeadlineMilliseconds(now, ttl)
 	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO leases (name, owner, expires_at) VALUES (?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET owner = excluded.owner, expires_at = excluded.expires_at
@@ -35,8 +36,9 @@ func (s *Store) RenewLease(ctx context.Context, name, owner string, ttl time.Dur
 	if err := validateLease(name, owner, ttl); err != nil {
 		return false, err
 	}
-	nowMs := s.now().UnixMilli()
-	expiresAt := nowMs + ttl.Milliseconds()
+	now := s.now()
+	nowMs := now.UnixMilli()
+	expiresAt := leaseDeadlineMilliseconds(now, ttl)
 	res, err := s.db.ExecContext(ctx,
 		"UPDATE leases SET expires_at = ? WHERE name = ? AND owner = ? AND expires_at > ?",
 		expiresAt, name, owner, nowMs)
@@ -104,4 +106,13 @@ func validateLease(name, owner string, ttl time.Duration) error {
 		return fmt.Errorf("lease TTL must be at least %s", time.Millisecond)
 	}
 	return nil
+}
+
+func leaseDeadlineMilliseconds(now time.Time, ttl time.Duration) int64 {
+	deadline := now.Add(ttl)
+	milliseconds := deadline.UnixMilli()
+	if time.UnixMilli(milliseconds).Before(deadline) {
+		milliseconds++
+	}
+	return milliseconds
 }

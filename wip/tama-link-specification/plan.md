@@ -37,9 +37,9 @@ Phase 1 is complete. The durable-domain implementation now includes:
 - `internal/catalog`: pinned descriptors, canonical digests, drift
   verification, and bounded submit-description projection;
 - `internal/profile`: versioned profile loading with duplicate-key and secure
-  URL validation, profile-isolated state paths and credential namespaces,
-  effective-limit resolution, and canonical whole-profile digest enforcement
-  whenever a profile raises a default limit;
+  URL validation, portable profile-isolated database references and credential
+  namespaces, effective-limit resolution, and canonical whole-profile digest
+  enforcement whenever a profile raises a default limit;
 - `internal/server`: profile-driven MCP server wiring the catalog projection,
   instructions, and the bounded submit `tool` enum;
 - `internal/store`: encrypted SQLite state (D2/D3/D4) with complete-input
@@ -102,10 +102,13 @@ is now recorded in the authoritative specification.
 Use `modernc.org/sqlite` (pure Go) so the existing `CGO_ENABLED=0` cross-builds
 keep working. Each profile uses an isolated database. The main database and WAL
 sidecars are validated or securely created without following links inside the
-private profile directory. Existing declared schemas are validated before any
-migration and are never repaired with `CREATE TABLE IF NOT EXISTS`. The state
-store holds the minimum durable state the spec permits and adds the **canonical
-upstream request** (see D3). SQLite is authoritative for Tama Link's
+private profile directory. Every state-path component is resolved while its
+parent directory handle is pinned and links are rejected; Windows retains all
+ancestor handles while SQLite uses the path. Existing declared schemas are
+validated before any migration and are never repaired with
+`CREATE TABLE IF NOT EXISTS`. The state store holds the minimum durable state
+the spec permits and adds the **canonical upstream request** (see D3). SQLite
+is authoritative for Tama Link's
 client-facing submission lifecycle and for locally executed System operations;
 it does not replace Tama's existing durable App graph submission.
 
