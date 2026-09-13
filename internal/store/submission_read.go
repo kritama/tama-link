@@ -88,31 +88,35 @@ func (s *Store) decryptSubmission(sub *Submission) error {
 	if len(sub.encArgs) > 0 {
 		args, err := s.cipher.open(sub.encArgs, sub.ID, "arguments")
 		if err != nil {
-			return fmt.Errorf("submission %s arguments: %w", sub.ID, err)
+			return unreadableSubmissionPayload(sub.ID, "arguments", err)
 		}
 		sub.Arguments = args
 	}
 	if len(sub.encEvents) > 0 {
 		events, err := s.cipher.open(sub.encEvents, sub.ID, "events")
 		if err != nil {
-			return fmt.Errorf("submission %s events: %w", sub.ID, err)
+			return unreadableSubmissionPayload(sub.ID, "events", err)
 		}
 		decoded := []contract.Event{}
 		if err := json.Unmarshal(events, &decoded); err != nil {
-			return fmt.Errorf("submission %s events: %w", sub.ID, err)
+			return unreadableSubmissionPayload(sub.ID, "events", err)
 		}
 		sub.Events = decoded
 	}
 	if len(sub.encResult) > 0 {
 		result, err := s.cipher.open(sub.encResult, sub.ID, "result")
 		if err != nil {
-			return fmt.Errorf("submission %s result: %w", sub.ID, err)
+			return unreadableSubmissionPayload(sub.ID, "result", err)
 		}
 		decoded := contract.Result{}
 		if err := json.Unmarshal(result, &decoded); err != nil {
-			return fmt.Errorf("submission %s result: %w", sub.ID, err)
+			return unreadableSubmissionPayload(sub.ID, "result", err)
 		}
 		sub.Result = &decoded
 	}
 	return nil
+}
+
+func unreadableSubmissionPayload(id, field string, err error) error {
+	return fmt.Errorf("%w: submission %s %s: %w", ErrStateUnavailable, id, field, err)
 }

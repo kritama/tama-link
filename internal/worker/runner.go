@@ -30,7 +30,7 @@ type State interface {
 	ReleaseLease(context.Context, string, string) error
 	GetSubmission(context.Context, string) (*store.Submission, error)
 	ListRunnable(context.Context, string) ([]string, error)
-	Transition(context.Context, string, contract.Status, store.TransitionDetail) (*store.Submission, error)
+	TransitionLeased(context.Context, string, string, string, contract.Status, store.TransitionDetail) (*store.Submission, error)
 	CompleteLeased(context.Context, string, string, string, contract.Result) (*store.Submission, error)
 	FailLeased(context.Context, string, string, string, contract.Error) (*store.Submission, error)
 }
@@ -95,7 +95,7 @@ func (r *Runner) Run(ctx context.Context, id string) (runErr error) {
 	renewed := make(chan error, 1)
 	go r.renew(execCtx, cancel, leaseName, leaseOwner, renewed)
 
-	sub, err := r.prepare(execCtx, id)
+	sub, err := r.prepare(execCtx, id, leaseName, leaseOwner)
 	if err == nil {
 		var result contract.Result
 		var executeErr error
@@ -148,7 +148,7 @@ func (r *Runner) Recover(ctx context.Context) error {
 	return errors.Join(failures...)
 }
 
-func (r *Runner) prepare(ctx context.Context, id string) (*store.Submission, error) {
+func (r *Runner) prepare(ctx context.Context, id, leaseName, leaseOwner string) (*store.Submission, error) {
 	sub, err := r.state.GetSubmission(ctx, id)
 	if err != nil {
 		return nil, err
@@ -158,20 +158,34 @@ func (r *Runner) prepare(ctx context.Context, id string) (*store.Submission, err
 	}
 	switch sub.Status {
 	case contract.StatusAccepted:
-		_, err = r.state.Transition(ctx, id, contract.StatusQueued, store.TransitionDetail{})
+		_, err = r.state.TransitionLeased(ctx, id, leaseName, leaseOwner, contract.StatusQueued, store.TransitionDetail{})
 		if err != nil {
-			return nil, err
+			return nil, preparationError(err)
 		}
 		fallthrough
 	case contract.StatusQueued:
-		sub, err = r.state.Transition(ctx, id, contract.StatusRunning, store.TransitionDetail{})
+		sub, err = r.state.TransitionLeased(ctx, id, leaseName, leaseOwner, contract.StatusRunning, store.TransitionDetail{})
 		if err != nil {
-			return nil, err
+			return nil, preparationError(err)
 		}
 	case contract.StatusRunning:
 		// A recovered replayable operation is deliberately executed again.
 	default:
 		return nil, fmt.Errorf("submission %s is not runnable in state %s", id, sub.Status)
 	}
+	owned, err := r.renewOnce(ctx, leaseName, leaseOwner)
+	if err != nil {
+		return nil, fmt.Errorf("%w: confirm submission %s lease: %w", ErrLeaseLost, id, err)
+	}
+	if !owned {
+		return nil, ErrLeaseLost
+	}
 	return sub, nil
+}
+
+func preparationError(err error) error {
+	if errors.Is(err, store.ErrLeaseNotOwned) {
+		return ErrLeaseLost
+	}
+	return err
 }

@@ -45,7 +45,7 @@ func decodeValue(dec *json.Decoder) (any, error) {
 func decodeDelimited(dec *json.Decoder, open json.Delim) (any, error) {
 	switch open {
 	case '[':
-		var values []any
+		values := []any{}
 		for dec.More() {
 			value, err := decodeValue(dec)
 			if err != nil {

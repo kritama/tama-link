@@ -26,6 +26,27 @@ type TransitionDetail struct {
 // machine. Reaching a terminal state stamps completion and the payload and
 // tombstone retention deadlines.
 func (s *Store) Transition(ctx context.Context, id string, to submission.State, detail TransitionDetail) (*Submission, error) {
+	return s.transition(ctx, id, to, detail, nil)
+}
+
+// TransitionLeased performs Transition only while owner holds a live lease.
+// The lease check and state write share one transaction.
+func (s *Store) TransitionLeased(
+	ctx context.Context,
+	id, leaseName, owner string,
+	to submission.State,
+	detail TransitionDetail,
+) (*Submission, error) {
+	return s.transition(ctx, id, to, detail, &leaseIdentity{name: leaseName, owner: owner})
+}
+
+func (s *Store) transition(
+	ctx context.Context,
+	id string,
+	to submission.State,
+	detail TransitionDetail,
+	lease *leaseIdentity,
+) (*Submission, error) {
 	if !submission.Valid(to) {
 		return nil, fmt.Errorf("unknown state %q", to)
 	}
@@ -49,6 +70,11 @@ func (s *Store) Transition(ctx context.Context, id string, to submission.State, 
 		return nil, fmt.Errorf("begin transition: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	if lease != nil {
+		if err := s.requireLiveLease(ctx, tx, *lease); err != nil {
+			return nil, err
+		}
+	}
 
 	sub, err := s.loadEncrypted(ctx, tx, id)
 	if err != nil {

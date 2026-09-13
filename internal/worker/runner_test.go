@@ -60,6 +60,46 @@ type blockedRenewState struct {
 	deadline chan time.Duration
 }
 
+type workerClock struct {
+	mu sync.Mutex
+	t  time.Time
+}
+
+func (c *workerClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.t
+}
+
+func (c *workerClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	c.t = c.t.Add(d)
+	c.mu.Unlock()
+}
+
+type stealingPrepareState struct {
+	*store.Store
+	clock *workerClock
+	once  sync.Once
+	err   error
+}
+
+func (s *stealingPrepareState) TransitionLeased(
+	ctx context.Context,
+	id, leaseName, owner string,
+	to contract.Status,
+	detail store.TransitionDetail,
+) (*store.Submission, error) {
+	s.once.Do(func() {
+		s.clock.Advance(time.Second)
+		_, s.err = s.ClaimLease(ctx, leaseName, "worker-b", time.Second)
+	})
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.Store.TransitionLeased(ctx, id, leaseName, owner, to, detail)
+}
+
 func (s blockedRenewState) RenewLease(ctx context.Context, _ string, _ string, _ time.Duration) (bool, error) {
 	deadline, ok := ctx.Deadline()
 	if !ok {
@@ -103,6 +143,15 @@ func (e *executor) count() int {
 func openStore(t *testing.T, path string, keys *memoryKeys) *store.Store {
 	t.Helper()
 	s, err := store.Open(context.Background(), path, keys, store.Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	return s
+}
+
+func openStoreWithClock(t *testing.T, path string, keys *memoryKeys, clock *workerClock) *store.Store {
+	t.Helper()
+	s, err := store.Open(context.Background(), path, keys, store.Config{Limits: limits.Default(), Now: clock.Now})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -282,6 +331,34 @@ func TestLeaseLossCancelsExecution(t *testing.T) {
 	runnable, err := s.ListRunnable(context.Background(), string(catalog.StrategyLocalReplayable))
 	if err != nil || len(runnable) != 1 || runnable[0] != "sub-1" {
 		t.Fatalf("runnable after lease loss = %v, %v; want sub-1", runnable, err)
+	}
+}
+
+func TestLeaseLostDuringPreparationDoesNotExecute(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	clock := &workerClock{t: time.Date(2026, 9, 13, 0, 0, 0, 0, time.UTC)}
+	s := openStoreWithClock(t, path, newMemoryKeys(), clock)
+	t.Cleanup(func() { _ = s.Close() })
+	createReplayable(t, s, "sub-1")
+
+	state := &stealingPrepareState{Store: s, clock: clock}
+	exec := &executor{}
+	runner, err := worker.New(state, exec, worker.Config{Owner: "worker-a", LeaseTTL: 90 * time.Millisecond})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := runner.Run(context.Background(), "sub-1"); !errors.Is(err, worker.ErrLeaseLost) {
+		t.Fatalf("Run after preparation lease theft = %v, want ErrLeaseLost", err)
+	}
+	if exec.count() != 0 {
+		t.Fatalf("executor calls = %d, want 0", exec.count())
+	}
+	got, err := s.GetSubmission(context.Background(), "sub-1")
+	if err != nil {
+		t.Fatalf("GetSubmission: %v", err)
+	}
+	if got.Status != contract.StatusAccepted {
+		t.Fatalf("status after preparation lease theft = %s, want accepted", got.Status)
 	}
 }
 
