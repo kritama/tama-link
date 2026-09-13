@@ -76,8 +76,8 @@ func (s *Store) Transition(ctx context.Context, id string, to submission.State, 
 		clauses = append(clauses, "completed_at = ?", "payload_expires_at = ?", "tombstone_expires_at = ?")
 		args = append(args,
 			completedMs,
-			completedMs+int64(s.limits.PayloadRetention/time.Millisecond),
-			completedMs+int64(s.limits.TombstoneRetention/time.Millisecond),
+			completedMs+int64(sub.AcceptedLimits.PayloadRetention/time.Millisecond),
+			completedMs+int64(sub.AcceptedLimits.TombstoneRetention/time.Millisecond),
 		)
 	}
 
@@ -123,13 +123,17 @@ func (s *Store) complete(ctx context.Context, id string, result contract.Result,
 	if err != nil {
 		return nil, fmt.Errorf("encode result: %w", err)
 	}
-	if int64(len(encoded)) > int64(s.limits.ResultBytes) {
+	acceptedLimits, err := s.loadAcceptedLimits(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(encoded)) > int64(acceptedLimits.ResultBytes) {
 		failure := contract.NewError(contract.CodeResultTooLarge, "The upstream operation completed, but its result exceeded the configured storage limit.")
 		sub, transitionErr := s.finish(ctx, id, contract.StatusFailed, nil, &failure, lease)
 		if transitionErr != nil {
 			return nil, transitionErr
 		}
-		return sub, fmt.Errorf("%w: %d bytes exceeds %d", ErrResultTooLarge, len(encoded), s.limits.ResultBytes)
+		return sub, fmt.Errorf("%w: %d bytes exceeds %d", ErrResultTooLarge, len(encoded), acceptedLimits.ResultBytes)
 	}
 	return s.finish(ctx, id, contract.StatusCompleted, encoded, nil, lease)
 }
@@ -194,8 +198,8 @@ func (s *Store) finish(
 		    completed_at = ?, payload_expires_at = ?, tombstone_expires_at = ?, updated_at = ?
 		WHERE submission_id = ? AND status = ?`,
 		string(to), sealed, errorCode, errorMessage, errorRetryable,
-		nowMs, nowMs+int64(s.limits.PayloadRetention/time.Millisecond),
-		nowMs+int64(s.limits.TombstoneRetention/time.Millisecond), nowMs,
+		nowMs, nowMs+int64(sub.AcceptedLimits.PayloadRetention/time.Millisecond),
+		nowMs+int64(sub.AcceptedLimits.TombstoneRetention/time.Millisecond), nowMs,
 		id, string(sub.Status),
 	)
 	if err != nil {
@@ -236,5 +240,7 @@ const submissionQuery = `
 		SELECT submission_id, client_request_id, tool, strategy, descriptor_digest,
 		       args_hash, args_enc, task_id, status, sequence, events_enc, result_enc,
 		       error_code, error_message, error_retryable, protocol_version, adapter_version,
+		       response_bytes, result_bytes, event_bytes, max_events, events_bytes,
+		       payload_retention_ms, tombstone_retention_ms,
 		       created_at, updated_at, completed_at
 		FROM submissions WHERE submission_id = ?`

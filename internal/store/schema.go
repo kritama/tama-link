@@ -9,7 +9,7 @@ import (
 )
 
 // schemaVersion is the database schema this build reads and writes.
-const schemaVersion = 2
+const schemaVersion = 3
 
 // Metadata keys.
 const (
@@ -39,11 +39,18 @@ CREATE TABLE IF NOT EXISTS submissions (
     sequence INTEGER NOT NULL DEFAULT 0,
     events_enc BLOB,
     result_enc BLOB,
-	    error_code TEXT,
-	    error_message TEXT,
-	    error_retryable INTEGER NOT NULL DEFAULT 0,
+    error_code TEXT,
+    error_message TEXT,
+    error_retryable INTEGER NOT NULL DEFAULT 0,
     protocol_version TEXT NOT NULL DEFAULT '',
     adapter_version TEXT NOT NULL DEFAULT '',
+    response_bytes INTEGER NOT NULL DEFAULT 16777216,
+    result_bytes INTEGER NOT NULL DEFAULT 8388608,
+    event_bytes INTEGER NOT NULL DEFAULT 16384,
+    max_events INTEGER NOT NULL DEFAULT 128,
+    events_bytes INTEGER NOT NULL DEFAULT 1048576,
+    payload_retention_ms INTEGER NOT NULL DEFAULT 604800000,
+    tombstone_retention_ms INTEGER NOT NULL DEFAULT 2592000000,
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
     completed_at INTEGER,
@@ -108,7 +115,7 @@ func (s *Store) migrate(ctx context.Context, keys KeyProvider) error {
 			if errors.Is(err, sql.ErrNoRows) {
 				return fmt.Errorf("%w: metadata %q is missing", ErrStateUnavailable, metaSchemaVersion)
 			}
-			return fmt.Errorf("read metadata %q: %w", metaSchemaVersion, err)
+			return fmt.Errorf("%w: read metadata %q: %w", ErrStateUnavailable, metaSchemaVersion, err)
 		}
 		if err := s.readMeta(ctx, conn, schema); err != nil {
 			return err
@@ -168,10 +175,10 @@ func (s *Store) initializeDatabase(ctx context.Context, conn *sql.Conn, keys Key
 		return fmt.Errorf("%w: create state key: %w", ErrStateUnavailable, err)
 	}
 	if keyID == "" || len(key) != stateKeySize {
-		return fmt.Errorf("state key %q must be %d bytes", keyID, stateKeySize)
+		return fmt.Errorf("%w: state key %q must be %d bytes", ErrStateUnavailable, keyID, stateKeySize)
 	}
 	if len(keyID) > maxKeyID {
-		return fmt.Errorf("state key identifier exceeds %d bytes", maxKeyID)
+		return fmt.Errorf("%w: state key identifier exceeds %d bytes", ErrStateUnavailable, maxKeyID)
 	}
 	c, err := newStateCipher(key)
 	if err != nil {
@@ -198,29 +205,32 @@ func (s *Store) initializeDatabase(ctx context.Context, conn *sql.Conn, keys Key
 func (s *Store) readMeta(ctx context.Context, conn *sql.Conn, schema string) error {
 	version, err := parseSchemaVersion(schema)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", ErrStateUnavailable, err)
 	}
 	s.schema = version
 
 	var keyID string
 	if err := conn.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = ?", metaStateKeyID).Scan(&keyID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("metadata %q is missing", metaStateKeyID)
+			return fmt.Errorf("%w: metadata %q is missing", ErrStateUnavailable, metaStateKeyID)
 		}
-		return fmt.Errorf("read metadata %q: %w", metaStateKeyID, err)
+		return fmt.Errorf("%w: read metadata %q: %w", ErrStateUnavailable, metaStateKeyID, err)
+	}
+	if keyID == "" || len(keyID) > maxKeyID {
+		return fmt.Errorf("%w: metadata %q is invalid", ErrStateUnavailable, metaStateKeyID)
 	}
 	s.keyID = keyID
 
 	var format string
 	if err := conn.QueryRowContext(ctx, "SELECT value FROM meta WHERE key = ?", metaEncryptionFormat).Scan(&format); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("metadata %q is missing", metaEncryptionFormat)
+			return fmt.Errorf("%w: metadata %q is missing", ErrStateUnavailable, metaEncryptionFormat)
 		}
-		return fmt.Errorf("read metadata %q: %w", metaEncryptionFormat, err)
+		return fmt.Errorf("%w: read metadata %q: %w", ErrStateUnavailable, metaEncryptionFormat, err)
 	}
 	parsedFormat, err := strconv.Atoi(format)
 	if err != nil || parsedFormat < 1 || parsedFormat > encryptionFormat {
-		return fmt.Errorf("unsupported encryption format %q", format)
+		return fmt.Errorf("%w: unsupported encryption format %q", ErrStateUnavailable, format)
 	}
 	s.format = parsedFormat
 	return nil

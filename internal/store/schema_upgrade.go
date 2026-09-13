@@ -40,9 +40,29 @@ func schemaMigrationFrom(version int) (schemaMigration, bool) {
 	switch version {
 	case 1:
 		return migrateSchema1To2, true
+	case 2:
+		return migrateSchema2To3, true
 	default:
 		return nil, false
 	}
+}
+
+func migrateSchema2To3(ctx context.Context, conn *sql.Conn) error {
+	statements := []string{
+		"ALTER TABLE submissions ADD COLUMN response_bytes INTEGER NOT NULL DEFAULT 16777216",
+		"ALTER TABLE submissions ADD COLUMN result_bytes INTEGER NOT NULL DEFAULT 8388608",
+		"ALTER TABLE submissions ADD COLUMN event_bytes INTEGER NOT NULL DEFAULT 16384",
+		"ALTER TABLE submissions ADD COLUMN max_events INTEGER NOT NULL DEFAULT 128",
+		"ALTER TABLE submissions ADD COLUMN events_bytes INTEGER NOT NULL DEFAULT 1048576",
+		"ALTER TABLE submissions ADD COLUMN payload_retention_ms INTEGER NOT NULL DEFAULT 604800000",
+		"ALTER TABLE submissions ADD COLUMN tombstone_retention_ms INTEGER NOT NULL DEFAULT 2592000000",
+	}
+	for _, statement := range statements {
+		if _, err := conn.ExecContext(ctx, statement); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func migrateSchema1To2(ctx context.Context, conn *sql.Conn) error {

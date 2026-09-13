@@ -36,6 +36,7 @@ type Submission struct {
 	ErrorRetryable   bool
 	ProtocolVersion  string
 	AdapterVersion   string
+	AcceptedLimits   AcceptedLimits
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 	CompletedAt      *time.Time
@@ -115,12 +116,20 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 		INSERT INTO submissions (
 			submission_id, client_request_id, tool, strategy, descriptor_digest,
 			args_hash, args_enc, task_id, status, sequence,
-			protocol_version, adapter_version, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, 0, ?, ?, ?, ?)`
+			protocol_version, adapter_version,
+			response_bytes, result_bytes, event_bytes, max_events, events_bytes,
+			payload_retention_ms, tombstone_retention_ms,
+			created_at, updated_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, '', ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+	acceptedLimits := acceptedLimitsFrom(s.limits)
 	if _, err := tx.ExecContext(ctx, insert,
 		sub.ID, sub.ClientRequestID, sub.Tool, sub.Strategy, sub.DescriptorDigest,
 		argsHash, encryptedArgs,
 		string(contract.StatusAccepted), sub.ProtocolVersion, sub.AdapterVersion,
+		acceptedLimits.ResponseBytes, acceptedLimits.ResultBytes,
+		acceptedLimits.EventBytes, acceptedLimits.MaxEvents, acceptedLimits.EventsBytes,
+		acceptedLimits.PayloadRetention/time.Millisecond,
+		acceptedLimits.TombstoneRetention/time.Millisecond,
 		now, now,
 	); err != nil {
 		return nil, fmt.Errorf("insert submission: %w", err)
@@ -140,6 +149,7 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 		Status:           contract.StatusAccepted,
 		ProtocolVersion:  sub.ProtocolVersion,
 		AdapterVersion:   sub.AdapterVersion,
+		AcceptedLimits:   acceptedLimits,
 		CreatedAt:        time.UnixMilli(now).UTC(),
 		UpdatedAt:        time.UnixMilli(now).UTC(),
 	}
@@ -166,102 +176,6 @@ func (s *Store) reconcileIdempotentSubmission(
 			ErrIdempotencyConflict, clientRequestID)
 	}
 	return s.GetSubmission(ctx, existingID)
-}
-
-// GetSubmission returns one submission by ID with its decrypted arguments,
-// events, and terminal result.
-func (s *Store) GetSubmission(ctx context.Context, id string) (*Submission, error) {
-	row := s.db.QueryRowContext(ctx, submissionQuery, id)
-
-	sub, err := scanSubmission(row)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("%w: %s", ErrNotFound, id)
-	}
-	if err != nil {
-		return nil, err
-	}
-	if err := s.decryptSubmission(sub); err != nil {
-		return nil, err
-	}
-	return sub, nil
-}
-
-func scanSubmission(row *sql.Row) (*Submission, error) {
-	var sub Submission
-	var argsEnc, eventsEnc, resultEnc []byte
-	var taskID sql.NullString
-	var status string
-	var errorCode, errorMessage sql.NullString
-	var errorRetryable int
-	var completedAt sql.NullInt64
-	var createdMs, updatedMs int64
-
-	err := row.Scan(
-		&sub.ID, &sub.ClientRequestID, &sub.Tool, &sub.Strategy, &sub.DescriptorDigest,
-		&sub.ArgsHash, &argsEnc, &taskID, &status, &sub.Sequence, &eventsEnc, &resultEnc,
-		&errorCode, &errorMessage, &errorRetryable, &sub.ProtocolVersion, &sub.AdapterVersion,
-		&createdMs, &updatedMs, &completedAt,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("scan submission: %w", err)
-	}
-	sub.CreatedAt = time.UnixMilli(createdMs).UTC()
-	sub.UpdatedAt = time.UnixMilli(updatedMs).UTC()
-	sub.Status = submission.State(status)
-	if !submission.Valid(sub.Status) {
-		return nil, fmt.Errorf("submission %s has unknown status %q", sub.ID, status)
-	}
-	sub.encArgs = argsEnc
-	sub.encEvents = eventsEnc
-	sub.encResult = resultEnc
-	sub.TaskID = taskID.String
-	if errorCode.Valid {
-		sub.ErrorCode = errorCode.String
-	}
-	if errorMessage.Valid {
-		sub.ErrorMessage = errorMessage.String
-	}
-	sub.ErrorRetryable = errorRetryable != 0
-	if completedAt.Valid {
-		completed := time.UnixMilli(completedAt.Int64).UTC()
-		sub.CompletedAt = &completed
-	}
-	return &sub, nil
-}
-
-// decryptSubmission fills Arguments, Events, and Result from the sealed
-// blobs. Empty blobs stay absent.
-func (s *Store) decryptSubmission(sub *Submission) error {
-	if len(sub.encArgs) > 0 {
-		args, err := s.cipher.open(sub.encArgs, sub.ID, "arguments")
-		if err != nil {
-			return fmt.Errorf("submission %s arguments: %w", sub.ID, err)
-		}
-		sub.Arguments = args
-	}
-	if len(sub.encEvents) > 0 {
-		events, err := s.cipher.open(sub.encEvents, sub.ID, "events")
-		if err != nil {
-			return fmt.Errorf("submission %s events: %w", sub.ID, err)
-		}
-		decoded := []contract.Event{}
-		if err := json.Unmarshal(events, &decoded); err != nil {
-			return fmt.Errorf("submission %s events: %w", sub.ID, err)
-		}
-		sub.Events = decoded
-	}
-	if len(sub.encResult) > 0 {
-		result, err := s.cipher.open(sub.encResult, sub.ID, "result")
-		if err != nil {
-			return fmt.Errorf("submission %s result: %w", sub.ID, err)
-		}
-		decoded := contract.Result{}
-		if err := json.Unmarshal(result, &decoded); err != nil {
-			return fmt.Errorf("submission %s result: %w", sub.ID, err)
-		}
-		sub.Result = &decoded
-	}
-	return nil
 }
 
 // hashInput hashes a length-delimited, versioned execution identity. Including

@@ -378,7 +378,9 @@ Permitted persisted values include:
 - upstream opaque correlation identifier;
 - normalized state and timestamps;
 - progress cursor and bounded recent events;
-- terminal result or structured failure within retention limits; and
+- terminal result or structured failure within retention limits;
+- the accepted response, result, event, and retention limits that govern the
+  submission for its complete lifecycle; and
 - compatible protocol and adapter versions.
 
 The state store must not contain OAuth authorization codes, access or refresh

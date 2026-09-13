@@ -57,7 +57,9 @@ func validateCurrentSchema(ctx context.Context, conn *sql.Conn) error {
 		`SELECT submission_id, client_request_id, tool, strategy, descriptor_digest,
 			args_hash, args_enc, task_id, status, sequence, events_enc, result_enc,
 			error_code, error_message, error_retryable, protocol_version,
-			adapter_version, created_at, updated_at, completed_at,
+			adapter_version, response_bytes, result_bytes, event_bytes, max_events,
+			events_bytes, payload_retention_ms, tombstone_retention_ms,
+			created_at, updated_at, completed_at,
 			payload_expires_at, tombstone_expires_at, lease_owner, lease_expires_at
 		 FROM submissions LIMIT 0`,
 		`SELECT client_request_id, args_hash, submission_id, created_at FROM idempotency LIMIT 0`,

@@ -124,6 +124,8 @@ Therefore the state store must persist, per submission:
 - the current upstream task ID (may be stale);
 - normalized state, timestamps, progress cursor and bounded events;
 - the terminal result or structured failure within retention limits;
+- the accepted response, result, event, and retention limits that govern the
+  submission for its complete lifecycle;
 - the negotiated protocol version and adapter version.
 
 This resolves the restart-recovery acceptance criterion and is now recorded in
@@ -265,7 +267,10 @@ the digest field omitted. Tama Link verifies every supplied digest and requires
 one whenever any effective limit exceeds its version 1 default. Lowered limits
 apply only to new acceptance: exact retries are canonicalized within the hard
 ceilings and reconciled against the durable idempotency index first, so a
-profile update cannot strand already accepted work.
+profile update cannot strand already accepted work. Each accepted submission
+retains its response, result, event, and retention limits across restarts.
+Rows created by the earlier schema, which did not retain this snapshot, migrate
+with the version 1 defaults.
 
 If Tama Link observes a completed upstream operation but cannot store its
 normalized result within the limit, the local submission becomes terminal

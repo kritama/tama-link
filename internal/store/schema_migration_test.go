@@ -17,8 +17,7 @@ func TestOpenMigratesSchemaVersionOne(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
-	legacySchema := strings.Replace(createSchema,
-		"    error_retryable INTEGER NOT NULL DEFAULT 0,\n", "", 1)
+	legacySchema := schemaVersionOne()
 	if _, err := db.Exec(legacySchema); err != nil {
 		t.Fatalf("create legacy schema: %v", err)
 	}
@@ -55,14 +54,59 @@ func TestOpenMigratesSchemaVersionOne(t *testing.T) {
 	}
 }
 
+func TestOpenMigratesSchemaVersionTwoWithDefaultAcceptedLimits(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	db, err := sql.Open("sqlite", sqliteURI(path))
+	if err != nil {
+		t.Fatalf("sql.Open: %v", err)
+	}
+	if _, err := db.Exec(schemaVersionTwo()); err != nil {
+		t.Fatalf("create legacy schema: %v", err)
+	}
+	keys := &migrationKeys{key: make([]byte, 32)}
+	for key, value := range map[string]string{
+		metaSchemaVersion:    "2",
+		metaEncryptionFormat: "2",
+		metaStateKeyID:       "state",
+	} {
+		if _, err := db.Exec("INSERT INTO meta (key, value) VALUES (?, ?)", key, value); err != nil {
+			t.Fatalf("insert metadata: %v", err)
+		}
+	}
+	if _, err := db.Exec(`
+		INSERT INTO submissions (
+			submission_id, client_request_id, tool, strategy, descriptor_digest,
+			args_hash, status, protocol_version, adapter_version, created_at, updated_at
+		) VALUES ('sub-1', 'req-1', 'message', 'sync', 'descriptor',
+		          'hash', 'accepted', '2025-06-18', 'tama-0.14', 1, 1)
+	`); err != nil {
+		t.Fatalf("insert legacy submission: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close legacy database: %v", err)
+	}
+
+	s, err := Open(context.Background(), path, keys, Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("Open with migration: %v", err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+	got, err := s.GetSubmission(context.Background(), "sub-1")
+	if err != nil {
+		t.Fatalf("GetSubmission: %v", err)
+	}
+	if want := acceptedLimitsFrom(limits.Default()); got.AcceptedLimits != want {
+		t.Fatalf("accepted limits = %+v, want version 1 defaults %+v", got.AcceptedLimits, want)
+	}
+}
+
 func TestOpenRollsBackIncompleteSchemaMigration(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	db, err := sql.Open("sqlite", sqliteURI(path))
 	if err != nil {
 		t.Fatalf("sql.Open: %v", err)
 	}
-	legacySchema := strings.Replace(createSchema,
-		"    error_retryable INTEGER NOT NULL DEFAULT 0,\n", "", 1)
+	legacySchema := schemaVersionOne()
 	if _, err := db.Exec(legacySchema); err != nil {
 		t.Fatalf("create legacy schema: %v", err)
 	}
@@ -106,6 +150,27 @@ func TestOpenRollsBackIncompleteSchemaMigration(t *testing.T) {
 	if columns != 0 {
 		t.Fatalf("error_retryable columns after rollback = %d, want 0", columns)
 	}
+}
+
+func schemaVersionOne() string {
+	return strings.Replace(schemaVersionTwo(),
+		"    error_retryable INTEGER NOT NULL DEFAULT 0,\n", "", 1)
+}
+
+func schemaVersionTwo() string {
+	legacy := createSchema
+	for _, column := range []string{
+		"    response_bytes INTEGER NOT NULL DEFAULT 16777216,\n",
+		"    result_bytes INTEGER NOT NULL DEFAULT 8388608,\n",
+		"    event_bytes INTEGER NOT NULL DEFAULT 16384,\n",
+		"    max_events INTEGER NOT NULL DEFAULT 128,\n",
+		"    events_bytes INTEGER NOT NULL DEFAULT 1048576,\n",
+		"    payload_retention_ms INTEGER NOT NULL DEFAULT 604800000,\n",
+		"    tombstone_retention_ms INTEGER NOT NULL DEFAULT 2592000000,\n",
+	} {
+		legacy = strings.Replace(legacy, column, "", 1)
+	}
+	return legacy
 }
 
 func TestOpenRejectsUnrelatedDatabaseWithoutPollutingIt(t *testing.T) {

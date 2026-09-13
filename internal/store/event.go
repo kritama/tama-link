@@ -35,7 +35,7 @@ func (s *Store) AppendEvents(ctx context.Context, id string, events []contract.E
 	if submission.Terminal(sub.Status) {
 		return nil, fmt.Errorf("append events in terminal state %s", sub.Status)
 	}
-	merged, last, err := mergeEvents(sub, events, s.limits)
+	merged, last, err := mergeEvents(sub, events, sub.AcceptedLimits.eventLimits())
 	if err != nil {
 		return nil, err
 	}
