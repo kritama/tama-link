@@ -2,19 +2,62 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kritama/tama-link/internal/catalog"
+	"github.com/kritama/tama-link/internal/contract"
+	"github.com/kritama/tama-link/internal/profile"
 )
 
-func TestServerExposesOnlySubmitAndAwait(t *testing.T) {
-	t.Parallel()
+func testProfile() *profile.Profile {
+	op := catalog.Descriptor{
+		Name:        "message",
+		Title:       "Message",
+		Description: "Send one message to Tama.",
+		InputSchema: json.RawMessage(`{"type":"object","properties":{"message":{"type":"string"}},"required":["message"]}`),
+		TaskSupport: catalog.TaskSupportRequired,
+		Strategy:    catalog.StrategyUpstreamTask,
+	}
+	digest, err := op.ComputeDigest()
+	if err != nil {
+		panic(err)
+	}
+	op.Digest = digest
+
+	p := &profile.Profile{
+		Version:      profile.SchemaVersion,
+		Name:         profile.Name("tama-app"),
+		Origin:       "https://tama.example",
+		Endpoint:     "https://tama.example/mcp/app",
+		Issuer:       "https://auth.example",
+		Instructions: "Pinned upstream instructions.",
+		Bounds:       profile.Bounds{ProtocolMin: "2025-03-26", ProtocolMax: "2025-11-25"},
+		State:        profile.StateRefs{Database: "default", Credentials: "default"},
+		Operations:   []catalog.Descriptor{op},
+	}
+	if err := p.Validate(p.Name); err != nil {
+		panic(err)
+	}
+	return p
+}
+
+func connectTestServer(t *testing.T, p *profile.Profile) *mcp.ClientSession {
+	t.Helper()
+	return connectServer(t, New(p, "test"))
+}
+
+func connectServer(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
+	t.Helper()
 
 	ctx := context.Background()
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 
-	serverSession, err := New("test").Connect(ctx, serverTransport, nil)
+	serverSession, err := srv.Connect(ctx, serverTransport, nil)
 	if err != nil {
 		t.Fatalf("connect server: %v", err)
 	}
@@ -27,7 +70,50 @@ func TestServerExposesOnlySubmitAndAwait(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = clientSession.Close() })
 
-	result, err := clientSession.ListTools(ctx, nil)
+	return clientSession
+}
+
+func TestSubmitPreservesJSONNumbersAcrossMCPBoundary(t *testing.T) {
+	t.Parallel()
+
+	var captured json.RawMessage
+	operation := func(
+		_ context.Context,
+		_ *mcp.CallToolRequest,
+		input contract.SubmitInput,
+	) (*mcp.CallToolResult, any, error) {
+		captured = append(captured[:0], input.Arguments...)
+		return &mcp.CallToolResult{}, map[string]any{"accepted": true}, nil
+	}
+	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "test"}, nil)
+	server.AddTool(
+		&mcp.Tool{Name: contract.ToolSubmit, InputSchema: submitInputSchema([]string{"message"})},
+		submitHandler([]string{"message"}, operation),
+	)
+	client := connectServer(t, server)
+
+	raw := json.RawMessage(`{"tool":"message","arguments":{"identifier":9007199254740993}}`)
+	result, err := client.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      contract.ToolSubmit,
+		Arguments: raw,
+	})
+	if err != nil {
+		t.Fatalf("CallTool: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("CallTool returned tool error: %+v", result)
+	}
+	if got, want := string(captured), `{"identifier":9007199254740993}`; got != want {
+		t.Fatalf("captured arguments = %s, want %s", got, want)
+	}
+}
+
+func TestServerExposesOnlySubmitAndAwait(t *testing.T) {
+	t.Parallel()
+
+	clientSession := connectTestServer(t, testProfile())
+
+	result, err := clientSession.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatalf("list tools: %v", err)
 	}
@@ -41,5 +127,71 @@ func TestServerExposesOnlySubmitAndAwait(t *testing.T) {
 	want := []string{"await", "submit"}
 	if !slices.Equal(names, want) {
 		t.Fatalf("tool names = %v, want %v", names, want)
+	}
+}
+
+func TestServerProjectsProfileCatalog(t *testing.T) {
+	t.Parallel()
+
+	clientSession := connectTestServer(t, testProfile())
+	ctx := context.Background()
+
+	result, err := clientSession.ListTools(ctx, nil)
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	if len(result.Tools) != 2 {
+		t.Fatalf("tools = %d, want 2", len(result.Tools))
+	}
+	submitTool := result.Tools[0]
+	if submitTool.Name == "await" {
+		submitTool = result.Tools[1]
+	}
+
+	schema, ok := submitTool.InputSchema.(map[string]any)
+	if !ok {
+		t.Fatalf("submit input schema type = %T", submitTool.InputSchema)
+	}
+	properties, _ := schema["properties"].(map[string]any)
+	toolProp, _ := properties["tool"].(map[string]any)
+	enum, _ := toolProp["enum"].([]any)
+	names := make([]string, 0, len(enum))
+	for _, item := range enum {
+		names = append(names, item.(string))
+	}
+	if !slices.Equal(names, []string{"message"}) {
+		t.Fatalf("tool enum = %v, want [message]", names)
+	}
+
+	if !strings.Contains(submitTool.Description, "message") ||
+		!strings.Contains(submitTool.Description, "Send one message to Tama.") {
+		t.Fatalf("submit description missing operation signature: %q", submitTool.Description)
+	}
+}
+
+func TestServerComposesInstructions(t *testing.T) {
+	t.Parallel()
+
+	clientSession := connectTestServer(t, testProfile())
+
+	instructions := clientSession.InitializeResult().Instructions
+	if !strings.Contains(instructions, "submit") || !strings.Contains(instructions, "await") {
+		t.Fatalf("instructions missing workflow: %q", instructions)
+	}
+	if !strings.Contains(instructions, "Pinned upstream instructions.") {
+		t.Fatalf("instructions missing pinned upstream copy: %q", instructions)
+	}
+}
+
+func TestServerWithoutPinnedInstructions(t *testing.T) {
+	t.Parallel()
+
+	p := testProfile()
+	p.Instructions = ""
+	clientSession := connectTestServer(t, p)
+
+	instructions := clientSession.InitializeResult().Instructions
+	if instructions != workflowInstructions {
+		t.Fatalf("instructions = %q, want workflow only", instructions)
 	}
 }

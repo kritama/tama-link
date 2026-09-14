@@ -3,91 +3,114 @@ package server
 
 import (
 	"context"
+	"sort"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
+
+	"github.com/kritama/tama-link/internal/catalog"
+	"github.com/kritama/tama-link/internal/contract"
+	"github.com/kritama/tama-link/internal/profile"
 )
 
 const (
 	serverName = "tama-link"
 
+	awaitDescription = "Wait for or inspect a Tama Link submission and return progress or its terminal result."
+
+	submitBaseDescription = "Submit one allowed operation to Tama and return a durable submission identifier without waiting for completion."
+
+	// workflowInstructions is Tama Link's own workflow and local safety
+	// constraints, always the first source of server instructions.
+	workflowInstructions = "Use submit to start one durable Tama operation, then call await with the returned submission_id until terminal is true. Submit each operation once and reuse client_request_id when retrying so retries stay idempotent."
+
 	notImplementedMessage = "Tama Link's upstream adapter is not implemented in the repository foundation"
 )
 
-// SubmitInput is the stable client-facing input for the submit tool.
-type SubmitInput struct {
-	Tool            string         `json:"tool" jsonschema:"upstream Tama tool name allowed by the selected profile"`
-	Arguments       map[string]any `json:"arguments,omitempty" jsonschema:"arguments for the upstream Tama tool"`
-	ClientRequestID string         `json:"client_request_id,omitempty" jsonschema:"opaque idempotency key scoped to the selected profile"`
-}
+// New creates a client-facing MCP server for one validated profile with
+// exactly the submit and await tools.
+func New(p *profile.Profile, buildVersion string) *mcp.Server {
+	ops := p.Catalog().Callable()
 
-// AwaitInput is the stable client-facing input for the await tool.
-type AwaitInput struct {
-	SubmissionID string `json:"submission_id" jsonschema:"opaque Tama Link submission identifier"`
-	Cursor       string `json:"cursor,omitempty" jsonschema:"opaque progress cursor returned by an earlier await call"`
-	TimeoutMS    int    `json:"timeout_ms,omitempty" jsonschema:"bounded long-poll duration in milliseconds"`
-}
-
-// ToolError is the stable error envelope returned by Tama Link tools.
-type ToolError struct {
-	Code      string `json:"code"`
-	Message   string `json:"message"`
-	Retryable bool   `json:"retryable"`
-}
-
-// SubmitOutput is the initial structured output shape for submit.
-type SubmitOutput struct {
-	Status string     `json:"status"`
-	Error  *ToolError `json:"error,omitempty"`
-}
-
-// AwaitOutput is the initial structured output shape for await.
-type AwaitOutput struct {
-	Status   string     `json:"status"`
-	Terminal bool       `json:"terminal"`
-	Error    *ToolError `json:"error,omitempty"`
-}
-
-// New creates a client-facing MCP server with exactly the submit and await tools.
-func New(buildVersion string) *mcp.Server {
 	instance := mcp.NewServer(
 		&mcp.Implementation{Name: serverName, Version: buildVersion},
-		&mcp.ServerOptions{
-			Instructions: "Use submit to start one durable Tama operation, then call await with the returned submission_id until terminal is true.",
-		},
+		&mcp.ServerOptions{Instructions: composeInstructions(p.Instructions)},
 	)
 
-	mcp.AddTool(instance, &mcp.Tool{
-		Name:        "submit",
-		Description: "Submit one allowed operation to Tama and return a durable submission identifier without waiting for completion.",
-	}, submit)
+	instance.AddTool(&mcp.Tool{
+		Name:        contract.ToolSubmit,
+		Description: composeSubmitDescription(ops),
+		InputSchema: submitInputSchema(ops.Names()),
+	}, submitHandler(ops.Names(), submit))
 
 	mcp.AddTool(instance, &mcp.Tool{
-		Name:        "await",
-		Description: "Wait for or inspect a Tama Link submission and return progress or its terminal result.",
+		Name:        contract.ToolAwait,
+		Description: awaitDescription,
 	}, await)
 
 	return instance
 }
 
-func submit(_ context.Context, _ *mcp.CallToolRequest, _ SubmitInput) (*mcp.CallToolResult, SubmitOutput, error) {
-	return &mcp.CallToolResult{IsError: true}, SubmitOutput{
-		Status: "not_implemented",
-		Error: &ToolError{
-			Code:      "not_implemented",
-			Message:   notImplementedMessage,
-			Retryable: false,
-		},
-	}, nil
+// composeInstructions joins Tama Link's workflow with the profile's pinned
+// upstream instructions as two clearly separated sources.
+func composeInstructions(pinned string) string {
+	if pinned == "" {
+		return workflowInstructions
+	}
+	return workflowInstructions + "\n\n" + pinned
 }
 
-func await(_ context.Context, _ *mcp.CallToolRequest, _ AwaitInput) (*mcp.CallToolResult, AwaitOutput, error) {
-	return &mcp.CallToolResult{IsError: true}, AwaitOutput{
-		Status:   "not_implemented",
-		Terminal: true,
-		Error: &ToolError{
-			Code:      "not_implemented",
-			Message:   notImplementedMessage,
-			Retryable: false,
+// composeSubmitDescription renders the base description plus the bounded
+// deterministic operation signatures.
+func composeSubmitDescription(ops catalog.Catalog) string {
+	signatures := ops.SubmitDescription()
+	if signatures == "" {
+		return submitBaseDescription
+	}
+	return submitBaseDescription + "\n\n" + signatures
+}
+
+// submitInputSchema constrains tool to the approved operation names.
+func submitInputSchema(names []string) map[string]any {
+	sorted := append([]string(nil), names...)
+	sort.Strings(sorted)
+
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"tool": map[string]any{
+				"type":        "string",
+				"enum":        sorted,
+				"description": "upstream Tama tool name allowed by the selected profile",
+			},
+			"arguments": map[string]any{
+				"type":        "object",
+				"description": "arguments for the upstream Tama tool",
+			},
+			"client_request_id": map[string]any{
+				"type":        "string",
+				"description": "opaque idempotency key scoped to the selected profile",
+			},
+			"client_context": map[string]any{
+				"type":        "object",
+				"description": "client-owned correlation values",
+				"properties": map[string]any{
+					"thread_id": map[string]any{
+						"type":        "string",
+						"description": "host conversation identifier supplied by the client",
+					},
+				},
+			},
 		},
-	}, nil
+		"required": []string{"tool"},
+	}
+}
+
+func submit(_ context.Context, _ *mcp.CallToolRequest, _ contract.SubmitInput) (*mcp.CallToolResult, any, error) {
+	notImplemented := contract.NewError(contract.CodeNotImplemented, notImplementedMessage)
+	return &mcp.CallToolResult{IsError: true}, contract.ErrorOutput{Error: &notImplemented}, nil
+}
+
+func await(_ context.Context, _ *mcp.CallToolRequest, _ contract.AwaitInput) (*mcp.CallToolResult, any, error) {
+	notImplemented := contract.NewError(contract.CodeNotImplemented, notImplementedMessage)
+	return &mcp.CallToolResult{IsError: true}, contract.ErrorOutput{Error: &notImplemented}, nil
 }

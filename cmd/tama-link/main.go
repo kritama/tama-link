@@ -7,18 +7,17 @@ import (
 	"io"
 	"os"
 	"os/signal"
-
-	"github.com/modelcontextprotocol/go-sdk/mcp"
-
-	"github.com/kritama/tama-link/internal/server"
-	"github.com/kritama/tama-link/internal/version"
 )
 
 const usage = `Usage:
-  tama-link serve
-  tama-link version
+  tama-link serve --profile <name> [--config-dir <dir>]
+  tama-link login --profile <name>
+  tama-link logout --profile <name>
+  tama-link version [--json]
 
-The serve command starts the Tama Link MCP server over stdin/stdout.`
+The serve command starts the Tama Link MCP server over stdin/stdout for the
+selected profile. Standard output is reserved for MCP JSON-RPC frames.
+`
 
 func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
@@ -28,35 +27,41 @@ func main() {
 }
 
 func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
-	if len(args) != 1 {
-		writeLine(stderr, usage)
+	if len(args) == 0 {
+		write(stderr, usage)
 		return 2
 	}
 
-	switch args[0] {
+	command, rest := args[0], args[1:]
+	switch command {
 	case "serve":
-		if err := server.New(version.Version).Run(ctx, &mcp.StdioTransport{}); err != nil {
-			writef(stderr, "tama-link: MCP server failed: %v\n", err)
-			return 1
-		}
-
-		return 0
+		return runServe(ctx, rest, stdout, stderr)
+	case "login":
+		return runLogin(rest, stdout, stderr)
+	case "logout":
+		return runLogout(rest, stdout, stderr)
 	case "version":
-		writeLine(stdout, version.String())
-		return 0
+		return runVersion(rest, stdout, stderr)
 	case "help", "-h", "--help":
-		writeLine(stdout, usage)
+		if len(rest) > 0 {
+			writef(stderr, "tama-link: help takes no arguments\n")
+			return 2
+		}
+		write(stdout, usage)
 		return 0
 	default:
-		writef(stderr, "tama-link: unknown command %q\n\n%s\n", args[0], usage)
+		writef(stderr, "tama-link: unknown command %q\n\n%s", command, usage)
 		return 2
 	}
 }
 
-func writeLine(writer io.Writer, values ...any) {
-	_, _ = fmt.Fprintln(writer, values...)
+// write writes s to w, ignoring write failures. Diagnostics cannot
+// meaningfully recover from an unwritable stream.
+func write(w io.Writer, s string) {
+	_, _ = io.WriteString(w, s)
 }
 
-func writef(writer io.Writer, format string, values ...any) {
-	_, _ = fmt.Fprintf(writer, format, values...)
+// writef writes a formatted string to w, ignoring write failures.
+func writef(w io.Writer, format string, args ...any) {
+	_, _ = fmt.Fprintf(w, format, args...)
 }
