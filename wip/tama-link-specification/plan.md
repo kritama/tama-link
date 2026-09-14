@@ -102,9 +102,11 @@ Use `modernc.org/sqlite` (pure Go) so the existing `CGO_ENABLED=0` cross-builds
 keep working. Each profile uses an isolated database. The main database and WAL
 sidecars are validated or securely created without following links inside the
 private profile directory. Every state-path component is resolved while its
-parent directory handle is pinned and links are rejected; Windows retains all
-ancestor handles while SQLite uses the path. Existing declared schemas are
-validated before use and are never repaired with
+parent directory handle is pinned and links are rejected. On Windows, child
+directories, the database, and both sidecars are opened relative to their
+pinned parent handles; all ancestor handles remain open while SQLite uses the
+absolute path. Existing declared schemas are validated before use and are never
+repaired with
 `CREATE TABLE IF NOT EXISTS`. The state store holds the minimum durable state
 the spec permits and adds the **canonical upstream request** (see D3). SQLite
 is authoritative for Tama Link's

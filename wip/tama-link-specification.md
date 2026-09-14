@@ -409,15 +409,18 @@ The store must tolerate multiple Tama Link processes opening the same profile.
 SQLite uses WAL mode, bounded busy handling, transactional idempotency, and
 lease-based worker ownership. The database file and its `-wal` and `-shm`
 sidecars are opened or created without following links inside the validated
-private profile directory before WAL is enabled. First-open initialization, job
-claiming, terminal capture, garbage collection, and OAuth refresh coordination
-must be safe across processes, not merely goroutines. An existing database
-whose declared schema is missing a required durable table or column fails
-closed; startup must not silently recreate the missing object and lose its
-durable index or ownership state. For the initial release there is only one
-schema and encryption format; mismatched version metadata fails closed rather
-than invoking a speculative upgrade path. A migration is introduced only after
-a released format creates a real compatibility boundary.
+private profile directory before WAL is enabled. On Windows, each child
+directory, the database, and both sidecars are opened relative to the already
+pinned parent handle; retained handles prevent pathname replacement while
+SQLite uses the absolute path. First-open initialization, job claiming,
+terminal capture, garbage collection, and OAuth refresh coordination must be
+safe across processes, not merely goroutines. An existing database whose
+declared schema is missing a required durable table or column fails closed;
+startup must not silently recreate the missing object and lose its durable
+index or ownership state. For the initial release there is only one schema and
+encryption format; mismatched version metadata fails closed rather than
+invoking a speculative upgrade path. A migration is introduced only after a
+released format creates a real compatibility boundary.
 
 ## Operation catalog and instruction projection
 

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unsafe"
 
 	"github.com/kritama/tama-link/internal/windowsacl"
 	"golang.org/x/sys/windows"
@@ -24,11 +25,13 @@ func openStateHandles(parentPath, base string) (stateHandles, error) {
 		return stateHandles{}, err
 	}
 	parent := directories[len(directories)-1]
-	file, err := openWindowsHandle(
-		parentPath+string(os.PathSeparator)+base,
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.OPEN_ALWAYS,
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+	file, err := openWindowsHandleAt(
+		parent,
+		base,
+		windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE,
+		windows.FILE_OPEN_IF,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT,
 	)
 	if err != nil {
 		closeStateDirectories(directories)
@@ -47,20 +50,22 @@ func openWindowsStateDirectories(path string) ([]*os.File, error) {
 	if volume == "" {
 		return nil, fmt.Errorf("state database parent %s has no volume", path)
 	}
-	currentPath := volume + string(os.PathSeparator)
-	root, err := openWindowsDirectory(currentPath)
+	rootPath := volume + string(os.PathSeparator)
+	root, err := openWindowsDirectory(rootPath)
 	if err != nil {
 		return nil, err
 	}
 	directories := []*os.File{root}
 	relative := strings.TrimLeft(clean[len(volume):], `/\`)
 	for _, component := range strings.FieldsFunc(relative, isWindowsPathSeparator) {
-		currentPath = filepath.Join(currentPath, component)
-		if err := os.Mkdir(currentPath, 0o700); err != nil && !os.IsExist(err) {
-			closeStateDirectories(directories)
-			return nil, err
-		}
-		directory, err := openWindowsDirectory(currentPath)
+		directory, err := openWindowsHandleAt(
+			directories[len(directories)-1],
+			component,
+			windows.FILE_GENERIC_READ,
+			windows.FILE_OPEN_IF,
+			windows.FILE_ATTRIBUTE_DIRECTORY,
+			windows.FILE_DIRECTORY_FILE|windows.FILE_OPEN_FOR_BACKUP_INTENT|windows.FILE_OPEN_REPARSE_POINT,
+		)
 		if err != nil {
 			closeStateDirectories(directories)
 			return nil, err
@@ -100,6 +105,45 @@ func openWindowsHandle(path string, access, creation, attributes uint32) (*os.Fi
 	if err != nil {
 		return nil, err
 	}
+	return checkedWindowsFile(handle, path)
+}
+
+func openWindowsHandleAt(
+	parent *os.File,
+	name string,
+	access, disposition, attributes, options uint32,
+) (*os.File, error) {
+	objectName, err := windows.NewNTUnicodeString(name)
+	if err != nil {
+		return nil, err
+	}
+	objectAttributes := &windows.OBJECT_ATTRIBUTES{
+		Length:        uint32(unsafe.Sizeof(windows.OBJECT_ATTRIBUTES{})),
+		RootDirectory: windows.Handle(parent.Fd()),
+		ObjectName:    objectName,
+		Attributes:    windows.OBJ_CASE_INSENSITIVE | windows.OBJ_DONT_REPARSE,
+	}
+	var handle windows.Handle
+	var status windows.IO_STATUS_BLOCK
+	if err := windows.NtCreateFile(
+		&handle,
+		access,
+		objectAttributes,
+		&status,
+		nil,
+		attributes,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		disposition,
+		options,
+		0,
+		0,
+	); err != nil {
+		return nil, err
+	}
+	return checkedWindowsFile(handle, name)
+}
+
+func checkedWindowsFile(handle windows.Handle, name string) (*os.File, error) {
 	var info windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(handle, &info); err != nil {
 		_ = windows.CloseHandle(handle)
@@ -109,15 +153,17 @@ func openWindowsHandle(path string, access, creation, attributes uint32) (*os.Fi
 		_ = windows.CloseHandle(handle)
 		return nil, fmt.Errorf("path is a reparse point")
 	}
-	return os.NewFile(uintptr(handle), path), nil
+	return os.NewFile(uintptr(handle), name), nil
 }
 
 func openSQLiteSidecar(path *statePath, base string) (*os.File, error) {
-	return openWindowsHandle(
-		filepath.Join(filepath.Dir(path.name), base),
-		windows.GENERIC_READ|windows.GENERIC_WRITE,
-		windows.OPEN_ALWAYS,
-		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+	return openWindowsHandleAt(
+		path.parent,
+		base,
+		windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE,
+		windows.FILE_OPEN_IF,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT,
 	)
 }
 
