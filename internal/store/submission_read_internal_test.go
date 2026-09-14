@@ -25,7 +25,7 @@ func TestUnreadableEncryptedPayloadsReportStateUnavailable(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 
-			s, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"), &migrationKeys{}, Config{
+			s, err := Open(context.Background(), filepath.Join(t.TempDir(), "state.db"), &testKeys{}, Config{
 				Limits: limits.Default(),
 			})
 			if err != nil {

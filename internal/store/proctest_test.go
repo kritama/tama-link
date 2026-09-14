@@ -342,7 +342,7 @@ func TestProctestConcurrentMigrations(t *testing.T) {
 
 	s := proctestOpen(t, st.db, st.key)
 	if _, err := s.CheckIntegrity(context.Background()); err != nil {
-		t.Fatalf("integrity after concurrent migrations: %v", err)
+		t.Fatalf("integrity after concurrent initialization: %v", err)
 	}
 }
 

@@ -44,21 +44,20 @@ Phase 1 is complete. The durable-domain implementation now includes:
   instructions, and the bounded submit `tool` enum;
 - `internal/store`: encrypted SQLite state (D2/D3/D4) with complete-input
   idempotency, compare-and-set transitions, bounded progress, atomic terminal
-  capture, lease-guarded worker writes, payload-free D12 GC, and schema and
-  encryption-format migrations; first-open metadata is atomic under concurrent
-  access, incomplete declared schemas fail closed, SQLite sidecars are secured
-  before WAL is enabled, and ciphertext is bound to its submission and semantic
-  field;
+  capture, lease-guarded worker writes, payload-free D12 GC, and exact schema
+  and encryption-format validation; first-open metadata is atomic under
+  concurrent access, incomplete declared schemas fail closed, SQLite sidecars
+  are secured before WAL is enabled, and ciphertext is bound to its submission
+  and semantic field;
 - `internal/credential`: a profile-scoped platform keyring restricted to the
   secure OS backend, with missing and unavailable states kept distinct and
   fail-closed store integration;
 - `internal/worker`: owned lease renewal, cancellation, safe terminal failure,
   single-winner execution, and restart recovery for `local_replayable` work;
-- the separate-process storage test suite (concurrent migration, competing
+- the separate-process storage test suite (concurrent initialization, competing
   idempotent inserts, busy timeout, exclusive claim, lease recovery after
   death, terminal capture surviving GC, refresh leasing, WAL recovery,
-  integrity), plus worker cancellation/recovery and legacy encryption migration
-  coverage.
+  integrity), plus worker cancellation and recovery coverage.
 
 Phase 2 is next. The downstream `submit` and `await` handlers deliberately
 remain placeholders until the current Tama System and App adapters are wired;
@@ -105,7 +104,7 @@ sidecars are validated or securely created without following links inside the
 private profile directory. Every state-path component is resolved while its
 parent directory handle is pinned and links are rejected; Windows retains all
 ancestor handles while SQLite uses the path. Existing declared schemas are
-validated before any migration and are never repaired with
+validated before use and are never repaired with
 `CREATE TABLE IF NOT EXISTS`. The state store holds the minimum durable state
 the spec permits and adds the **canonical upstream request** (see D3). SQLite
 is authoritative for Tama Link's
@@ -272,8 +271,6 @@ apply only to new acceptance: exact retries are canonicalized within the hard
 ceilings and reconciled against the durable idempotency index first, so a
 profile update cannot strand already accepted work. Each accepted submission
 retains its response, result, event, and retention limits across restarts.
-Rows created by the earlier schema, which did not retain this snapshot, migrate
-with the version 1 defaults.
 
 If Tama Link observes a completed upstream operation but cannot store its
 normalized result within the limit, the local submission becomes terminal
@@ -342,7 +339,7 @@ internal/contract/        stable tool input/output + error types (compat API)
 internal/submission/      normalized state machine, idempotency, progress model
 internal/catalog/         descriptors, schema projection, drift verification
 internal/profile/         profile loading, validation, bindings, instructions
-internal/store/           encrypted SQLite state, migrations, leases, GC
+internal/store/           encrypted SQLite state, schema validation, leases, GC
 internal/worker/          leased local replayable/guarded execution
 internal/credential/      platform keyring wrapper (secrets only)
 internal/oauth/           discovery, auth-code+PKCE, single-flight refresh
@@ -377,7 +374,7 @@ cleanly if the profile is missing; `version --json` emits deterministic JSON.
   strategies, digests, and timeouts/limits/retention.
 - `internal/store`: SQLite store (D2/D3). Tables for submissions and an
   idempotency index (`client_request_id` → canonical input hash → submission).
-  Sensitive blobs encrypted with a profile key. Atomic writes, migrations,
+  Sensitive blobs encrypted with a profile key. Atomic writes, initialization,
   `0600` permissions, no symlink traversal, WAL/busy handling, transactional
   worker leases, the D12 payload/tombstone retention policy, and GC that never
   removes a non-terminal submission.
@@ -388,7 +385,7 @@ cleanly if the profile is missing; `version --json` emits deterministic JSON.
   idempotency hit and conflict, encrypted-blob round trip, missing-key failure,
   size/retention boundaries, and atomic write safety. A helper subprocess suite
   must start separate OS processes against one database and cover simultaneous
-  migrations, competing idempotent inserts, busy timeout, exclusive worker
+  first opens, competing idempotent inserts, busy timeout, exclusive worker
   claim, lease recovery after process death, terminal capture racing with GC,
   refresh leasing, WAL recovery, and `PRAGMA integrity_check`.
 

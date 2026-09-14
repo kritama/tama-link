@@ -55,9 +55,7 @@ type Store struct {
 	db        *sql.DB
 	cipher    stateCipher
 	limits    limits.Limits
-	schema    int
 	keyID     string
-	format    int
 	now       func() time.Time
 	path      *statePath
 	closeOnce sync.Once
@@ -91,7 +89,7 @@ func Open(ctx context.Context, path string, keys KeyProvider, cfg Config) (*Stor
 	}
 
 	s := &Store{db: sqlDB, limits: cfg.Limits, now: now, path: securedPath}
-	if err := s.migrate(ctx, keys); err != nil {
+	if err := s.initializeOrValidate(ctx, keys); err != nil {
 		_ = sqlDB.Close()
 		return nil, err
 	}

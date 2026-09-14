@@ -19,8 +19,8 @@ type KeyProvider interface {
 	CreateStateKey() (keyID string, key []byte, err error)
 }
 
-// encryptionFormat is the on-disk blob format version.
-const encryptionFormat = 2
+// encryptionFormat is the initial on-disk blob format version.
+const encryptionFormat = 1
 
 // maxKeyID bounds the non-secret key identifier stored in metadata.
 const maxKeyID = 128
@@ -57,10 +57,6 @@ func (c stateCipher) seal(plaintext []byte, submissionID, kind string) ([]byte, 
 
 func (c stateCipher) open(blob []byte, submissionID, kind string) ([]byte, error) {
 	return c.openWithAAD(blob, blobAAD(submissionID, kind))
-}
-
-func (c stateCipher) openLegacy(blob []byte) ([]byte, error) {
-	return c.openWithAAD(blob, []byte("tama-link/blob/v1"))
 }
 
 func (c stateCipher) openWithAAD(blob, aad []byte) ([]byte, error) {
