@@ -400,7 +400,7 @@ storage subset of the separate-process suite passes before Phase 1 is complete.
 - `internal/upstream`: reviewed JSON-RPC 2.0 client over streamable HTTP
   (initialize handshake, `Mcp-Session-Id`, `application/json` and SSE
   responses, bearer auth) supporting `tools/call` (with `params.task`),
-  `tasks/get`, and `tasks/cancel`. Fixture-driven tests.
+  `tasks/get`, `tasks/result`, and `tasks/cancel`. Fixture-driven tests.
 - `internal/oauth`: RFC 9728 protected-resource discovery → RFC 8414 AS
   metadata, dynamic client registration, auth-code + PKCE S256 with the
   ephemeral loopback redirect (D5), and current stable-token refresh coordinated
@@ -411,9 +411,10 @@ storage subset of the separate-process suite passes before Phase 1 is complete.
   - App `submit` → validate client-visible arguments → apply declarative
     bindings → validate complete upstream arguments → task-augmented
     `tools/call` → persist submission + task ID;
-  - `await` → bounded long-poll via `tasks/get` using the upstream poll
-    interval → normalize state/progress → capture terminal result locally
-    immediately and before the task lifetime expires (D6/D13);
+  - `await` → bounded status polling via `tasks/get` using the upstream poll
+    interval → retrieve the complete terminal `CallToolResult` through
+    `tasks/result` → normalize state/progress → capture the terminal result
+    locally immediately and before the task lifetime expires (D6/D13);
   - restart recovery / re-attach (D3): reopen the upstream session and re-issue
     the persisted idempotent request to obtain a fresh session-scoped task ID;
     never reuse a stale task ID.
@@ -435,6 +436,32 @@ storage subset of the separate-process suite passes before Phase 1 is complete.
 Exit: the full `submit` → repeated `await` → terminal workflow works against
 separate live App and System profiles. App recovery does not duplicate graph
 work; System read-only recovery safely replays interrupted local work.
+
+### Phase 2 execution work breakdown
+
+GitHub issue [#9](https://github.com/kritama/tama-link/issues/9) tracks the
+phase and its dependency order:
+
+1. Build the current-Tama streamable-HTTP transport
+   ([#2](https://github.com/kritama/tama-link/issues/2)) and OAuth services
+   ([#3](https://github.com/kritama/tama-link/issues/3)) as independent
+   foundations.
+2. Establish the shared Tama `0.14.0` connection, negotiation, and pinned
+   catalog boundary ([#4](https://github.com/kritama/tama-link/issues/4)).
+3. Implement App task execution and restart reattachment
+   ([#5](https://github.com/kritama/tama-link/issues/5)) and replayable System
+   execution ([#6](https://github.com/kritama/tama-link/issues/6)) on that
+   boundary.
+4. Wire the thin downstream `submit` and `await` handlers
+   ([#7](https://github.com/kritama/tama-link/issues/7)).
+5. Close the phase only after fixture and live acceptance against the pinned
+   local Memovee/Tama topology
+   ([#8](https://github.com/kritama/tama-link/issues/8)).
+
+The pinned `0.14.0` caller contract distinguishes status polling from result
+retrieval: `tasks/get` returns task state and polling guidance, while
+`tasks/result` returns the terminal MCP `CallToolResult`. Both methods are
+required; a terminal status response must not be treated as the result payload.
 
 ## Phase 3 — client progress and acceptance
 

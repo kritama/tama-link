@@ -495,6 +495,13 @@ currently supported Tama release. Later adapters may cover standard MCP Tasks
 and the newer MCP protocol without changing the downstream `submit`/`await`
 tool contract.
 
+For current Tama `0.14.0`, the task adapter uses `tasks/get` for status and
+polling guidance and `tasks/result` to retrieve the terminal MCP
+`CallToolResult`. It must also understand `tasks/cancel`, while downstream wait
+cancellation remains local and must not cancel Tama's durable Submission or
+graph execution. A terminal `tasks/get` response is not a substitute for
+`tasks/result`.
+
 At connection time Tama Link records and validates:
 
 - negotiated protocol version;
@@ -773,6 +780,7 @@ The first complete implementation is not done until automated tests prove:
 
 - authenticated upstream connection;
 - current durable submission/result correlation;
+- `tasks/get` status polling and `tasks/result` terminal capture;
 - ordinary `/mcp/system` execution through the local worker;
 - bounded polling and terminal failure semantics;
 - result normalization and limits; and
