@@ -16,10 +16,15 @@ type metaTriple struct {
 	ClientCapabilities json.RawMessage    `json:"io.modelcontextprotocol/clientCapabilities"`
 }
 
-// buildMeta encodes the client's _meta triple. Capabilities must be a JSON
-// object; it is encoded verbatim so declared extension objects survive
-// unchanged.
+// buildMeta encodes the client's _meta triple.
 func buildMeta(clientInfo mcp.Implementation, capabilities json.RawMessage) (json.RawMessage, error) {
+	return buildMetaWith(clientInfo, capabilities)
+}
+
+// buildMetaWith encodes the _meta triple with an explicit capabilities
+// object. Capabilities must be a JSON object; it is encoded verbatim so
+// declared extension objects survive unchanged.
+func buildMetaWith(clientInfo mcp.Implementation, capabilities json.RawMessage) (json.RawMessage, error) {
 	if !isJSONObject(capabilities) {
 		return nil, fmt.Errorf("client capabilities must be a JSON object")
 	}

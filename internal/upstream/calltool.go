@@ -13,6 +13,11 @@ type CallToolParams struct {
 	// Arguments is the validated canonical upstream argument object. It is
 	// sent verbatim; nil or empty means the argument object is omitted.
 	Arguments json.RawMessage
+	// Capabilities, when non-nil, replaces the client's declared
+	// capabilities in this one request's _meta triple. This is how the
+	// adapter declares the Tasks extension only for operations that may
+	// execute as tasks.
+	Capabilities json.RawMessage
 }
 
 // CallToolResponse is a tools/call result in either result shape.
@@ -48,7 +53,17 @@ func (c *Client) CallTool(ctx context.Context, p *CallToolParams) (*CallToolResp
 	if err != nil {
 		return nil, fmt.Errorf("encode tools/call params: %w", err)
 	}
-	raw, err := c.call(ctx, MethodCallTool, p.Name, wire)
+	var meta json.RawMessage
+	if p.Capabilities != nil {
+		if !isJSONObject(p.Capabilities) {
+			return nil, fmt.Errorf("per-request capabilities must be a JSON object")
+		}
+		meta, err = buildMetaWith(c.info, p.Capabilities)
+		if err != nil {
+			return nil, err
+		}
+	}
+	raw, err := c.callWithMeta(ctx, MethodCallTool, p.Name, wire, meta)
 	if err != nil {
 		return nil, err
 	}

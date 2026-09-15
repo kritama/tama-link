@@ -105,11 +105,21 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
+// Endpoint returns the profile endpoint this client is bound to. Wiring
+// layers compare it against the profile to fail on cross-profile reuse.
+func (c *Client) Endpoint() string { return c.endpoint.String() }
+
 // call performs one stateless request and returns the raw JSON-RPC result
-// value. name is the Mcp-Name header value, empty when the method has none.
-// params must be a JSON object; the _meta triple is merged into it.
+// value with the client's default capabilities.
 func (c *Client) call(ctx context.Context, method, name string, params json.RawMessage) (json.RawMessage, error) {
-	id, resp, err := c.doRequest(ctx, method, name, params)
+	return c.callWithMeta(ctx, method, name, params, nil)
+}
+
+// callWithMeta performs one stateless request. metaOverride, when non-nil,
+// replaces the client's default _meta triple for this request only (the
+// per-request Tasks capability seam).
+func (c *Client) callWithMeta(ctx context.Context, method, name string, params, metaOverride json.RawMessage) (json.RawMessage, error) {
+	id, resp, err := c.doRequest(ctx, method, name, params, metaOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -117,13 +127,19 @@ func (c *Client) call(ctx context.Context, method, name string, params json.RawM
 	return c.readResult(method, id, resp)
 }
 
-// doRequest builds and sends one stateless request. The caller owns the
-// response body. The returned id correlates the reply for stream reads.
-func (c *Client) doRequest(ctx context.Context, method, name string, params json.RawMessage) (string, *http.Response, error) {
+// doRequest builds and sends one stateless request. metaOverride, when
+// non-nil, replaces the client's default _meta triple for this request.
+// The caller owns the response body. The returned id correlates the reply
+// for stream reads.
+func (c *Client) doRequest(ctx context.Context, method, name string, params, metaOverride json.RawMessage) (string, *http.Response, error) {
 	if !isJSONObject(params) {
 		return "", nil, fmt.Errorf("params for %s must be a JSON object", method)
 	}
-	fullParams, err := withMeta(c.meta, params)
+	meta := c.meta
+	if metaOverride != nil {
+		meta = metaOverride
+	}
+	fullParams, err := withMeta(meta, params)
 	if err != nil {
 		return "", nil, err
 	}

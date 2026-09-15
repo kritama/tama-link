@@ -55,7 +55,7 @@ func (c *Client) Subscribe(ctx context.Context, taskIDs []string, cb *SubscribeC
 	if err != nil {
 		return fmt.Errorf("encode subscriptions/listen params: %w", err)
 	}
-	id, resp, err := c.doRequest(ctx, MethodSubscribe, "", params)
+	id, resp, err := c.doRequest(ctx, MethodSubscribe, "", params, nil)
 	if err != nil {
 		return err
 	}

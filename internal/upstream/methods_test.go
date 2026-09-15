@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -226,6 +227,41 @@ func TestCallToolTask(t *testing.T) {
 		t.Errorf("sent arguments %s, want %s", sentArgs, args)
 	}
 	assertNoLegacyMethods(t, ts)
+}
+
+// TestCallToolCapabilityOverride proves the per-request capabilities seam:
+// one request's _meta triple can declare a different capability set without
+// touching the client's default.
+func TestCallToolCapabilityOverride(t *testing.T) {
+	ts := newTestServer(t, func(rec *recordedRequest) (int, string, string) {
+		return 200, "application/json", jsonReply(rec.BodyID, callTaskFixture)
+	})
+	client := newTestClient(t, ts)
+
+	// Default request carries the client's declared capabilities.
+	if _, err := client.CallTool(context.Background(), &CallToolParams{Name: "message"}); err != nil {
+		t.Fatalf("default CallTool: %v", err)
+	}
+	if got := string(ts.requests[0].Meta["io.modelcontextprotocol/clientCapabilities"]); !strings.Contains(got, "io.modelcontextprotocol/tasks") {
+		t.Errorf("default capabilities = %s", got)
+	}
+
+	// The override replaces the capabilities for this one request only.
+	override := json.RawMessage(`{}`)
+	if _, err := client.CallTool(context.Background(), &CallToolParams{Name: "message", Capabilities: override}); err != nil {
+		t.Fatalf("override CallTool: %v", err)
+	}
+	if got := string(ts.requests[1].Meta["io.modelcontextprotocol/clientCapabilities"]); got != `{}` {
+		t.Errorf("override capabilities = %s, want {}", got)
+	}
+
+	// The client default is unaffected by the override.
+	if _, err := client.CallTool(context.Background(), &CallToolParams{Name: "message"}); err != nil {
+		t.Fatalf("post-override CallTool: %v", err)
+	}
+	if got := string(ts.requests[2].Meta["io.modelcontextprotocol/clientCapabilities"]); !strings.Contains(got, "io.modelcontextprotocol/tasks") {
+		t.Errorf("post-override capabilities = %s, want the client default", got)
+	}
 }
 
 // TestCallToolComplete covers the synchronous result shape with a number
