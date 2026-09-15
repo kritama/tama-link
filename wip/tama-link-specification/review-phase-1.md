@@ -2,6 +2,12 @@
 
 Status: complete; Phase 2 may begin
 
+Phase 2 supersession note: on 2026-09-16, the Phase 2 target changed from the
+legacy Tama `0.14.0`/Anubis task surface to the TamaMCP `2026-07-28` runtime at
+specification commit `6b5db00018d2774834db5a0f00eed5b9b55e1d2e`. This does
+not change the Phase 1 readiness decision; it replaces the protocol assumptions
+in the planning finding and deferred live gate below.
+
 Review date: 2026-09-14
 
 Reviewed branch: `develop`
@@ -19,9 +25,10 @@ proceed to Phase 2.
 
 This decision does not declare Tama Link production-ready. The downstream
 `submit` and `await` operations still deliberately return `not_implemented`
-until the current-Tama transport, OAuth, App/System adapters, and polling paths
-land. The full cross-platform credential-backend and crash-recovery matrix also
-remains a production-release gate.
+until the TamaMCP `2026-07-28` transport, OAuth, App/System adapters,
+subscriptions, and polling paths land. The full cross-platform
+credential-backend and crash-recovery matrix also remains a production-release
+gate.
 
 ## Evidence against the Phase 1 gate
 
@@ -62,16 +69,17 @@ remains a production-release gate.
 
 No Phase 1 blocker or new actionable Phase 1 defect was found.
 
-The Phase 2 plan did contain one protocol omission: current Tama's caller
-contract requires `tasks/result` to retrieve the terminal `CallToolResult`.
-`tasks/get` supplies task state and polling guidance but not the terminal result
-payload. The authoritative specification and implementation plan now name both
-methods, and issues #2 and #5 require fixture coverage for the distinction.
+At the review date, the Phase 2 plan correctly identified that legacy Tama
+`0.14.0` required `tasks/result` in addition to `tasks/get`. That planning
+finding is now historical: TamaMCP deliberately rejects `tasks/result` and
+returns the complete terminal `CallToolResult` inside the detailed `tasks/get`
+state. The authoritative specification, implementation plan, and issues #2–#9
+now use the new contract.
 
 ## Deferred gates
 
-- Live App/System execution against the pinned local Memovee/Tama
-  `0.14.0-server` topology is Phase 2 acceptance, not Phase 1 evidence.
+- Live App/System execution against an immutable Tama build migrated to
+  TamaMCP `2026-07-28` is Phase 2 acceptance, not Phase 1 evidence.
 - MCP progress notifications, user-visible login/logout/doctor commands, and
   Codex/OpenCode/plain-inspector acceptance remain Phase 3.
 - Full production certification across every supported OS credential backend,

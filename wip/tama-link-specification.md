@@ -50,7 +50,8 @@ Tama Link must:
    responses;
 8. normalize progress so basic clients can poll it and richer plugins can
    render it live;
-9. negotiate supported MCP revisions on the upstream and downstream sides;
+9. speak MCP `2026-07-28` on the upstream side while negotiating the supported
+   client protocol on the downstream side;
 10. contain protocol-version and client-compatibility logic outside Tama;
 11. protect OAuth credentials, tokens, result data, and logs; and
 12. support deterministic diagnosis and compatibility testing;
@@ -236,7 +237,8 @@ Input schema:
 {
   "submission_id": "string, required",
   "cursor": "string, optional",
-  "timeout_ms": "integer, optional"
+  "timeout_ms": "integer, optional",
+  "input_responses": "object keyed by outstanding input-request ID, optional"
 }
 ```
 
@@ -249,6 +251,14 @@ Requirements:
 - `cursor` is opaque and allows the caller to request only progress events
   after the last observed sequence.
 - A client may call `await` repeatedly until `terminal` is true.
+- When the current state is `input_required`, `input_responses` may answer one
+  or more outstanding request IDs. Partial response maps are allowed. An exact
+  replay is idempotent; a different response for an already answered ID is
+  `idempotency_conflict`, and a response for an ID that is not outstanding is
+  `invalid_request`.
+- One `await` call sends at most one upstream `tasks/update` before entering its
+  bounded wait. The acknowledgement is eventually consistent and must not be
+  interpreted as proof that the task already left `input_required`.
 - Cancellation or disconnection stops the active wait promptly without
   changing durable upstream work.
 - Concurrent waits for the same submission must not duplicate upstream work.
@@ -276,11 +286,36 @@ Pending output:
 }
 ```
 
-This is the rich-adapter shape. The initial current-Tama App adapter has no
-structured upstream progress channel, so it emits state-transition events and
-omits unknown `current`, `total`, and `label` values. System operations may
-likewise expose only queued/running state unless the upstream tool provides
-structured progress.
+This is the rich-adapter shape. The TamaMCP task surface provides complete task
+snapshots and bounded `statusMessage` values through `tasks/get` and
+`notifications/tasks`, but no standard numeric task-progress channel. The
+adapter emits state-transition events, may use `statusMessage` as its bounded
+message, and omits unknown `current`, `total`, and `label` values. System
+operations may likewise expose only queued/running state unless the upstream
+tool provides reviewed structured progress.
+
+An input-required pending response contains the validated outstanding request
+map while retaining the same local submission and cursor:
+
+```json
+{
+  "submission_id": "sub_opaque",
+  "status": "input_required",
+  "terminal": false,
+  "cursor": "event_cursor",
+  "input_requests": {
+    "approval": {
+      "mode": "elicitation",
+      "schema": {}
+    }
+  },
+  "next_poll_ms": 1000
+}
+```
+
+The exact values inside each request and response remain validated protocol
+JSON. Tama Link declares upstream input sub-capabilities only when this
+downstream contract and the selected profile can relay them safely.
 
 Successful terminal output:
 
@@ -322,11 +357,12 @@ Failed terminal output:
 The normalized submission states are:
 
 ```text
-accepted -> queued -> running -> completed
-                            |-> failed
-                            |-> cancelled
-                            |-> expired
-                            |-> outcome_unknown
+accepted -> queued -> running <-> input_required
+                       |-> completed
+                       |-> failed
+                       |-> cancelled
+                       |-> expired
+                       |-> outcome_unknown
 ```
 
 The `succeeded` label is not used because successful result retrieval and a
@@ -336,9 +372,12 @@ move from a terminal value back to a pending value. Repeated terminal reads
 must return the same normalized result unless retention has expired, after
 which they return the terminal `submission_expired` error.
 
-`completed` means Tama Link captured an upstream MCP `CallToolResult`. The
-captured result preserves `isError`, content blocks, structured content, and
-safe `_meta`; a completed operation may therefore contain `is_error: true`.
+`input_required` is non-terminal and may return to `running` after an accepted
+response or move directly to any terminal state allowed by the upstream task
+contract. `completed` means Tama Link captured an upstream MCP
+`CallToolResult`. The captured result preserves `isError`, content blocks,
+structured content, and safe `_meta`; a completed operation may therefore
+contain `is_error: true`.
 Normalized content blocks and safe `_meta` are retained as validated raw JSON,
 not projected through a fixed Go union, so extension fields and content added
 by a compatible MCP revision are not discarded. Endpoint adapters validate the
@@ -375,7 +414,7 @@ Permitted persisted values include:
 - local submission and idempotency identifiers;
 - operation name, execution strategy, descriptor digest, and validated
   canonical upstream arguments required for recovery;
-- upstream opaque correlation identifier;
+- upstream opaque owner-bound task identifier when the operation is task-backed;
 - normalized state and timestamps;
 - progress cursor and bounded recent events;
 - terminal result or structured failure within retention limits;
@@ -433,19 +472,26 @@ description
 upstream input schema
 client-visible input schema
 output schema
-annotations and task support
+annotations and expected task/execution strategy
 declarative argument bindings
 execution strategy
 descriptor digest
 ```
 
-The catalog snapshot allows Tama Link to initialize and advertise useful tools
-before interactive OAuth is available. On an authenticated upstream connection,
-Tama Link performs initialization and a complete paginated `tools/list`, then
+The catalog snapshot allows Tama Link to advertise useful tools before
+interactive OAuth is available. On an authenticated upstream connection, Tama
+Link performs `server/discover` and reads the complete `tools/list`, then
 intersects the live catalog with the profile allowlist. A live tool that is not
 in the profile is never exposed automatically. A pinned operation whose
 security-relevant descriptor has drifted fails closed with
 `operation_contract_mismatch` until the profile is reconciled.
+
+TamaMCP's `2026-07-28` tool listing does not expose the legacy
+`execution.taskSupport` field. A profile still pins Link's expected execution
+strategy. For task-backed operations, Link verifies the Tasks extension in
+`server/discover`, declares it in the current request, and requires the expected
+`tools/call` `resultType`. Absence of legacy task metadata must not be
+interpreted as evidence that a TamaMCP tool is synchronous.
 
 The downstream `submit` schema always constrains `tool` to the approved names.
 For legacy clients, `arguments` remains an object and the generated `submit`
@@ -460,7 +506,7 @@ Server instructions are composed from two clearly separated sources:
 1. Tama Link supplies the submit-once, await-until-terminal workflow and local
    safety constraints.
 2. The trusted profile supplies a pinned bounded copy of the selected upstream
-   server instructions, verified against live initialization when connected.
+   server instructions, verified against live discovery when connected.
 
 Product skills own domain judgment such as when and what to remember or how to
 conduct Reflection review. Skills must not be the sole source of operation
@@ -476,7 +522,7 @@ Each operation selects exactly one execution strategy:
 
 | Strategy | Initial use | Recovery |
 | --- | --- | --- |
-| `upstream_task` | `/mcp/app` `message` | Reconnect, reissue the canonical idempotent request, and attach a fresh session-scoped task ID |
+| `upstream_task` | `/mcp/app` `message` | Reauthenticate, retrieve the same owner-bound task ID through `tasks/get`, and resubscribe; replay the canonical request only after ambiguous initial acceptance with no task ID |
 | `local_replayable` | Read-only or proven-idempotent `/mcp/system` tools | Execute as an ordinary upstream call from a leased local worker; replay safely after an interrupted lease |
 | `local_guarded` | Synchronous mutation with a reviewed conflict/reconciliation contract | Reconcile before retry; otherwise terminate as `outcome_unknown` |
 | `unsupported` | Unsafe synchronous mutation | Reject before upstream execution |
@@ -490,36 +536,56 @@ correlation is returned and retrievable during reconciliation. The existing
 Tama App submission table remains authoritative for graph execution and is not
 generalized for System calls.
 
-Initial adapter work must cover the protocol and durable-result contract in the
-currently supported Tama release. Later adapters may cover standard MCP Tasks
-and the newer MCP protocol without changing the downstream `submit`/`await`
-tool contract.
+The sole upstream adapter speaks MCP `2026-07-28` as implemented by TamaMCP. It
+does not send `initialize`, `notifications/initialized`, `Mcp-Session-Id`,
+client-requested task augmentation, `tasks/result`, or `tasks/list`.
 
-For current Tama `0.14.0`, the task adapter uses `tasks/get` for status and
-polling guidance and `tasks/result` to retrieve the terminal MCP
-`CallToolResult`. It must also understand `tasks/cancel`, while downstream wait
-cancellation remains local and must not cancel Tama's durable Submission or
-graph execution. A terminal `tasks/get` response is not a substitute for
-`tasks/result`.
+The Phase 2 wire baseline is the TamaMCP specification at commit
+`6b5db00018d2774834db5a0f00eed5b9b55e1d2e`, including its immutable core and
+Tasks conformance pins. A different TamaMCP revision is supported only after
+its compatibility bounds and fixtures are reviewed and the profile contract
+is regenerated.
 
-At connection time Tama Link records and validates:
+Every request is independently authenticated and carries
+`MCP-Protocol-Version`, `Mcp-Method`, conditional `Mcp-Name`, and matching
+per-request `_meta` protocol version, Link client information, and declared
+capabilities. Unsupported, absent, or body-mismatched standard headers fail
+closed. Link declares the Tasks extension on each applicable request; it does
+not infer capabilities from discovery or an earlier call.
+
+Task creation is server-directed. A task-backed `tools/call` returns an opaque,
+globally unique, owner-bound task ID. `tasks/get` returns the complete detailed
+task state and includes the terminal `CallToolResult` or failure payload.
+`tasks/update` carries responses while a task is `input_required`, and
+`tasks/cancel` records cooperative cancellation intent. Downstream `await`
+cancellation remains local and does not invoke `tasks/cancel` or cancel Tama's
+durable Submission or graph execution.
+
+`subscriptions/listen` is an authorized, task-ID-scoped SSE optimization. Link
+accepts no task notification before the acknowledgement, captures complete
+snapshots only when the subscription ID and task ID match, and always recovers
+through `tasks/get` after a disconnect, missed notification, overflow,
+credential expiry, or policy invalidation. Correctness never depends on
+notification delivery.
+
+At discovery time Tama Link records and validates:
 
 - negotiated protocol version;
 - server identity and declared capabilities;
-- selected task/result adapter;
+- Tasks and task-notification capabilities;
 - protected-resource and authorization-server metadata; and
 - profile compatibility bounds.
 
 Unsupported combinations fail closed with `protocol_mismatch`. Tama Link must
 not guess task support from a product name or user agent.
 
-The downstream STDIO server must use a reviewed stable release of the official
-MCP Go SDK. Because the released SDK used by the initial implementation does
-not expose the current Tama task request/lookup surface or a raw request API,
-the current upstream adapter may use a minimal reviewed and fixture-tested
-JSON-RPC/Streamable HTTP implementation. Pre-release support for a newer
-protocol must not enter the default build until the application and client
-compatibility matrix is proven.
+Both the downstream STDIO server and the upstream core transport use a reviewed
+stable release of the official MCP Go SDK. If the selected stable release does
+not expose the separately versioned Tasks methods or task-ID subscription
+shape, Tama Link may add one minimal reviewed extension layer for those exact
+wire contracts. It must reuse SDK core transport conventions and pass the
+TamaMCP package fixtures; it must not grow into a second general MCP client or
+reintroduce legacy session behavior.
 
 ## Progress contract
 
@@ -622,11 +688,12 @@ operation may refresh authorization when standards and policy permit, but must
 return an actionable terminal or retryable error when user interaction is
 required.
 
-The current Tama `0.14.0-server` profile uses a stable refresh token across
-refresh exchanges. Tama Link coordinates refresh through a profile-scoped
-cross-process lease, re-reads the credential after acquiring it, and safely
-stores a replacement if a future compatible server returns one. `invalid_grant`
-maps to `authentication_required` without an automatic retry loop.
+Tama Link coordinates refresh through a profile-scoped cross-process lease,
+re-reads the credential after acquiring it, and safely stores a replacement
+refresh token when the provider returns one. `invalid_grant` maps to
+`authentication_required` without an automatic retry loop. An upstream
+subscription closes no later than credential expiry; after successful refresh,
+Link reconciles through `tasks/get` before opening a replacement stream.
 
 ## Validation and limits
 
@@ -734,27 +801,36 @@ The first complete implementation is not done until automated tests prove:
 4. Repeating the same idempotency key does not duplicate upstream work.
 5. Conflicting idempotency input fails deterministically.
 6. `await` returns pending state when its bounded wait expires.
-7. Repeated `await` calls reach and preserve a successful terminal result.
-8. Upstream failure, cancellation, and expiry produce terminal failures.
-9. Client cancellation stops a wait without cancelling upstream work.
-10. A process restart recovers accepted non-terminal submissions.
-11. Progress cursors deduplicate ordered events.
-12. Requested MCP progress notifications are rate limited and correlated.
-13. Credentials and plaintext sensitive inputs do not appear in SQLite
+7. Repeated `await` calls reach and preserve a successful terminal result
+   returned in a detailed `tasks/get` state or task notification.
+8. `input_required` requests can be answered idempotently through `await`, and
+   an eventually consistent `tasks/update` acknowledgement is reconciled.
+9. Upstream failure, cancellation, and expiry produce terminal failures.
+10. Client cancellation stops a wait without cancelling upstream work.
+11. A process restart recovers accepted non-terminal submissions through the
+    same owner-bound task ID without a protocol session.
+12. Progress cursors deduplicate ordered events.
+13. Requested MCP progress notifications are rate limited and correlated.
+14. Credentials and plaintext sensitive inputs do not appear in SQLite
     metadata, JSON output, logs, panic output, or test snapshots; encrypted
     state blobs fail closed when their key is unavailable.
-14. Unsupported protocol, capability, profile, and Tama versions fail closed.
-15. Separate App and System registrations expose isolated catalogs,
+15. Unsupported protocol, capability, profile, and Tama versions fail closed;
+    legacy upstream initialization, session IDs, `tasks/result`, and
+    `tasks/list` are rejected rather than used as fallbacks.
+16. Separate App and System registrations expose isolated catalogs,
     instructions, credentials, and state while retaining the same two-tool
     contract.
-16. App restart recovery reattaches to Tama's durable submission without
-    duplicate graph work.
-17. System read-only restart recovery safely replays unfinished local work.
-18. Multiple processes sharing one profile cannot duplicate claimed work, lose
+17. App restart recovery retrieves the same owner-bound durable task; an
+    ambiguous initial call replay does not duplicate graph work.
+18. System read-only restart recovery safely replays unfinished local work.
+19. Subscription acknowledgement, authorized task snapshots, stream loss, and
+    credential-expiry recovery preserve correctness through `tasks/get`.
+20. Multiple processes sharing one profile cannot duplicate claimed work, lose
     a replacement refresh token, or corrupt credential coordination.
-19. Codex, OpenCode, and at least one plain MCP inspector complete the
+21. Codex, OpenCode, and at least one plain MCP inspector complete the
     `submit`/repeated-`await` workflow for both profile types.
-20. Race tests, static analysis, lint, cross-builds, and protocol fixtures pass.
+22. Race tests, static analysis, lint, cross-builds, TamaMCP conformance
+    fixtures, and live migrated-Tama acceptance pass.
 
 ## Implementation phases
 
@@ -776,15 +852,21 @@ The first complete implementation is not done until automated tests prove:
 - idempotency and recovery tests; and
 - progress snapshot/event model.
 
-### Phase 2: current Tama adapter
+### Phase 2: TamaMCP 2026 upstream adapter
 
-- authenticated upstream connection;
-- current durable submission/result correlation;
-- `tasks/get` status polling and `tasks/result` terminal capture;
-- ordinary `/mcp/system` execution through the local worker;
-- bounded polling and terminal failure semantics;
-- result normalization and limits; and
-- integration fixtures against the supported Tama release.
+- official-SDK MCP `2026-07-28` core transport plus the smallest required
+  Tasks/subscription extension layer;
+- authenticated stateless `server/discover`, standard headers, and per-request
+  metadata/capability negotiation;
+- server-directed App task creation, owner-bound `tasks/get`, idempotent
+  `tasks/update`, and cooperative `tasks/cancel` support;
+- task-ID `subscriptions/listen` and `notifications/tasks`, with polling as the
+  recovery source of truth;
+- ordinary synchronous `/mcp/system` execution through the local worker;
+- bounded polling, terminal failure semantics, result normalization, and
+  limits; and
+- package conformance fixtures plus live integration against the migrated Tama
+  server.
 
 ### Phase 3: client progress and acceptance
 
@@ -793,26 +875,25 @@ The first complete implementation is not done until automated tests prove:
 - client-specific progress presentation; and
 - disconnect, restart, timeout, and live OAuth acceptance tests.
 
-### Phase 4: newer MCP adapter
+### Phase 4: production release and migration closure
 
-- adopt a stable SDK release supporting the newer protocol;
-- add negotiated task-capability handling behind the adapter boundary;
-- retain the downstream two-tool contract; and
-- expand the published compatibility matrix only after live client tests.
+- certify every supported credential backend and crash-recovery path;
+- publish the exact TamaMCP, Tama, Tama Link, protocol, profile, OS, and client
+  compatibility matrix;
+- coordinate acceptance evidence before Tama removes its Anubis runtime; and
+- publish the independent Tama Link binary and checksums through Git Flow.
 
 ## Remaining acceptance gates
 
-The current adapter must still be verified against the pinned local
-`memovee/tama` Compose environment: initialization and protocol negotiation,
-the task lifetime and terminal-result behavior, canonical-request reattachment,
-and production ingress availability. Codex, OpenCode, and plain MCP fixtures
-must prove stable caller-owned `client_context.thread_id` behavior. The SQLite,
-lease, GC, encryption-key, and crash-recovery suite must use separate OS
-processes and cover each supported credential backend, including the explicitly
-configured headless Linux case.
+TamaMCP Phase 2 is complete, while task subscriptions remain tracked by
+`kritama/tama-mcp#9`. Live Link acceptance waits for the Tama-owned persistence,
+runner, PubSub, System, App, OAuth-composition, and endpoint migration beginning
+with `upmaru/tama#123`. The migrated endpoint must be verified for stateless
+discovery, standard headers, owner-bound task lookup, input responses,
+subscription recovery, terminal capture through `tasks/get`, and production
+ingress availability.
 
-The newer Phase 4 adapter still requires a client-facing, request-correlated
-answer path for `input_required`. The preferred direction is an optional
-`input_response` on `await`, which retains exactly two downstream tools; its
-schema and idempotency rules must be finalized against `tama-mcp` fixtures
-before that adapter is enabled.
+Codex, OpenCode, and plain MCP fixtures must prove stable caller-owned
+`client_context.thread_id` behavior. The SQLite, lease, GC, encryption-key, and
+crash-recovery suite must use separate OS processes and cover each supported
+credential backend, including the explicitly configured headless Linux case.
