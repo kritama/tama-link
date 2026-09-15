@@ -1,0 +1,143 @@
+package oauth
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+)
+
+// registerServer serves one dynamic client registration endpoint.
+func registerServer(t *testing.T, body string, status int, calls *int32) *httptest.Server {
+	t.Helper()
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("register: method = %s", r.Method)
+		}
+		if atomic.AddInt32(calls, 1) > 0 {
+			var body struct {
+				ClientName    string   `json:"client_name"`
+				RedirectURIs  []string `json:"redirect_uris"`
+				GrantTypes    []string `json:"grant_types"`
+				ResponseTypes []string `json:"response_types"`
+				AuthMethod    string   `json:"token_endpoint_auth_method"`
+			}
+			raw := make([]byte, 4096)
+			n, _ := r.Body.Read(raw)
+			if err := json.Unmarshal(raw[:n], &body); err != nil {
+				t.Errorf("decode registration body: %v", err)
+			}
+			if body.ClientName != "Tama Link" {
+				t.Errorf("client_name = %q", body.ClientName)
+			}
+			if len(body.RedirectURIs) != 1 || body.RedirectURIs[0] != "http://127.0.0.1" {
+				t.Errorf("redirect_uris = %v", body.RedirectURIs)
+			}
+			if !contains(body.GrantTypes, "authorization_code") || !contains(body.GrantTypes, "refresh_token") {
+				t.Errorf("grant_types = %v", body.GrantTypes)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(status)
+		_, _ = fmt.Fprint(w, body)
+	}))
+	t.Cleanup(ts.Close)
+	return ts
+}
+
+// regMetadata returns a Metadata whose registration endpoint points at the
+// fixture server.
+func regMetadata(ts *httptest.Server, issuer string) *Metadata {
+	return &Metadata{
+		AS: AuthorizationServer{
+			Issuer:                   issuer,
+			AuthorizationEndpoint:    ts.URL + "/oauth/authorize",
+			TokenEndpoint:            ts.URL + "/oauth/token",
+			RegistrationEndpoint:     ts.URL + "/register",
+			CodeChallengeMethods:     []string{"S256"},
+			GrantTypes:               []string{"authorization_code", "refresh_token"},
+			TokenEndpointAuthMethods: []string{"client_secret_basic"},
+		},
+		ASURL: issuer,
+	}
+}
+
+func TestRegisterDCR(t *testing.T) {
+	var calls int32
+	ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
+	secrets := newFakeSecrets()
+	client := newStaticClient(t, secrets, newFakeLease(), newTestClock(time.Unix(1_700_000_000, 0)))
+	md := regMetadata(ts, testIssuer)
+
+	rec, err := client.Register(context.Background(), md)
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if rec.ClientID != "cid-1" || rec.ClientSecret != "shh" {
+		t.Errorf("record = %+v", rec)
+	}
+	if rec.Issuer != testIssuer || rec.AuthMethod != "client_secret_basic" {
+		t.Errorf("record issuer/auth = %q/%q", rec.Issuer, rec.AuthMethod)
+	}
+	stored, found, err := secrets.GetSecret(labelClient)
+	if err != nil || !found {
+		t.Fatalf("stored = %q found=%v err=%v", stored, found, err)
+	}
+	if !strings.Contains(string(stored), "cid-1") {
+		t.Errorf("stored record = %s", stored)
+	}
+
+	// A second registration reuses the stored record without a new request.
+	rec2, err := client.Register(context.Background(), md)
+	if err != nil {
+		t.Fatalf("reuse Register: %v", err)
+	}
+	if rec2.ClientID != "cid-1" {
+		t.Errorf("reused record = %+v", rec2)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Errorf("registration calls = %d, want 1", got)
+	}
+}
+
+func TestRegisterReuseIssuerMismatch(t *testing.T) {
+	var calls int32
+	ts := registerServer(t, `{"client_id":"cid-1"}`, http.StatusCreated, &calls)
+	secrets := newFakeSecrets()
+	client := newStaticClient(t, secrets, newFakeLease(), newTestClock(time.Now()))
+
+	if _, err := client.Register(context.Background(), regMetadata(ts, testIssuer)); err != nil {
+		t.Fatalf("first Register: %v", err)
+	}
+	other := regMetadata(ts, "https://other-issuer.example/oauth")
+	if _, err := client.Register(context.Background(), other); err == nil {
+		t.Fatal("registration reuse across issuers accepted")
+	}
+}
+
+func TestRegisterFailures(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		status int
+	}{
+		{"non-2xx", `{"error":"server_error"}`, http.StatusInternalServerError},
+		{"missing client id", `{}`, http.StatusCreated},
+		{"malformed", `{not json`, http.StatusCreated},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var calls int32
+			ts := registerServer(t, tc.body, tc.status, &calls)
+			client := newStaticClient(t, newFakeSecrets(), newFakeLease(), newTestClock(time.Now()))
+			if _, err := client.Register(context.Background(), regMetadata(ts, testIssuer)); err == nil {
+				t.Fatal("registration accepted")
+			}
+		})
+	}
+}
