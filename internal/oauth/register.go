@@ -97,6 +97,14 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	if created.ClientID == "" {
 		return nil, fmt.Errorf("registration returned no client id")
 	}
+	// A client-secret auth method without a secret would be persisted as a
+	// permanently unusable registration: readiness would accept submits
+	// that burn idempotency keys, and every token exchange would fail
+	// locally on the missing secret.
+	method := md.AS.TokenEndpointAuthMethod()
+	if (method == "client_secret_basic" || method == "client_secret_post") && created.ClientSecret == "" {
+		return nil, fmt.Errorf("registration returned no client secret for %s", method)
+	}
 	rec := &ClientRecord{
 		ClientID:     created.ClientID,
 		ClientSecret: created.ClientSecret,

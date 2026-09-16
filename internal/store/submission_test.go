@@ -334,6 +334,75 @@ func TestReconcileIdempotentSubmission(t *testing.T) {
 	}
 }
 
+// TestCreateSubmissionInsertRaceReconcilesCandidates pins the cross-
+// process race: two processes straddling a profile reconciliation submit
+// the same client_request_id concurrently. Both preliminary lookups miss;
+// the winner stores the identity shape from its binding set, and the
+// loser's acceptance shape differs — but its candidate identities still
+// match the winner's row, so the loser recovers a replay instead of
+// reporting a conflict for an otherwise exact request.
+func TestCreateSubmissionInsertRaceReconcilesCandidates(t *testing.T) {
+	t.Parallel()
+
+	keys, clk := newMemKeys(), newClock()
+	a, path := openTestStore(t, keys, clk)
+	b, err := store.Open(context.Background(), path, keys, store.Config{
+		Limits: limits.Default(),
+		Now:    clk.Now,
+	})
+	if err != nil {
+		t.Fatalf("open second store: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Close() })
+	ctx := context.Background()
+
+	threaded := json.RawMessage(`{"arguments":{"message":"hi"},"thread_id":"t-1"}`)
+	base := json.RawMessage(`{"arguments":{"message":"hi"}}`)
+
+	// The winner's acceptance stored the threaded identity shape.
+	win, created, err := a.CreateSubmission(ctx, testSubmissionWithIdentity("sub-w", "race-1", threaded))
+	if err != nil || !created {
+		t.Fatalf("winner CreateSubmission: created=%v err=%v", created, err)
+	}
+
+	// The loser's process could not map the source: its acceptance shape
+	// is the base one. Without candidates the differing shape conflicts...
+	if _, _, err := b.CreateSubmission(ctx, testSubmissionWithIdentity("sub-l", "race-1", base)); !errors.Is(err, store.ErrIdempotencyConflict) {
+		t.Fatalf("no-candidate loser = %v, want ErrIdempotencyConflict", err)
+	}
+
+	// ...while the candidate identities reconcile to the winner's row.
+	loser := testSubmissionWithIdentity("sub-l", "race-1", base)
+	loser.IdentityCandidates = []json.RawMessage{threaded, base}
+	lose, created, err := b.CreateSubmission(ctx, loser)
+	if err != nil {
+		t.Fatalf("loser CreateSubmission = %v, want a replay through the candidates", err)
+	}
+	if created {
+		t.Fatalf("loser CreateSubmission = created, want the winner's row as a replay")
+	}
+	if lose.ID != win.ID {
+		t.Fatalf("loser reconciled to %q, want the winner %q", lose.ID, win.ID)
+	}
+
+	// Candidates that match no stored shape still conflict.
+	stranger := testSubmissionWithIdentity("sub-x", "race-1", base)
+	stranger.IdentityCandidates = []json.RawMessage{
+		json.RawMessage(`{"arguments":{"message":"other"},"thread_id":"t-1"}`), base,
+	}
+	if _, _, err := b.CreateSubmission(ctx, stranger); !errors.Is(err, store.ErrIdempotencyConflict) {
+		t.Fatalf("unmatched candidates = %v, want ErrIdempotencyConflict", err)
+	}
+}
+
+// testSubmissionWithIdentity builds one submission whose idempotency
+// identity is the given client-visible request bytes.
+func testSubmissionWithIdentity(id, clientRequestID string, identity json.RawMessage) store.NewSubmission {
+	ns := testSubmission(id, clientRequestID)
+	ns.RequestArguments = identity
+	return ns
+}
+
 // TestCreateReconcilesClientVisibleIdentity pins that the idempotency
 // identity is the client-visible request, never the bound upstream
 // arguments: when a reconciled profile binds the same client request

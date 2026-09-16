@@ -107,7 +107,7 @@ func TestRegisterDCR(t *testing.T) {
 
 func TestRegisterReuseIssuerMismatch(t *testing.T) {
 	var calls int32
-	ts := registerServer(t, `{"client_id":"cid-1"}`, http.StatusCreated, &calls)
+	ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
 	secrets := newFakeSecrets()
 	client := newStaticClient(t, secrets, newFakeLease(), newTestClock(time.Now()))
 
@@ -128,6 +128,7 @@ func TestRegisterFailures(t *testing.T) {
 	}{
 		{"non-2xx", `{"error":"server_error"}`, http.StatusInternalServerError},
 		{"missing client id", `{}`, http.StatusCreated},
+		{"missing client secret", `{"client_id":"cid-1"}`, http.StatusCreated},
 		{"malformed", `{not json`, http.StatusCreated},
 	}
 	for _, tc := range cases {

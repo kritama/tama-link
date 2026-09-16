@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -33,6 +34,32 @@ type serveConfig struct {
 // synchronous execution (the per-request upstream timeout defaults to 60s);
 // expiry is the crash-recovery hand-off to another process.
 const workerLeaseTTL = 2 * time.Minute
+
+// gcInterval bounds how long a retention deadline waits before the serve
+// process applies it. The store's GC is one idempotent transaction, so
+// overlapping sweeps across processes are safe.
+const gcInterval = 5 * time.Minute
+
+// runGC applies the store's retention deadlines for the serve process's
+// lifetime: without it a continuously running or restarted process never
+// expires terminal payloads, tombstones, and their idempotency rows. One
+// sweep runs immediately, then on every tick; a failed sweep is retried on
+// the next tick. The goroutine owns its ctx and returns when it is
+// cancelled, so cleanup can join it before closing the store.
+func runGC(ctx context.Context, st *store.Store) {
+	ticker := time.NewTicker(gcInterval)
+	defer ticker.Stop()
+	for {
+		// A failed sweep is retried on the next tick; the next deadline
+		// still applies.
+		_, _ = st.GC(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
+}
 
 // runServe implements the serve command. Standard output is reserved for MCP
 // JSON-RPC frames, so diagnostics go to stderr only.
@@ -187,8 +214,21 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 	// the background and must not delay the MCP server accepting clients.
 	_ = workerService.Start(ctx)
 
+	// Retention sweeps run for the process lifetime under an owned,
+	// cancellable context: cleanup cancels before the store closes and
+	// joins the sweep so no GC can run against a closed store.
+	gcCtx, stopGC := context.WithCancel(context.Background())
+	var gcWg sync.WaitGroup
+	gcWg.Add(1)
+	go func() {
+		defer gcWg.Done()
+		runGC(gcCtx, st)
+	}()
+
 	cleanup := func() {
 		workerService.Stop()
+		stopGC()
+		gcWg.Wait()
 		_ = st.Close()
 	}
 	return app, cleanup, nil

@@ -217,6 +217,11 @@ Requirements:
   conflict; changing a value the accepted operation never mapped
   reconciles; and an exact retry reconciles whether the tool kept, gained,
   or lost its thread binding, or left the catalog entirely.
+  The same candidate matching applies when the key is claimed concurrently
+  at insert time: two processes straddling a profile reconciliation can
+  both miss the preliminary lookup, and the insert loser reconciles the
+  winner's row against the candidate identities instead of reporting a
+  conflict for an otherwise exact request.
   Reconciliation
   runs before the catalog membership check, argument validation, and binding
   application, in addition to before the readiness and strategy checks
@@ -984,7 +989,10 @@ The stored client registration and refresh credential must both bind the
 active profile issuer, and the stored token endpoint is re-validated against
 the issuer-bound metadata policy before use. A profile that changes issuer
 while retaining its credential namespace fails closed rather than replaying a
-foreign token to a stored endpoint.
+foreign token to a stored endpoint. A registration response must supply the
+client secret the selected auth method requires: a client-secret
+registration without a secret fails the registration instead of being
+persisted as a permanently unusable record that readiness keeps accepting.
 The client auth method is selected from the set the authorization server
 advertises — the field is a set of supported methods, not a single choice:
 the first method this client supports, in the server's advertised order,
@@ -1013,7 +1021,12 @@ completion for payload-free expiry tombstones. Profiles may lower these values;
 raising them requires explicit values within implementation hard ceilings and
 a reconciled profile digest. Deleting a lapsed tombstone also deletes the
 input responses retained for that submission: retained response payloads must
-not outlive the tombstone that bounds them.
+not outlive the tombstone that bounds them. The serve process applies these
+deadlines on a periodic retention sweep for its lifetime — with an owned,
+cancellable loop that shuts down before the store closes — so a
+continuously running or restarted process expires payloads, tombstones,
+and their idempotency rows instead of accumulating them; the sweep is one
+idempotent transaction, so overlapping sweeps across processes are safe.
 
 All network destinations come from a validated profile. Discovered metadata,
 JWKS locations, and authorization endpoints require the same SSRF and origin

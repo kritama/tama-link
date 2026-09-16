@@ -132,8 +132,13 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 		DescriptorDigest: d.Digest,
 		Arguments:        upstreamArgs,
 		RequestArguments: identity,
-		ProtocolVersion:  tama2026.ProtocolVersion(),
-		AdapterVersion:   s.adapterVersion,
+		// When a concurrent process claims the key under a different
+		// binding set, the insert loses the race and reconciles against
+		// every identity shape this request may correspond to — the same
+		// candidates the read-only reconciliation above used.
+		IdentityCandidates: identities,
+		ProtocolVersion:    tama2026.ProtocolVersion(),
+		AdapterVersion:     s.adapterVersion,
 	})
 	if err != nil {
 		if errors.Is(err, store.ErrIdempotencyConflict) {
@@ -173,14 +178,26 @@ func submitOutput(sub *store.Submission) contract.SubmitOutput {
 // A nil thread records that the accepted operation could not map the
 // source: the field is omitted and any client thread value is not part
 // of the identity at all. A non-nil thread records that the source was
-// mappable at acceptance: the field carries the value, or an explicit
-// null when the request carried no value, so an absent-to-present change
-// stays a conflict even after reconciliation unmapped the source.
+// mappable at acceptance: the field carries the string value, or an
+// explicit JSON null when the request carried no value — never an empty
+// string, so an absent-to-present change stays a conflict even after
+// reconciliation unmapped the source.
 func requestIdentity(in contract.SubmitInput, threadID *string) (json.RawMessage, error) {
 	identity := struct {
 		Arguments json.RawMessage `json:"arguments"`
-		ThreadID  *string         `json:"thread_id,omitempty"`
-	}{Arguments: in.Arguments, ThreadID: threadID}
+		ThreadID  json.RawMessage `json:"thread_id,omitempty"`
+	}{Arguments: in.Arguments}
+	if threadID != nil {
+		if *threadID == "" {
+			identity.ThreadID = json.RawMessage(`null`)
+		} else {
+			encoded, err := json.Marshal(*threadID)
+			if err != nil {
+				return nil, err
+			}
+			identity.ThreadID = encoded
+		}
+	}
 	return json.Marshal(identity)
 }
 
