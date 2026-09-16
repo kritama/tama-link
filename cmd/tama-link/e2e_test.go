@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"github.com/kritama/tama-link/internal/catalog"
-	"github.com/kritama/tama-link/internal/credential"
 	"github.com/kritama/tama-link/internal/profile"
 )
 
@@ -162,7 +161,6 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	if hermetic {
 		t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+filepath.Join(t.TempDir(), "no-such-bus"))
 	}
-	t.Setenv(credential.ProbeTimeoutEnv, "15s")
 	bin := buildBinary(t)
 
 	if hermetic {

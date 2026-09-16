@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -23,13 +24,14 @@ const defaultSweepInterval = 5 * time.Second
 // concurrently twice in one process, and the durable lease keeps that true
 // across processes.
 type Service struct {
-	runner   *Runner
-	queue    chan string
-	sweep    time.Duration
-	inFlight sync.Map // submission ID -> struct{}
-	wg       sync.WaitGroup
-	cancel   context.CancelFunc
-	done     chan struct{}
+	runner        *Runner
+	queue         chan string
+	sweep         time.Duration
+	inFlight      sync.Map // submission ID -> struct{}
+	dispatchDrops atomic.Int64
+	wg            sync.WaitGroup
+	cancel        context.CancelFunc
+	done          chan struct{}
 }
 
 // NewService validates cfg and starts the dispatch and sweep loop. The loop
@@ -70,7 +72,16 @@ func (s *Service) Dispatch(id string) {
 	select {
 	case s.queue <- id:
 	default:
+		s.dispatchDrops.Add(1)
 	}
+}
+
+// DroppedDispatches reports how many prompt dispatches a saturated queue has
+// dropped since the service started. Dropped IDs never leave the durable
+// store: the recurring sweep rediscovers them, so the counter measures queue
+// saturation, not lost work.
+func (s *Service) DroppedDispatches() int64 {
+	return s.dispatchDrops.Load()
 }
 
 // Stop cancels the loop and in-flight execution and waits for shutdown.
@@ -128,6 +139,13 @@ func (s *Service) sweepRunnable(ctx context.Context) {
 		return
 	}
 	for _, id := range ids {
+		if _, loaded := s.inFlight.Load(id); loaded {
+			// Already executing in this process. Re-offering in-flight IDs
+			// would let them crowd the queue ahead of IDs that were
+			// dropped, so the sweep only offers work this process is not
+			// already running.
+			continue
+		}
 		select {
 		case s.queue <- id:
 		default:

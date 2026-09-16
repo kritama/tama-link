@@ -8,7 +8,6 @@ package credential
 import (
 	"errors"
 	"fmt"
-	"os"
 	"runtime"
 	"time"
 
@@ -45,31 +44,13 @@ func secureBackends() []keyring.BackendType {
 	}
 }
 
-// probeTimeoutEnv overrides the availability-probe bound for automation and
-// managed installations that know their backend will not need an unlock.
-const probeTimeoutEnv = "TAMA_LINK_KEYRING_PROBE_TIMEOUT"
-
-// ProbeTimeoutEnv is the environment override for the availability-probe
-// bound, exposed for tests and managed installations.
-const ProbeTimeoutEnv = probeTimeoutEnv
-
-// defaultProbeTimeout bounds the startup availability probe. It is long
-// enough for a human to notice and answer an interactive keyring unlock
-// prompt; a backend that still cannot complete a write after the window is
-// treated as unavailable so Tama Link fails with a clear error instead of
-// hanging serve forever.
-var defaultProbeTimeout = 2 * time.Minute
-
-// effectiveProbeTimeout resolves the probe bound: the environment override
-// wins when it parses to a positive duration, otherwise the default.
-func effectiveProbeTimeout() time.Duration {
-	if v := os.Getenv(probeTimeoutEnv); v != "" {
-		if d, err := time.ParseDuration(v); err == nil && d >= time.Millisecond {
-			return d
-		}
-	}
-	return defaultProbeTimeout
-}
+// probeTimeout bounds the startup availability probe. It is deliberately
+// short and fixed in the binary: Tama Link starts headless and must never
+// hang on an interactive keyring unlock prompt. A backend that cannot
+// complete a write within the window is unavailable, and serve fails fast
+// with a clear error. Tests in this package shorten the window through the
+// variable; production never extends it.
+var probeTimeout = 5 * time.Second
 
 // New opens the secure credential backend for profile and namespaces it by
 // profile. It fails closed with ErrUnavailable when no secure backend is
@@ -114,12 +95,11 @@ func probeBackend(profile string, kr keyring.Keyring) error {
 		}
 		done <- result{err: err}
 	}()
-	timeout := effectiveProbeTimeout()
 	select {
 	case res := <-done:
 		return res.err
-	case <-time.After(timeout):
-		return fmt.Errorf("credential backend did not complete an availability probe within %s; if a keyring unlock prompt is pending, answer it and retry, or set %s for automation", timeout, probeTimeoutEnv)
+	case <-time.After(probeTimeout):
+		return fmt.Errorf("credential backend did not complete an availability probe within %s; a keyring unlock prompt is not a supported serve-startup path", probeTimeout)
 	}
 }
 

@@ -1,105 +1,22 @@
 package catalog
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"regexp"
+	"unicode/utf8"
 )
-
-// enforcedKeywords is the complete set of assertion keywords the runtime
-// validator enforces. annotationKeywords are carried but never asserted.
-// Every other JSON Schema keyword would be silently unenforced, so
-// CheckSchemaVocabulary rejects it at profile load instead (see there).
-var enforcedKeywords = map[string]bool{
-	"type":                 true,
-	"properties":           true,
-	"required":             true,
-	"additionalProperties": true,
-	"items":                true,
-	"enum":                 true,
-	"const":                true,
-	"minimum":              true,
-	"maximum":              true,
-	"minLength":            true,
-	"maxLength":            true,
-	"minItems":             true,
-	"maxItems":             true,
-	"pattern":              true,
-}
-
-var annotationKeywords = map[string]bool{
-	"title":       true,
-	"description": true,
-	"examples":    true,
-	"default":     true,
-	"$schema":     true,
-	"$comment":    true,
-}
-
-// CheckSchemaVocabulary walks one pinned schema and rejects any assertion
-// keyword the runtime validator does not enforce, including keywords nested
-// behind properties, items, and schema-form additionalProperties. A profile
-// that pins oneOf, allOf, not, minProperties, uniqueItems, contains,
-// exclusiveMinimum, dependentRequired, or another unsupported assertion fails
-// closed at load; it can never be silently accepted with the assertion
-// unenforced. Called once per descriptor schema during profile validation.
-func CheckSchemaVocabulary(schema json.RawMessage) error {
-	var members map[string]json.RawMessage
-	if err := json.Unmarshal(schema, &members); err != nil {
-		return fmt.Errorf("schema is not a JSON object: %w", err)
-	}
-	return checkVocabulary(members, "$")
-}
-
-func checkVocabulary(members map[string]json.RawMessage, path string) error {
-	for name := range members {
-		if !enforcedKeywords[name] && !annotationKeywords[name] {
-			return fmt.Errorf("%s uses the unsupported schema keyword %q", path, name)
-		}
-	}
-	if props, ok := members["properties"]; ok {
-		var children map[string]json.RawMessage
-		if err := json.Unmarshal(props, &children); err != nil {
-			return fmt.Errorf("%s.properties is not an object: %w", path, err)
-		}
-		for name, child := range children {
-			var childMembers map[string]json.RawMessage
-			if err := json.Unmarshal(child, &childMembers); err != nil {
-				return fmt.Errorf("%s.properties.%s is not an object: %w", path, name, err)
-			}
-			if err := checkVocabulary(childMembers, path+".properties."+name); err != nil {
-				return err
-			}
-		}
-	}
-	if items, ok := members["items"]; ok {
-		var itemMembers map[string]json.RawMessage
-		if err := json.Unmarshal(items, &itemMembers); err != nil {
-			return fmt.Errorf("%s.items is not an object: %w", path, err)
-		}
-		if err := checkVocabulary(itemMembers, path+".items"); err != nil {
-			return err
-		}
-	}
-	if addl, ok := members["additionalProperties"]; ok && len(trimJSON(addl)) > 0 && trimJSON(addl)[0] == '{' {
-		var addlMembers map[string]json.RawMessage
-		if err := json.Unmarshal(addl, &addlMembers); err != nil {
-			return fmt.Errorf("%s.additionalProperties is not a boolean or a schema: %w", path, err)
-		}
-		if err := checkVocabulary(addlMembers, path+".additionalProperties"); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 // ValidateAgainstSchema validates one JSON value against the pinned schema's
 // enforced vocabulary: type, properties, required, additionalProperties
 // (boolean or nested schema), items, enum, const, minimum, maximum,
-// minLength, maxLength, minItems, maxItems, and pattern. Pinned schemas may
-// only use this vocabulary: CheckSchemaVocabulary rejects any other assertion
-// keyword at profile load, so nothing unenforced can reach runtime. Numbers
-// are compared through their exact decimal text, never through float64.
+// minLength, maxLength (Unicode code points), minItems, maxItems, and
+// pattern (Go RE2). Pinned schemas may only use this vocabulary with
+// well-formed values: CheckSchemaVocabulary enforces both at profile load,
+// so nothing unenforced or malformed can reach runtime. Numbers are compared
+// through their exact normalized decimal digits — exponent form included —
+// never through float64.
 func ValidateAgainstSchema(schema, value json.RawMessage) error {
 	var s schemaView
 	if err := json.Unmarshal(schema, &s); err != nil {
@@ -307,11 +224,13 @@ func (s *schemaView) validateString(value json.RawMessage, path string) error {
 	if err := json.Unmarshal(value, &text); err != nil {
 		return fmt.Errorf("%s is not a JSON string: %w", path, err)
 	}
-	if s.MinLength != nil && len(text) < *s.MinLength {
-		return fmt.Errorf("%s is shorter than %d bytes", path, *s.MinLength)
+	// JSON Schema string lengths count Unicode code points, not UTF-8 bytes.
+	length := utf8.RuneCountInString(text)
+	if s.MinLength != nil && length < *s.MinLength {
+		return fmt.Errorf("%s is shorter than %d characters", path, *s.MinLength)
 	}
-	if s.MaxLength != nil && len(text) > *s.MaxLength {
-		return fmt.Errorf("%s is longer than %d bytes", path, *s.MaxLength)
+	if s.MaxLength != nil && length > *s.MaxLength {
+		return fmt.Errorf("%s is longer than %d characters", path, *s.MaxLength)
 	}
 	if s.Pattern != "" {
 		re, err := regexp.Compile(s.Pattern)
@@ -326,20 +245,23 @@ func (s *schemaView) validateString(value json.RawMessage, path string) error {
 }
 
 func (s *schemaView) validateNumber(value json.RawMessage, path string) error {
-	if s.Minimum != nil && compareDecimal(value, s.Minimum.literal) < 0 {
+	neg, intPart, fracPart := normalizeNumber(value)
+	if s.Minimum != nil && compareNormalized(neg, intPart, fracPart, s.Minimum.neg, s.Minimum.intPart, s.Minimum.fracPart) < 0 {
 		return fmt.Errorf("%s is below the pinned minimum", path)
 	}
-	if s.Maximum != nil && compareDecimal(value, s.Maximum.literal) > 0 {
+	if s.Maximum != nil && compareNormalized(neg, intPart, fracPart, s.Maximum.neg, s.Maximum.intPart, s.Maximum.fracPart) > 0 {
 		return fmt.Errorf("%s is above the pinned maximum", path)
 	}
 	return nil
 }
 
-// numberText is a JSON Schema numeric bound with its exact literal text.
-// It accepts a JSON number (the standard form) and records the digits
-// verbatim so comparison never routes through float64.
+// numberText is a JSON Schema numeric bound normalized to exact sign and
+// decimal digits, so comparison never routes through float64. It accepts the
+// complete JSON number grammar, including exponent form.
 type numberText struct {
-	literal []byte
+	neg      bool
+	intPart  []byte
+	fracPart []byte
 }
 
 func (n *numberText) UnmarshalJSON(raw []byte) error {
@@ -347,7 +269,7 @@ func (n *numberText) UnmarshalJSON(raw []byte) error {
 	if !isJSONNumber(trimmed) {
 		return fmt.Errorf("bound is not a JSON number")
 	}
-	n.literal = append([]byte(nil), trimmed...)
+	n.neg, n.intPart, n.fracPart = normalizeNumber(trimmed)
 	return nil
 }
 
@@ -382,88 +304,113 @@ func valueKind(trimmed []byte) jsonKind {
 }
 
 // isIntegerLiteral reports whether a number literal denotes an integer: no
-// fractional digits remain after stripping trailing zeros.
+// fractional digits remain after the exponent is applied (1e2 and 15.0 are
+// integers, 1e-1 and 1.5 are not).
 func isIntegerLiteral(value []byte) bool {
-	text := trimJSON(value)
-	if bytesStartsWith(text, ".") {
+	if !isJSONNumber(trimJSON(value)) {
 		return false
 	}
-	dot := -1
-	for i := 0; i < len(text); i++ {
-		if text[i] == '.' {
-			dot = i
-			break
-		}
-	}
-	if dot < 0 {
-		return true
-	}
-	for i := dot + 1; i < len(text); i++ {
-		if text[i] != '0' {
-			return false
-		}
-	}
-	return true
+	_, _, fracPart := normalizeNumber(value)
+	return len(fracPart) == 0
 }
 
-// splitDecimalParts splits decimal text into signed integer-part bytes and
-// fractional digits (trailing zeros dropped).
-func splitDecimalParts(text []byte) (intPart, fracPart []byte) {
-	text = trimJSON(text)
-	negative := false
-	start := 0
-	if len(text) > 0 && (text[0] == '-' || text[0] == '+') {
-		negative = text[0] == '-'
-		start = 1
+// normalizeNumber reduces one JSON number literal — any valid form, including
+// exponent form — to a sign plus exact integer and fractional digits. The
+// exponent is applied by shifting the decimal point with zero padding, so
+// numeric comparison never routes through float64.
+func normalizeNumber(value []byte) (neg bool, intPart, fracPart []byte) {
+	text := trimJSON(value)
+	i := 0
+	if text[0] == '-' {
+		neg = true
+		i++
 	}
-	dot := -1
-	for i := start; i < len(text); i++ {
-		if text[i] == '.' {
-			dot = i
-			break
+	j := i
+	for j < len(text) && text[j] >= '0' && text[j] <= '9' {
+		j++
+	}
+	intDigits := text[i:j]
+	var fracDigits []byte
+	if j < len(text) && text[j] == '.' {
+		j++
+		k := j
+		for k < len(text) && text[k] >= '0' && text[k] <= '9' {
+			k++
+		}
+		fracDigits = text[j:k]
+		j = k
+	}
+	exp := 0
+	if j < len(text) && (text[j] == 'e' || text[j] == 'E') {
+		expText := text[j+1:]
+		eStart := 0
+		expNeg := false
+		if eStart < len(expText) && (expText[eStart] == '+' || expText[eStart] == '-') {
+			expNeg = expText[eStart] == '-'
+			eStart++
+		}
+		for _, c := range expText[eStart:] {
+			exp = exp*10 + int(c-'0')
+		}
+		if expNeg {
+			exp = -exp
 		}
 	}
-	if dot < 0 {
-		intPart = text[start:]
+
+	if exp >= 0 {
+		if exp <= len(fracDigits) {
+			intPart = append(append([]byte{}, intDigits...), fracDigits[:exp]...)
+			fracPart = append([]byte{}, fracDigits[exp:]...)
+		} else {
+			intPart = append(append(append([]byte{}, intDigits...), fracDigits...),
+				bytes.Repeat([]byte("0"), exp-len(fracDigits))...)
+		}
 	} else {
-		intPart = text[start:dot]
-		fracPart = text[dot+1:]
-		for len(fracPart) > 0 && fracPart[len(fracPart)-1] == '0' {
-			fracPart = fracPart[:len(fracPart)-1]
+		shift := -exp
+		if shift <= len(intDigits) {
+			intPart = append([]byte{}, intDigits[:len(intDigits)-shift]...)
+			fracPart = append(append([]byte{}, intDigits[len(intDigits)-shift:]...), fracDigits...)
+		} else {
+			intPart = []byte("0")
+			fracPart = append(append(bytes.Repeat([]byte("0"), shift-len(intDigits)), intDigits...), fracDigits...)
 		}
 	}
+
+	intPart = stripLeadingZeros(intPart)
 	if len(intPart) == 0 {
 		intPart = []byte("0")
 	}
-	if negative && !isZeroDecimal(intPart, fracPart) {
-		intPart = append([]byte("-"), intPart...)
-	} else if negative {
-		intPart = []byte("0")
+	for len(fracPart) > 0 && fracPart[len(fracPart)-1] == '0' {
+		fracPart = fracPart[:len(fracPart)-1]
 	}
-	return intPart, fracPart
+	if isAllZeros(intPart) && len(fracPart) == 0 {
+		intPart = []byte("0")
+		neg = false // -0 is 0
+	}
+	return neg, intPart, fracPart
 }
 
-func isZeroDecimal(intPart, fracPart []byte) bool {
-	if len(fracPart) > 0 {
-		return false
-	}
-	for _, c := range intPart {
-		if c != '0' && c != '-' {
+func isAllZeros(digits []byte) bool {
+	for _, c := range digits {
+		if c != '0' {
 			return false
 		}
 	}
 	return true
 }
 
-// compareDecimal compares two decimal literals exactly, returning -1, 0, or 1:
-// integer parts through their exact digit length, fractions padded to equal
-// length, signs applied last.
+// compareDecimal compares two JSON number literals exactly, returning -1, 0,
+// or 1, through their normalized decimal digits.
 func compareDecimal(a, b []byte) int {
-	aInt, aFrac := splitDecimalParts(a)
-	bInt, bFrac := splitDecimalParts(b)
+	aNeg, aInt, aFrac := normalizeNumber(a)
+	bNeg, bInt, bFrac := normalizeNumber(b)
+	return compareNormalized(aNeg, aInt, aFrac, bNeg, bInt, bFrac)
+}
 
-	aNeg := bytesStartsWith(aInt, "-")
-	bNeg := bytesStartsWith(bInt, "-")
+// compareNormalized compares two normalized numbers exactly: integer parts
+// through their exact digit length, fractions padded to equal length, signs
+// applied last.
+func compareNormalized(aNeg bool, aInt, aFrac []byte, bNeg bool, bInt, bFrac []byte) int {
 	if aNeg != bNeg {
 		if aNeg {
 			return -1
@@ -471,25 +418,14 @@ func compareDecimal(a, b []byte) int {
 		return 1
 	}
 
-	amag := aInt
-	if aNeg {
-		amag = aInt[1:]
-	}
-	bmag := bInt
-	if bNeg {
-		bmag = bInt[1:]
-	}
-	amag = stripLeadingZeros(amag)
-	bmag = stripLeadingZeros(bmag)
-
 	cmp := 0
 	switch {
-	case len(amag) < len(bmag):
+	case len(aInt) < len(bInt):
 		cmp = -1
-	case len(amag) > len(bmag):
+	case len(aInt) > len(bInt):
 		cmp = 1
 	default:
-		cmp = stringCompare(amag, bmag)
+		cmp = stringCompare(aInt, bInt)
 	}
 	if cmp == 0 {
 		for i := 0; i < len(aFrac) || i < len(bFrac); i++ {
@@ -561,29 +497,51 @@ func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
 }
 
+// isJSONNumber reports whether trimmed is a complete JSON number literal:
+// -?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)? — including exponent form.
 func isJSONNumber(trimmed []byte) bool {
 	if len(trimmed) == 0 {
 		return false
 	}
-	start := 0
-	if trimmed[0] == '-' || trimmed[0] == '+' {
-		if len(trimmed) == 1 {
+	i := 0
+	if trimmed[0] == '-' {
+		i++
+	}
+	if i >= len(trimmed) {
+		return false
+	}
+	if trimmed[i] == '0' {
+		i++
+	} else if trimmed[i] >= '1' && trimmed[i] <= '9' {
+		i++
+		for i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9' {
+			i++
+		}
+	} else {
+		return false
+	}
+	if i < len(trimmed) && trimmed[i] == '.' {
+		i++
+		if i >= len(trimmed) || trimmed[i] < '0' || trimmed[i] > '9' {
 			return false
 		}
-		start = 1
-	}
-	seenDigit, seenDot := false, false
-	for i := start; i < len(trimmed); i++ {
-		switch {
-		case trimmed[i] >= '0' && trimmed[i] <= '9':
-			seenDigit = true
-		case trimmed[i] == '.' && !seenDot:
-			seenDot = true
-		default:
-			return false
+		for i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9' {
+			i++
 		}
 	}
-	return seenDigit
+	if i < len(trimmed) && (trimmed[i] == 'e' || trimmed[i] == 'E') {
+		i++
+		if i < len(trimmed) && (trimmed[i] == '+' || trimmed[i] == '-') {
+			i++
+		}
+		if i >= len(trimmed) || trimmed[i] < '0' || trimmed[i] > '9' {
+			return false
+		}
+		for i < len(trimmed) && trimmed[i] >= '0' && trimmed[i] <= '9' {
+			i++
+		}
+	}
+	return i == len(trimmed)
 }
 
 // jsonValuesEqual reports whether two JSON literals denote the same value,

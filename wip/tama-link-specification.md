@@ -440,9 +440,11 @@ automatic state-key rotation, and headless environments are supported only with
 an explicitly available secure credential backend. Backend availability is a
 bounded startup probe: a complete set/read/remove cycle on one disposable
 entry must finish within a short fixed window, or Tama Link fails fast with a
-clear unavailable error. A backend that accepts a connection but blocks on
-user interaction for writes (for example a headless Secret Service) is
-unavailable; Tama Link must never hang the serve process on the platform
+clear unavailable error. The window is fixed in the binary and cannot be
+extended at runtime. A backend that accepts a connection but blocks on user
+interaction for writes (for example a headless Secret Service) is
+unavailable; an interactive unlock prompt is not a supported serve-startup
+path, and Tama Link must never hang the serve process on the platform
 credential store.
 
 Writes must be atomic and safe against symlink traversal. Local state and
@@ -456,7 +458,10 @@ terminal state without a process restart. The in-memory worker queue is a
 prompt-start aid only: when it is saturated, a recurring durable sweep
 re-derives every runnable replayable submission from the store and re-offers
 it, so a dropped queue entry is rediscovered within one sweep interval. The
-lease remains the final single-winner guard across processes. A worker that
+sweep must not re-offer work this process is already executing: in-flight
+entries would otherwise crowd the prompt queue ahead of dropped IDs and
+starve them. The lease remains the final single-winner guard across
+processes. A worker that
 has already published a terminal state releases its lease on a best-effort
 basis: the release is retried against transient SQLite contention and, if it
 still fails, is dropped rather than undoing the terminal transition, because
@@ -542,7 +547,21 @@ and `$comment`. A pinned operation schema that uses any other assertion
 keyword — `oneOf`, `allOf`, `not`, `minProperties`, `uniqueItems`,
 `contains`, `exclusiveMinimum`, `dependentRequired`, or another — would be
 silently unenforced, so profile load fails closed and names the unsupported
-keyword, recursively, instead. Numeric bounds keep exact decimal semantics.
+keyword, recursively, instead.
+
+Profile load also validates the meta-shape of every supported keyword,
+recursively: a keyword with a null or malformed value is rejected, never
+interpreted as absent, so a malformed schema cannot disable an intended
+restriction. Count constraints are non-negative integers within a reviewed
+bound, `enum` is non-empty, `required` names are unique and, when
+`properties` is present, declared, bound pairs must not be inverted, and
+type names come from the closed set. The `pattern` dialect is Go's RE2
+syntax, a strict subset of the ECMAScript-compatible regular expressions
+JSON Schema normally assumes, and patterns must compile at profile load.
+At runtime, `minLength` and `maxLength` count Unicode code points, and
+numeric values and bounds accept the complete JSON number grammar,
+including exponent form, compared through exact normalized decimal digits,
+never through `float64`.
 
 Server instructions are composed from two clearly separated sources:
 
