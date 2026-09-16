@@ -100,10 +100,44 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 	if err != nil {
 		if errors.Is(err, ErrGrantInvalid) {
 			c.clearToken()
+			// The grant is known-invalid: invalidate the durable refresh
+			// credential too, so readiness rejects new work as
+			// authentication_required instead of accepting submissions
+			// that can only fail on the same grant. The caller holds the
+			// lease epoch, so the fence clear is gated on it.
+			if invalidateErr := c.invalidateCredential(ctx, leaseGeneration); invalidateErr != nil {
+				return "", errors.Join(err, invalidateErr)
+			}
 		}
 		return "", err
 	}
 	return tok.AccessToken, nil
+}
+
+// invalidateCredential removes the durable refresh credential after the
+// authorization server rejected the grant with invalid_grant: the fenced
+// slot, the fence pointer, and the legacy label. The caller holds the
+// refresh lease (epoch leaseGeneration). Without this, HasCredentials
+// would keep reporting the profile ready and every submit would burn an
+// idempotency key on a terminal failure against the same known-invalid
+// grant.
+func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64) error {
+	fenced, err := c.loadFenced(ctx)
+	if err != nil {
+		return err
+	}
+	if fenced != nil && fenced.previousSlot != "" {
+		if err := c.secrets.DeleteSecret(fenced.previousSlot); err != nil {
+			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+		}
+	}
+	if _, err := c.lease.ClearCredentialFence(ctx, refreshLeaseName, c.owner, leaseGeneration); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	if err := c.secrets.DeleteSecret(labelRefresh); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	return nil
 }
 
 // leasedExchangeAndPersist renews the claimed refresh lease on a third of

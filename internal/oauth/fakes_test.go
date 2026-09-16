@@ -12,6 +12,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/kritama/tama-link/internal/store"
 )
 
 // fakeSecrets is an in-memory SecretStore for tests. setDelay blocks
@@ -310,14 +312,22 @@ func (f *fakeLease) ReadCredentialFence(_ context.Context) (int64, string, bool,
 // compare-and-swap plus the shared lease holder the commit must still own.
 // The fake checks ownership only; the epoch arithmetic is covered by the
 // store's own tests.
-func (f *fakeLease) CommitCredentialFence(_ context.Context, fenceGeneration int64, slot, leaseName, leaseOwner string, _ int64) (bool, error) {
-	if leaseName != refreshLeaseName {
-		return false, fmt.Errorf("unexpected lease name %q", leaseName)
+func (f *fakeLease) CommitCredentialFence(_ context.Context, commit store.CredentialFenceCommit) (bool, error) {
+	if commit.LeaseName != refreshLeaseName {
+		return false, fmt.Errorf("unexpected lease name %q", commit.LeaseName)
 	}
 	if f.fenceCommitErr != nil {
 		return false, f.fenceCommitErr
 	}
-	return f.fence.commit(fenceGeneration, slot, leaseOwner), nil
+	if !f.fence.commit(commit.FenceGeneration, commit.Slot, commit.LeaseOwner) {
+		return false, nil
+	}
+	// The previous slot is atomically enqueued for retirement retry with
+	// the advance, mirroring the production transaction.
+	if commit.PreviousSlot != "" {
+		f.retire(commit.PreviousSlot)
+	}
+	return true, nil
 }
 
 func (f *fakeLease) ClearCredentialFence(_ context.Context, leaseName, leaseOwner string, leaseGeneration int64) (bool, error) {
@@ -325,7 +335,8 @@ func (f *fakeLease) ClearCredentialFence(_ context.Context, leaseName, leaseOwne
 		return false, fmt.Errorf("unexpected lease name %q", leaseName)
 	}
 	if f.fence == nil {
-		return false, nil
+		// An absent fence is successfully cleared.
+		return true, nil
 	}
 	if f.leaseGen() != leaseGeneration {
 		return false, nil
@@ -337,14 +348,13 @@ func (f *fakeLease) ClearCredentialFence(_ context.Context, leaseName, leaseOwne
 // per-process generation is always zero, matching the captured value.
 func (f *fakeLease) leaseGen() int64 { return 0 }
 
-func (f *fakeLease) RecordRetiredCredentialSlot(_ context.Context, slot string) error {
+func (f *fakeLease) retire(slot string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.retired == nil {
 		f.retired = map[string]struct{}{}
 	}
 	f.retired[slot] = struct{}{}
-	return nil
 }
 
 func (f *fakeLease) RetiredCredentialSlots(_ context.Context) ([]string, error) {

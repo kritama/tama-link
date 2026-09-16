@@ -12,6 +12,26 @@ import (
 // database: the OAuth refresh credential.
 const credentialFenceName = "oauth-refresh"
 
+// CredentialFenceCommit describes one fence advancement: the new slot, the
+// previous live slot to enqueue for retirement retry, and the refresh lease
+// epoch the writer must still own.
+type CredentialFenceCommit struct {
+	// FenceGeneration is the generation the writer commits: it must be
+	// greater than the current fence generation.
+	FenceGeneration int64
+	// Slot is the new live credential slot.
+	Slot string
+	// PreviousSlot is the live credential slot this commit replaces. It is
+	// atomically enqueued for retirement retry with the fence advance, so
+	// a later deletion failure can never strand the old grant.
+	PreviousSlot string
+	// LeaseName, LeaseOwner, and LeaseGeneration identify the lease epoch
+	// the writer must still own, unexpired.
+	LeaseName       string
+	LeaseOwner      string
+	LeaseGeneration int64
+}
+
 // ReadCredentialFence returns the generation and the secure-backend label
 // of the slot the fence currently points at, or found=false when no
 // fenced credential has been committed yet. Writers take generation+1 and
@@ -29,45 +49,49 @@ func (s *Store) ReadCredentialFence(ctx context.Context) (generation int64, slot
 	return generation, slot, true, nil
 }
 
-// CommitCredentialFence atomically points the fence at slot for
-// fenceGeneration when, and only when, the fence has not advanced past
-// fenceGeneration AND leaseOwner still holds leaseName unexpired in the
-// lease ownership epoch leaseGeneration. It is the credential-side
-// compare-and-swap: a writer whose fence generation a concurrent commit
-// already passed is rejected, and so is a writer that lost the refresh
-// lease while its secret-store write was blocked — with a provider that
-// permits overlapping rotations, only the live lease owner may advance
-// the fence. It returns committed=false for a rejected writer, never an
-// error for it.
-func (s *Store) CommitCredentialFence(
-	ctx context.Context,
-	fenceGeneration int64,
-	slot, leaseName, leaseOwner string,
-	leaseGeneration int64,
-) (bool, error) {
-	if fenceGeneration <= 0 {
+// CommitCredentialFence atomically advances the fence to commit.Slot for
+// commit.FenceGeneration and enqueues commit.PreviousSlot for retirement
+// retry, when, and only when, the fence has not advanced past
+// commit.FenceGeneration AND commit.LeaseOwner still holds
+// commit.LeaseName unexpired in the lease ownership epoch
+// commit.LeaseGeneration. It is the credential-side compare-and-swap: a
+// writer whose fence generation a concurrent commit already passed is
+// rejected, and so is a writer that lost the refresh lease while its
+// secret-store write was blocked — with a provider that permits
+// overlapping rotations, only the live lease owner may advance the fence.
+// The enqueue is one transaction with the advance, so a committed fence
+// always carries a durable retirement record for the slot it replaced and
+// a failed deletion can never strand the old grant. It returns
+// committed=false for a rejected writer, never an error for it.
+func (s *Store) CommitCredentialFence(ctx context.Context, commit CredentialFenceCommit) (bool, error) {
+	if commit.FenceGeneration <= 0 {
 		return false, errors.New("credential fence generation must be positive")
 	}
-	if slot == "" {
+	if commit.Slot == "" {
 		return false, errors.New("credential fence slot is required")
 	}
-	if err := validateLease(leaseName, leaseOwner, time.Minute); err != nil {
+	if err := validateLease(commit.LeaseName, commit.LeaseOwner, time.Minute); err != nil {
 		return false, err
 	}
+	tx, err := s.beginWriteTx(ctx)
+	if err != nil {
+		return false, fmt.Errorf("%w: commit credential fence: %w", ErrStateUnavailable, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	nowMs := s.now().UnixMilli()
-	res, err := s.exec(ctx, `
-		INSERT INTO credential_fence (name, generation, slot)
-		SELECT ?, ?, ?
-		WHERE EXISTS (
-			SELECT 1 FROM leases
-			WHERE name = ? AND owner = ? AND generation = ? AND expires_at > ?
-		)
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO credential_fence (name, generation, slot) VALUES (?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			generation = excluded.generation,
 			slot = excluded.slot
-		WHERE credential_fence.generation < excluded.generation`,
-		credentialFenceName, fenceGeneration, slot,
-		leaseName, leaseOwner, leaseGeneration, nowMs)
+		WHERE credential_fence.generation < excluded.generation
+		  AND EXISTS (
+			  SELECT 1 FROM leases
+			  WHERE name = ? AND owner = ? AND generation = ? AND expires_at > ?
+		  )`,
+		credentialFenceName, commit.FenceGeneration, commit.Slot,
+		commit.LeaseName, commit.LeaseOwner, commit.LeaseGeneration, nowMs)
 	if err != nil {
 		return false, fmt.Errorf("%w: commit credential fence: %w", ErrStateUnavailable, err)
 	}
@@ -75,7 +99,21 @@ func (s *Store) CommitCredentialFence(
 	if err != nil {
 		return false, fmt.Errorf("%w: commit credential fence: %w", ErrStateUnavailable, err)
 	}
-	return affected > 0, nil
+	if affected == 0 {
+		return false, nil
+	}
+	if commit.PreviousSlot != "" {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO credential_fence (name, generation, slot) VALUES (?, 0, ?)
+			ON CONFLICT(name) DO UPDATE SET slot = excluded.slot`,
+			retiredCredentialSlotName(commit.PreviousSlot), commit.PreviousSlot); err != nil {
+			return false, fmt.Errorf("%w: record retired credential slot: %w", ErrStateUnavailable, err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("%w: commit credential fence: %w", ErrStateUnavailable, err)
+	}
+	return true, nil
 }
 
 // ClearCredentialFence removes the credential fence row when, and only
@@ -83,8 +121,9 @@ func (s *Store) CommitCredentialFence(
 // epoch leaseGeneration. Logout pairs it with deleting the committed slot
 // and the legacy labels; binding the clear to the epoch means a logout
 // whose lease was lost mid-cleanup can never wipe a newer fence installed
-// by the process that took over. It reports cleared=false for a lost
-// epoch, never an error for it.
+// by the process that took over. An absent fence row is successfully
+// cleared — a repeated logout or a legacy-only profile has nothing to
+// clear — so only a lost epoch reports cleared=false.
 func (s *Store) ClearCredentialFence(
 	ctx context.Context,
 	leaseName, leaseOwner string,
@@ -93,22 +132,30 @@ func (s *Store) ClearCredentialFence(
 	if err := validateLease(leaseName, leaseOwner, time.Minute); err != nil {
 		return false, err
 	}
-	res, err := s.exec(ctx, `
-		DELETE FROM credential_fence
-		WHERE name = ?
-		  AND EXISTS (
-			  SELECT 1 FROM leases
-			  WHERE name = ? AND owner = ? AND generation = ? AND expires_at > ?
-		  )`,
-		credentialFenceName, leaseName, leaseOwner, leaseGeneration, s.now().UnixMilli())
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return false, fmt.Errorf("%w: clear credential fence: %w", ErrStateUnavailable, err)
 	}
-	affected, err := res.RowsAffected()
+	defer func() { _ = tx.Rollback() }()
+
+	var held int
+	err = tx.QueryRowContext(ctx,
+		"SELECT 1 FROM leases WHERE name = ? AND owner = ? AND generation = ? AND expires_at > ?",
+		leaseName, leaseOwner, leaseGeneration, s.now().UnixMilli()).Scan(&held)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("%w: clear credential fence: %w", ErrStateUnavailable, err)
 	}
-	return affected > 0, nil
+	if _, err := tx.ExecContext(ctx,
+		"DELETE FROM credential_fence WHERE name = ?", credentialFenceName); err != nil {
+		return false, fmt.Errorf("%w: clear credential fence: %w", ErrStateUnavailable, err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("%w: clear credential fence: %w", ErrStateUnavailable, err)
+	}
+	return true, nil
 }
 
 // retiredCredentialSlotName is the credential-slot record name prefix for
@@ -116,22 +163,6 @@ func (s *Store) ClearCredentialFence(
 // that a later refresh or logout must retry.
 func retiredCredentialSlotName(slot string) string {
 	return credentialFenceName + "-retired:" + slot
-}
-
-// RecordRetiredCredentialSlot durably records one live credential slot
-// whose secure-backend deletion failed, so a later refresh or logout can
-// retry the deletion instead of silently stranding a still-valid grant.
-func (s *Store) RecordRetiredCredentialSlot(ctx context.Context, slot string) error {
-	if slot == "" {
-		return errors.New("credential slot is required")
-	}
-	if _, err := s.exec(ctx, `
-		INSERT INTO credential_fence (name, generation, slot) VALUES (?, 0, ?)
-		ON CONFLICT(name) DO UPDATE SET slot = excluded.slot`,
-		retiredCredentialSlotName(slot), slot); err != nil {
-		return fmt.Errorf("%w: record retired credential slot: %w", ErrStateUnavailable, err)
-	}
-	return nil
 }
 
 // RetiredCredentialSlots lists the credential slots recorded for retirement

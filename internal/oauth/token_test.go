@@ -108,6 +108,47 @@ func TestRefreshInvalidGrant(t *testing.T) {
 	}
 }
 
+// TestRefreshInvalidGrantInvalidatesDurableCredential pins that a rejected
+// grant invalidates the durable refresh credential, not just the in-memory
+// token: readiness must report the profile as unauthenticated so new work
+// fails as authentication_required instead of burning idempotency keys on
+// the same known-invalid grant.
+func TestRefreshInvalidGrantInvalidatesDurableCredential(t *testing.T) {
+	server, client, secrets, lease, clock := tokenFixture(t, "rt-1")
+	ctx := context.Background()
+	if _, err := client.Token(ctx); err != nil {
+		t.Fatalf("first Token: %v", err)
+	}
+	// The fenced credential is live and readiness is true.
+	if ok, err := client.HasCredentials(ctx); err != nil || !ok {
+		t.Fatalf("HasCredentials before rejection = %v %v, want true", ok, err)
+	}
+
+	// Expire the token; the authorization server rejects the grant.
+	clock.set(clock.now.Add(2 * time.Hour))
+	server.tokenBody = `{"error":"invalid_grant"}`
+	if _, err := client.Token(ctx); !errors.Is(err, ErrGrantInvalid) {
+		t.Fatalf("err = %v, want ErrGrantInvalid", err)
+	}
+	// The durable credential is gone: the fence is cleared, the slot and
+	// the legacy label are deleted, and readiness reports false so submit
+	// rejects new work instead of accepting doomed submissions.
+	if _, _, found, err := lease.ReadCredentialFence(ctx); err != nil || found {
+		t.Fatalf("fence after invalid grant = found:%v err:%v, want cleared", found, err)
+	}
+	if ok, err := client.HasCredentials(ctx); err != nil || ok {
+		t.Fatalf("HasCredentials after invalid grant = %v %v, want false", ok, err)
+	}
+	if _, found, _ := secrets.GetSecret(labelRefresh); found {
+		t.Error("legacy refresh credential survived invalid_grant")
+	}
+	// The client registration survives: reauthorization reuses it.
+	if _, found, _ := secrets.GetSecret(labelClient); !found {
+		t.Error("client registration must survive invalid_grant for reauthorization")
+	}
+	clock.set(clock.now.Add(time.Minute))
+}
+
 func TestRefreshLeaseContention(t *testing.T) {
 	_, client, _, lease, _ := tokenFixture(t, "rt-1")
 	lease.holdOther()

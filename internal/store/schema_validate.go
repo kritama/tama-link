@@ -26,6 +26,7 @@ func validateRequiredTables(ctx context.Context, conn *sql.Conn) error {
 			UNION ALL SELECT 'input_responses'
 			UNION ALL SELECT 'idempotency'
 			UNION ALL SELECT 'leases'
+			UNION ALL SELECT 'credential_fence'
 		) AS expected
 		LEFT JOIN sqlite_schema AS actual
 		  ON actual.type = 'table' AND actual.name = expected.name
@@ -66,6 +67,7 @@ func validateCurrentSchema(ctx context.Context, conn *sql.Conn) error {
 		`SELECT submission_id, request_id, response_enc, answered_at FROM input_responses LIMIT 0`,
 		`SELECT client_request_id, args_hash, submission_id, created_at FROM idempotency LIMIT 0`,
 		`SELECT name, owner, expires_at, generation FROM leases LIMIT 0`,
+		`SELECT name, generation, slot FROM credential_fence LIMIT 0`,
 	}
 	for _, query := range checks {
 		rows, err := conn.QueryContext(ctx, query)
@@ -85,6 +87,7 @@ func validatePrimaryKeys(ctx context.Context, conn *sql.Conn) error {
 		{"submissions", "submission_id"},
 		{"idempotency", "client_request_id"},
 		{"leases", "name"},
+		{"credential_fence", "name"},
 	}
 	for _, key := range expected {
 		rows, err := conn.QueryContext(ctx, "SELECT name, pk FROM pragma_table_info(?) WHERE pk > 0", key.table)

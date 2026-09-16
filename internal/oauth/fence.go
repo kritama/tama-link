@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+
+	"github.com/kritama/tama-link/internal/store"
 )
 
 // newRefreshSlotLabel returns one unique secure-backend label for a
@@ -84,9 +86,9 @@ func (c *Client) loadFenced(ctx context.Context) (*fencedCredential, error) {
 // make its value live — even before the winner commits its own
 // generation. After a durable commit the new slot is the only live
 // credential; the replaced credentials — the legacy label and the previous
-// live slot — are retired then, and a failed retirement is recorded
-// durably so a later refresh or logout retries it instead of silently
-// stranding a still-valid grant.
+// live slot — are retired then, the previous slot having been atomically
+// enqueued for retirement retry with the commit, so a failed deletion can
+// never strand the old grant.
 func (c *Client) storeFenced(ctx context.Context, fenced *fencedCredential) error {
 	cred := fenced.credential
 	data, err := json.Marshal(cred)
@@ -103,8 +105,20 @@ func (c *Client) storeFenced(ctx context.Context, fenced *fencedCredential) erro
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
 	c.retireFailedSlots(ctx)
-	committed, err := c.lease.CommitCredentialFence(
-		ctx, fenced.generation, slot, refreshLeaseName, c.owner, fenced.leaseGeneration)
+	previous := fenced.previousSlot
+	if previous == labelRefresh {
+		// The legacy single-label form is a fixed label that every refresh
+		// and logout retries; it needs no retirement record.
+		previous = ""
+	}
+	committed, err := c.lease.CommitCredentialFence(ctx, store.CredentialFenceCommit{
+		FenceGeneration: fenced.generation,
+		Slot:            slot,
+		PreviousSlot:    previous,
+		LeaseName:       refreshLeaseName,
+		LeaseOwner:      c.owner,
+		LeaseGeneration: fenced.leaseGeneration,
+	})
 	if err != nil {
 		_ = c.secrets.DeleteSecret(slot)
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
@@ -116,16 +130,18 @@ func (c *Client) storeFenced(ctx context.Context, fenced *fencedCredential) erro
 		_ = c.secrets.DeleteSecret(slot)
 		return fmt.Errorf("%w: refresh credential superseded by a concurrent rotation", ErrBackendUnavailable)
 	}
-	// The commit is durable: the new slot is the only live credential.
-	// Retire the replaced credentials — the legacy single-label form and
-	// the previous live slot — and record a failed deletion durably so a
-	// later refresh or logout retries it.
+	// The commit is durable: the new slot is the only live credential and
+	// the previous slot is durably enqueued for retirement retry. Retire
+	// the replaced credentials and clear the record on success.
 	_ = c.secrets.DeleteSecret(labelRefresh)
-	if previous := fenced.previousSlot; previous != "" && previous != labelRefresh {
+	if previous != "" {
 		if err := c.secrets.DeleteSecret(previous); err != nil {
-			if recordErr := c.lease.RecordRetiredCredentialSlot(ctx, previous); recordErr != nil {
-				return fmt.Errorf("%w: %w", ErrBackendUnavailable, recordErr)
-			}
+			// The record is already durable; the next refresh or logout
+			// retries the deletion.
+			return nil
+		}
+		if err := c.lease.ClearRetiredCredentialSlot(ctx, previous); err != nil {
+			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
 	}
 	return nil

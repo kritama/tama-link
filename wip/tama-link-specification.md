@@ -744,11 +744,14 @@ blocked can never make its value live, not even before the winner commits
 its own generation. The commit is the last fallible step for the slot
 swap: the previous live slot stays referenced until the commit is durable,
 so a rejected commit can never leave the fence pointing at a deleted
-credential. A successful commit leaves the new slot as the only live
-credential; the replaced credentials — the legacy label and the previous
-live slot — are retired after the commit, and a failed retirement is
-recorded durably so a later refresh or logout retries the deletion instead
-of silently stranding a still-valid grant. The
+credential, and the commit atomically enqueues the previous slot in the
+retirement backlog — one transaction with the advance — so a committed
+fence always carries a durable retirement record for the slot it replaced.
+A successful commit leaves the new slot as the only live credential; the
+replaced credentials — the legacy label and the previous live slot — are
+retired after the commit, the backlog record is cleared on success, and a
+failed retirement keeps its durable record so a later refresh or logout
+retries the deletion instead of silently stranding a still-valid grant. The
 authorization-code exchange is a credential rotation too: it claims the
 same refresh lease before redeeming the single-use code and renews the
 lease across both the exchange and the fenced persistence, so a lease
@@ -764,7 +767,9 @@ mid-cleanup fails retryably and can never wipe a newer fence installed by
 the process that took over. The committed slot is deleted while the fence
 still references it — a failed deletion keeps the slot discoverable, so a
 retried logout finishes the cleanup — and the fence is cleared once its
-slot is gone; a later login starts from a clean fence. The
+slot is gone; a fence that is already absent clears successfully, so a
+repeated logout or a legacy-only profile can complete its cleanup; a later
+login starts from a clean fence. The
 fence subsumes post-write ownership checks, which
 cannot repair an unfenced external write. Refresh transactions are also
 serialized inside one process, and a burst of concurrent token requests
@@ -903,7 +908,11 @@ rejected before any token request is sent.
 Tama Link coordinates refresh through a profile-scoped cross-process lease,
 re-reads the credential after acquiring it, and safely stores a replacement
 refresh token when the provider returns one. `invalid_grant` maps to
-`authentication_required` without an automatic retry loop. An upstream
+`authentication_required` without an automatic retry loop, and the durable
+refresh credential is invalidated — fenced slot, fence pointer, and legacy
+label removed under the held lease — so credential readiness rejects new
+work as `authentication_required` instead of accepting submissions that
+can only fail on the same known-invalid grant. An upstream
 subscription closes no later than credential expiry; after successful refresh,
 Link reconciles through `tasks/get` before opening a replacement stream.
 

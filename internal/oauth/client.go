@@ -10,6 +10,8 @@ import (
 	"os"
 	"sync"
 	"time"
+
+	"github.com/kritama/tama-link/internal/store"
 )
 
 // Default bounds for one OAuth client.
@@ -57,25 +59,22 @@ type Leaser interface {
 	// the fence currently points at, or found=false when no fenced
 	// credential has been committed yet.
 	ReadCredentialFence(ctx context.Context) (generation int64, slot string, found bool, err error)
-	// CommitCredentialFence atomically points the fence at slot for
-	// fenceGeneration when, and only when, the fence has not advanced past
-	// fenceGeneration AND leaseOwner still holds leaseName unexpired in
-	// the lease ownership epoch leaseGeneration. It is the credential-side
-	// compare-and-swap that a stale writer cannot pass: a writer that lost
-	// the lease while its secret-store write was blocked can never advance
-	// the fence, even before the winner commits its own generation.
-	CommitCredentialFence(ctx context.Context, fenceGeneration int64, slot, leaseName, leaseOwner string, leaseGeneration int64) (bool, error)
+	// CommitCredentialFence atomically advances the fence to commit.Slot
+	// and enqueues commit.PreviousSlot for retirement retry when, and only
+	// when, the fence has not advanced past commit.FenceGeneration and the
+	// caller still holds the lease epoch in the commit. It is the
+	// credential-side compare-and-swap that a stale writer cannot pass;
+	// the enqueue is one transaction with the advance, so a committed
+	// fence always carries a durable retirement record for the slot it
+	// replaced.
+	CommitCredentialFence(ctx context.Context, commit store.CredentialFenceCommit) (bool, error)
 	// ClearCredentialFence removes the credential fence when, and only
 	// when, leaseOwner still holds leaseName unexpired in the lease
-	// ownership epoch leaseGeneration. It reports cleared=false for a lost
-	// epoch, so a logout whose lease was lost mid-cleanup can never wipe a
-	// newer fence installed by the process that took over.
+	// ownership epoch leaseGeneration. An absent fence is successfully
+	// cleared. It reports cleared=false for a lost epoch, so a logout
+	// whose lease was lost mid-cleanup can never wipe a newer fence
+	// installed by the process that took over.
 	ClearCredentialFence(ctx context.Context, leaseName, leaseOwner string, leaseGeneration int64) (bool, error)
-	// RecordRetiredCredentialSlot durably records one live credential slot
-	// whose secure-backend deletion failed, so a later refresh or logout
-	// can retry the deletion instead of silently stranding a still-valid
-	// grant.
-	RecordRetiredCredentialSlot(ctx context.Context, slot string) error
 	// RetiredCredentialSlots lists the credential slots recorded for
 	// retirement retry.
 	RetiredCredentialSlots(ctx context.Context) ([]string, error)
