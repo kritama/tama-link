@@ -1013,9 +1013,13 @@ claim never advances the epoch, so the lease alone cannot order in-process
 mutations), renews the epoch across the whole mutation — the renewal
 outlives caller cancellation, because the final record write takes no
 context and cannot be aborted, so a cancel while the secure backend is
-busy must not hand the epoch away mid-write — and rejects the final
-record write if the epoch is lost, so a stale record can never be written
-over a registration or grant another process committed. The normal
+busy must not hand the epoch away mid-write. The commit is checked
+optimistically on both sides of that write: the epoch is verified before
+it, and if it is lost while the uninterruptible write is in flight, the
+stale record the write may have stored over the winner's registration is
+removed again — the credential backend cannot fence the write itself —
+so a stale registration can never be read as a ready pair and the
+winner's flow re-registers on its next login. The normal
 first-login path, which stores no credential yet, is unaffected.
 The client auth method is selected from the set the authorization server
 advertises — the field is a set of supported methods, not a single choice:

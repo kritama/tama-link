@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -188,6 +189,36 @@ func TestRegisterCompletesWriteAfterCallerCancellation(t *testing.T) {
 	}
 	if _, found, _ := secrets.GetSecret(labelClient); !found {
 		t.Fatal("the record write did not complete after the caller cancellation")
+	}
+}
+
+// TestRegisterRemovesStaleRecordAfterLostEpochDuringWrite pins the
+// optimistic epoch check on the commit: the record write is
+// uninterruptible, so if the lease is taken over while it is in flight
+// and the write completes after the takeover, the stale record it may
+// have written over the winner's registration is removed again — the
+// replacement can never be read as a ready pair.
+func TestRegisterRemovesStaleRecordAfterLostEpochDuringWrite(t *testing.T) {
+	secrets := newFakeSecrets()
+	secrets.setDelay = 50 * time.Millisecond
+	lease := newFakeLease()
+	client := newStaticClient(t, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
+
+	var calls int32
+	ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
+	// A foreign process takes over the lease the moment the record
+	// write starts, i.e. after the pre-write epoch gate has passed.
+	secrets.setHook = func(label string) {
+		if label == labelClient {
+			lease.holdOther()
+		}
+	}
+
+	if _, err := client.Register(context.Background(), regMetadata(ts, testIssuer)); !errors.Is(err, ErrLeaseContention) {
+		t.Fatalf("Register = %v, want ErrLeaseContention for the lost epoch", err)
+	}
+	if _, found, _ := secrets.GetSecret(labelClient); found {
+		t.Fatal("the stale record survived the lost epoch: it could pair with the winner's grant")
 	}
 }
 

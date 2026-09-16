@@ -220,6 +220,22 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	if err := c.storeClient(rec); err != nil {
 		return nil, err
 	}
+	// The write is uninterruptible and the renewal can fail while it
+	// is in flight: if the epoch is gone when the write returns, this
+	// stale record may have overwritten the winning process's
+	// registration. The credential backend cannot fence the write
+	// itself, so the commit is checked optimistically: the stale record
+	// is removed again, so the replacement can never be read as a ready
+	// pair, and the winner's flow re-registers on its next login.
+	if generation, ok, err := c.lease.LeaseGeneration(ctx, refreshLeaseName, c.owner); err != nil {
+		return nil, err
+	} else if !ok || generation != leaseGeneration {
+		lost := fmt.Errorf("%w: the refresh lease was lost during the client record write", ErrLeaseContention)
+		if delErr := c.secrets.DeleteSecret(labelClient); delErr != nil {
+			return nil, fmt.Errorf("%w: %w", lost, delErr)
+		}
+		return nil, lost
+	}
 	return rec, nil
 }
 
