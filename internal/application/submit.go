@@ -68,13 +68,9 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 	// The submission is durable; a lost progress event is not fatal because
 	// the await path re-derives progress from the stored state.
 	_ = s.appendAcceptedEvent(ctx, sub)
-	switch d.Strategy {
-	case catalog.StrategyUpstreamTask:
-		return contract.SubmitOutput{}, failed(contract.CodeNotImplemented,
-			"Task-backed operations are not enabled in this build.")
-	case catalog.StrategyLocalReplayable:
-		s.worker.Dispatch(sub.ID)
-	}
+	// The strategy gate above leaves only local_replayable reachable, so
+	// every durably accepted submission is dispatched to the leased worker.
+	s.worker.Dispatch(sub.ID)
 	return contract.SubmitOutput{
 		SubmissionID:    sub.ID,
 		Status:          sub.Status,
@@ -85,9 +81,14 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 }
 
 // strategyGate rejects execution strategies the initial production profiles
-// do not enable, before any durable acceptance or upstream mutation.
+// do not enable, before any durable acceptance, idempotency claim, or
+// upstream mutation. Rejected calls leave no row behind: the same
+// client_request_id stays free for a clean retry.
 func (s *Service) strategyGate(d catalog.Descriptor) *contract.Error {
 	switch d.Strategy {
+	case catalog.StrategyUpstreamTask:
+		return failed(contract.CodeNotImplemented,
+			"Task-backed operations are not enabled in this build.")
 	case catalog.StrategyLocalGuarded:
 		return failed(contract.CodeOperationNotAllowed,
 			"Operation %q requires a separately reviewed reconciliation contract and is not enabled.", d.Name)

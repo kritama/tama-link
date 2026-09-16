@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"path/filepath"
 	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -48,7 +47,7 @@ func runServe(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 		return 2
 	}
 
-	app, cleanup, err := buildApp(ctx, p, cfg.configDir)
+	app, cleanup, err := buildApp(ctx, p, cfg.configDir, credential.New)
 	if err != nil {
 		writef(stderr, "tama-link: %v\n", err)
 		return 2
@@ -63,22 +62,42 @@ func runServe(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 	return 0
 }
 
+// credentialOpener opens one profile's secure credential handle from its
+// canonical namespace. Production passes credential.New; tests substitute a
+// deterministic backend.
+type credentialOpener func(namespace string) (*credential.Keyring, error)
+
+// stateLayout resolves one profile's canonical durable state locations: the
+// profile-scoped database path and the credential namespace. Two named
+// profiles can never collapse onto one database or one credential space, no
+// matter how their state references are configured.
+func stateLayout(p *profile.Profile, configDir string) (dbPath string, namespace string, err error) {
+	stateRoot, err := profile.StateDir(configDir)
+	if err != nil {
+		return "", "", err
+	}
+	dbPath, err = profile.DatabasePath(stateRoot, p)
+	if err != nil {
+		return "", "", err
+	}
+	return dbPath, profile.CredentialNamespace(p), nil
+}
+
 // buildApp wires one profile's full application stack: secure credential
 // backend, encrypted state store, OAuth client, stateless upstream client,
 // verified adapter, leased worker, and the application service. The cleanup
 // callback shuts down the worker and closes the store.
-func buildApp(ctx context.Context, p *profile.Profile, configDir string) (server.App, func(), error) {
-	kr, err := credential.New(string(p.Name))
+func buildApp(ctx context.Context, p *profile.Profile, configDir string, open credentialOpener) (server.App, func(), error) {
+	dbPath, namespace, err := stateLayout(p, configDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	kr, err := open(namespace)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open credential backend: %w", err)
 	}
 
-	dir, err := profile.ConfigDir(configDir)
-	if err != nil {
-		return nil, nil, err
-	}
-	statePath := filepath.Join(dir, "state", p.State.Database+".db")
-	st, err := store.Open(ctx, statePath, kr, store.Config{Limits: p.EffectiveLimits()})
+	st, err := store.Open(ctx, dbPath, kr, store.Config{Limits: p.EffectiveLimits()})
 	if err != nil {
 		return nil, nil, fmt.Errorf("open state store: %w", err)
 	}

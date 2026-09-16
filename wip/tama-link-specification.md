@@ -450,6 +450,22 @@ configuration permissions must be restrictive. Retention and garbage
 collection must never remove a non-terminal submission merely because the
 downstream client disconnected.
 
+Successful `submit` means Tama Link durably accepted responsibility for
+executing the operation, and that acceptance must always reach execution or a
+terminal state without a process restart. The in-memory worker queue is a
+prompt-start aid only: when it is saturated, a recurring durable sweep
+re-derives every runnable replayable submission from the store and re-offers
+it, so a dropped queue entry is rediscovered within one sweep interval. The
+lease remains the final single-winner guard across processes. A worker that
+has already published a terminal state releases its lease on a best-effort
+basis: the release is retried against transient SQLite contention and, if it
+still fails, is dropped rather than undoing the terminal transition, because
+a lease that outlives a terminal submission only lingers until its TTL
+expiry and can never shadow terminal work. A lease claim or transition that
+times out against the store's busy timeout is a transient condition, not a
+submission failure: startup recovery defers it and the recurring sweep
+retries it.
+
 The store must tolerate multiple Tama Link processes opening the same profile.
 SQLite uses WAL mode, bounded busy handling, transactional idempotency, and
 lease-based worker ownership. Every multi-statement write transaction begins
@@ -516,6 +532,17 @@ performs the authoritative per-operation validation at execution time. A later
 downstream protocol adapter may use a tagged `oneOf` schema when the negotiated
 client supports full JSON Schema composition; correctness must not depend on
 that richer presentation.
+
+Runtime validation is authoritative only within a reviewed assertion
+vocabulary: `type`, `properties`, `required`, `additionalProperties`
+(boolean or nested schema), `items`, `enum`, `const`, `minimum`, `maximum`,
+`minLength`, `maxLength`, `minItems`, `maxItems`, and `pattern`, plus the
+annotation keywords `title`, `description`, `examples`, `default`, `$schema`,
+and `$comment`. A pinned operation schema that uses any other assertion
+keyword — `oneOf`, `allOf`, `not`, `minProperties`, `uniqueItems`,
+`contains`, `exclusiveMinimum`, `dependentRequired`, or another — would be
+silently unenforced, so profile load fails closed and names the unsupported
+keyword, recursively, instead. Numeric bounds keep exact decimal semantics.
 
 Server instructions are composed from two clearly separated sources:
 

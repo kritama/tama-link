@@ -153,8 +153,14 @@ func TestSubmitUnexpectedTaskResultFailsContractMismatch(t *testing.T) {
 	if out.Error == nil || out.Error.Code != contract.CodeOperationContractMismatch {
 		t.Fatalf("error = %+v, want operation_contract_mismatch", out.Error)
 	}
-	if out.Error.Message == "" || out.Error.Retryable {
-		t.Fatalf("error = %+v, want non-retryable with a message", out.Error)
+	// The dedicated unexpected-task message, not the catalog-drift message:
+	// the two causes share a code but must stay distinguishable.
+	const want = "The upstream returned a task result for a pinned synchronous operation."
+	if out.Error.Message != want {
+		t.Fatalf("message = %q, want %q", out.Error.Message, want)
+	}
+	if out.Error.Retryable {
+		t.Fatalf("error = %+v, must not be retryable", out.Error)
 	}
 }
 

@@ -199,9 +199,7 @@ func (b *blockingKeyring) Keys() ([]string, error) { panic("unused") }
 
 func TestProbeTimesOutOnBlockingBackend(t *testing.T) {
 	blocking := &blockingKeyring{started: make(chan struct{})}
-	old := probeTimeout
-	probeTimeout = 200 * time.Millisecond
-	defer func() { probeTimeout = old }()
+	t.Setenv(probeTimeoutEnv, "200ms")
 
 	start := time.Now()
 	err := probeBackend("demo", blocking)

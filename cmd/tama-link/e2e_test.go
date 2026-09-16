@@ -103,52 +103,70 @@ func TestServeBinaryFailsCleanlyWithoutProfile(t *testing.T) {
 	}
 }
 
-// credentialBackendAvailable reports whether the platform credential
-// backend can complete an availability probe in this environment. Headless
-// runners without a secure service (or one that blocks on user interaction)
-// cannot run the durable-state serve path.
-func credentialBackendAvailable(t *testing.T) bool {
+// serveCredentialFailure runs serve with no reachable credential backend
+// and asserts the fail-closed contract: fast exit 2, empty stdout, and the
+// stable unavailable message on stderr.
+func serveCredentialFailure(t *testing.T, bin string) {
 	t.Helper()
-	_, err := credential.New("demo")
-	return err == nil
+	configDir := t.TempDir()
+	if err := writeDemoProfile(configDir); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(bin, "serve", "--profile", "demo", "--config-dir", configDir)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
+	select {
+	case err := <-done:
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok || exitErr.ExitCode() != 2 {
+			t.Fatalf("exit = %v, want code 2", err)
+		}
+	case <-time.After(25 * time.Second):
+		t.Fatal("serve did not fail fast without a credential backend")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "credential backend unavailable") {
+		t.Fatalf("stderr = %q, want credential backend unavailable", stderr.String())
+	}
 }
+
+// e2eKeyringEnv opts the handshake test into the real platform keyring.
+// Unset, the test is hermetic and headless-safe: the spawned serve process
+// starts with no D-Bus session behind it, so the keyring library registers
+// no secure backend at its init and the test can never trigger an
+// interactive unlock prompt.
+const e2eKeyringEnv = "TAMA_LINK_E2E_KEYRING"
 
 // TestServeBinaryStdioHandshake proves the Phase 0 exit criterion end to end:
 // serve starts the two-tool STDIO MCP server for an existing profile. When
 // the environment has no usable credential backend, the same command must
 // fail fast and cleanly instead of hanging.
+//
+// The branch is chosen by TAMA_LINK_E2E_KEYRING, never by probing the test
+// process's own keyring: the keyring library registers its backends in init
+// from the live environment and caches the session bus, so an in-process
+// probe would answer for the desktop, not for the headless serve process.
+// Unset (the CI default), the spawned serve sees a dead D-Bus socket and
+// must fail cleanly. Set to 1, the test runs the full handshake against the
+// real platform keyring; an interactive unlock prompt may appear and must
+// be answered within the probe bound.
 func TestServeBinaryStdioHandshake(t *testing.T) {
-	t.Parallel()
-
+	// Not parallel: the test pins environment for the spawned serve
+	// process.
+	hermetic := os.Getenv(e2eKeyringEnv) == ""
+	if hermetic {
+		t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+filepath.Join(t.TempDir(), "no-such-bus"))
+	}
+	t.Setenv(credential.ProbeTimeoutEnv, "15s")
 	bin := buildBinary(t)
 
-	if !credentialBackendAvailable(t) {
-		t.Log("credential backend unavailable; asserting clean failure")
-		var stdout, stderr bytes.Buffer
-		configDir := t.TempDir()
-		if err := writeDemoProfile(configDir); err != nil {
-			t.Fatalf("write profile: %v", err)
-		}
-		cmd := exec.Command(bin, "serve", "--profile", "demo", "--config-dir", configDir)
-		cmd.Stdout = &stdout
-		cmd.Stderr = &stderr
-		done := make(chan error, 1)
-		go func() { done <- cmd.Run() }()
-		select {
-		case err := <-done:
-			exitErr, ok := err.(*exec.ExitError)
-			if !ok || exitErr.ExitCode() != 2 {
-				t.Fatalf("exit = %v, want code 2", err)
-			}
-		case <-time.After(25 * time.Second):
-			t.Fatal("serve did not fail fast without a credential backend")
-		}
-		if stdout.Len() != 0 {
-			t.Fatalf("stdout = %q, want empty", stdout.String())
-		}
-		if !strings.Contains(stderr.String(), "credential backend unavailable") {
-			t.Fatalf("stderr = %q, want credential backend unavailable", stderr.String())
-		}
+	if hermetic {
+		serveCredentialFailure(t, bin)
 		return
 	}
 

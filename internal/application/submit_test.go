@@ -64,8 +64,8 @@ func TestSubmitRejectedCases(t *testing.T) {
 		{
 			name: "arguments fail client schema",
 			in: contract.SubmitInput{
-				Tool: "message", ClientRequestID: "r-2",
-				Arguments: json.RawMessage(`{"message":""}`),
+				Tool: "status", ClientRequestID: "r-2",
+				Arguments: json.RawMessage(`{"detail":5}`),
 			},
 			want: contract.CodeInvalidRequest,
 		},
@@ -73,6 +73,24 @@ func TestSubmitRejectedCases(t *testing.T) {
 			name: "arguments not an object",
 			in:   contract.SubmitInput{Tool: "status", ClientRequestID: "r-3", Arguments: json.RawMessage(`[1]`)},
 			want: contract.CodeInvalidRequest,
+		},
+		{
+			name: "task-backed operation not enabled",
+			in: contract.SubmitInput{
+				Tool: "message", ClientRequestID: "r-4",
+				Arguments: json.RawMessage(`{"message":"hi"}`),
+			},
+			want: contract.CodeNotImplemented,
+		},
+		{
+			name: "guarded operation rejected before upstream",
+			in:   contract.SubmitInput{Tool: "guarded", ClientRequestID: "r-5", Arguments: json.RawMessage(`{"note":"n"}`)},
+			want: contract.CodeOperationNotAllowed,
+		},
+		{
+			name: "unsupported operation rejected before upstream",
+			in:   contract.SubmitInput{Tool: "unstable", ClientRequestID: "r-6", Arguments: json.RawMessage(`{"note":"n"}`)},
+			want: contract.CodeOperationNotAllowed,
 		},
 	}
 	for _, tc := range cases {
@@ -102,6 +120,38 @@ func TestSubmitTaskToolNotEnabled(t *testing.T) {
 	if f.calls.Load() != 0 {
 		t.Fatalf("fixture upstream was touched: %d calls", f.calls.Load())
 	}
+}
+
+// TestSubmitRejectionsLeaveNoTrace proves that every strategy-gated or
+// schema-rejected call creates no durable submission and claims no
+// idempotency key: the same client_request_id stays free for a clean retry
+// with different arguments, and the upstream is never touched.
+func TestSubmitRejectionsLeaveNoTrace(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, _, _ := fixtureApp(t, f)
+
+	rejected := []contract.SubmitInput{
+		{Tool: "message", ClientRequestID: "clean-1", Arguments: json.RawMessage(`{"message":"hi"}`)},
+		{Tool: "guarded", ClientRequestID: "clean-1", Arguments: json.RawMessage(`{"note":"n"}`)},
+		{Tool: "unstable", ClientRequestID: "clean-1", Arguments: json.RawMessage(`{"note":"n"}`)},
+		{Tool: "status", ClientRequestID: "clean-1", Arguments: json.RawMessage(`{"detail":5}`)},
+	}
+	for _, in := range rejected {
+		if _, appErr := svc.Submit(context.Background(), in); appErr == nil {
+			t.Fatalf("submit %s was accepted, want rejection", in.Tool)
+		}
+	}
+	if calls := f.calls.Load(); calls != 0 {
+		t.Fatalf("fixture upstream was touched: %d calls", calls)
+	}
+
+	// If any rejected call had claimed the id, this replayable resubmission
+	// with different arguments would hit the idempotency conflict instead of
+	// a clean acceptance.
+	id := submitStatus(t, svc, "clean-1")
+	awaitTerminal(t, svc, id)
 }
 
 func TestSubmitIdempotency(t *testing.T) {

@@ -6,14 +6,100 @@ import (
 	"regexp"
 )
 
-// ValidateAgainstSchema validates one JSON value against the reviewed subset
-// of JSON Schema keywords Tama Link pins: type, properties, required,
-// additionalProperties (boolean), items, enum, const, minimum, maximum,
-// minLength, maxLength, minItems, maxItems, and pattern. Unknown keywords are
-// ignored: the pinned schema is the security boundary and the upstream server
-// re-validates, so the validator only rejects values the pinned schema
-// clearly forbids. Numbers are compared through their exact decimal text,
-// never through float64.
+// enforcedKeywords is the complete set of assertion keywords the runtime
+// validator enforces. annotationKeywords are carried but never asserted.
+// Every other JSON Schema keyword would be silently unenforced, so
+// CheckSchemaVocabulary rejects it at profile load instead (see there).
+var enforcedKeywords = map[string]bool{
+	"type":                 true,
+	"properties":           true,
+	"required":             true,
+	"additionalProperties": true,
+	"items":                true,
+	"enum":                 true,
+	"const":                true,
+	"minimum":              true,
+	"maximum":              true,
+	"minLength":            true,
+	"maxLength":            true,
+	"minItems":             true,
+	"maxItems":             true,
+	"pattern":              true,
+}
+
+var annotationKeywords = map[string]bool{
+	"title":       true,
+	"description": true,
+	"examples":    true,
+	"default":     true,
+	"$schema":     true,
+	"$comment":    true,
+}
+
+// CheckSchemaVocabulary walks one pinned schema and rejects any assertion
+// keyword the runtime validator does not enforce, including keywords nested
+// behind properties, items, and schema-form additionalProperties. A profile
+// that pins oneOf, allOf, not, minProperties, uniqueItems, contains,
+// exclusiveMinimum, dependentRequired, or another unsupported assertion fails
+// closed at load; it can never be silently accepted with the assertion
+// unenforced. Called once per descriptor schema during profile validation.
+func CheckSchemaVocabulary(schema json.RawMessage) error {
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(schema, &members); err != nil {
+		return fmt.Errorf("schema is not a JSON object: %w", err)
+	}
+	return checkVocabulary(members, "$")
+}
+
+func checkVocabulary(members map[string]json.RawMessage, path string) error {
+	for name := range members {
+		if !enforcedKeywords[name] && !annotationKeywords[name] {
+			return fmt.Errorf("%s uses the unsupported schema keyword %q", path, name)
+		}
+	}
+	if props, ok := members["properties"]; ok {
+		var children map[string]json.RawMessage
+		if err := json.Unmarshal(props, &children); err != nil {
+			return fmt.Errorf("%s.properties is not an object: %w", path, err)
+		}
+		for name, child := range children {
+			var childMembers map[string]json.RawMessage
+			if err := json.Unmarshal(child, &childMembers); err != nil {
+				return fmt.Errorf("%s.properties.%s is not an object: %w", path, name, err)
+			}
+			if err := checkVocabulary(childMembers, path+".properties."+name); err != nil {
+				return err
+			}
+		}
+	}
+	if items, ok := members["items"]; ok {
+		var itemMembers map[string]json.RawMessage
+		if err := json.Unmarshal(items, &itemMembers); err != nil {
+			return fmt.Errorf("%s.items is not an object: %w", path, err)
+		}
+		if err := checkVocabulary(itemMembers, path+".items"); err != nil {
+			return err
+		}
+	}
+	if addl, ok := members["additionalProperties"]; ok && len(trimJSON(addl)) > 0 && trimJSON(addl)[0] == '{' {
+		var addlMembers map[string]json.RawMessage
+		if err := json.Unmarshal(addl, &addlMembers); err != nil {
+			return fmt.Errorf("%s.additionalProperties is not a boolean or a schema: %w", path, err)
+		}
+		if err := checkVocabulary(addlMembers, path+".additionalProperties"); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateAgainstSchema validates one JSON value against the pinned schema's
+// enforced vocabulary: type, properties, required, additionalProperties
+// (boolean or nested schema), items, enum, const, minimum, maximum,
+// minLength, maxLength, minItems, maxItems, and pattern. Pinned schemas may
+// only use this vocabulary: CheckSchemaVocabulary rejects any other assertion
+// keyword at profile load, so nothing unenforced can reach runtime. Numbers
+// are compared through their exact decimal text, never through float64.
 func ValidateAgainstSchema(schema, value json.RawMessage) error {
 	var s schemaView
 	if err := json.Unmarshal(schema, &s); err != nil {
@@ -27,7 +113,7 @@ type schemaView struct {
 	Type                 json.RawMessage            `json:"type"`
 	Properties           map[string]json.RawMessage `json:"properties"`
 	Required             []string                   `json:"required"`
-	AdditionalProperties *bool                      `json:"additionalProperties"`
+	AdditionalProperties json.RawMessage            `json:"additionalProperties"`
 	Items                json.RawMessage            `json:"items"`
 	Enum                 []json.RawMessage          `json:"enum"`
 	Const                json.RawMessage            `json:"const"`
@@ -143,7 +229,19 @@ func (s *schemaView) validateObject(value json.RawMessage, path string) error {
 			return err
 		}
 	}
-	if s.AdditionalProperties != nil && !*s.AdditionalProperties {
+	return s.validateAdditional(members, path)
+}
+
+// validateAdditional enforces the pinned additionalProperties constraint:
+// false rejects unknown properties, true admits them, and a nested schema
+// validates every unknown property.
+func (s *schemaView) validateAdditional(members map[string]json.RawMessage, path string) error {
+	if s.AdditionalProperties == nil {
+		return nil
+	}
+	trimmed := trimJSON(s.AdditionalProperties)
+	switch {
+	case string(trimmed) == "false":
 		known := make(map[string]bool, len(s.Properties))
 		for name := range s.Properties {
 			known[name] = true
@@ -153,6 +251,27 @@ func (s *schemaView) validateObject(value json.RawMessage, path string) error {
 				return fmt.Errorf("%s has the unapproved property %q", path, name)
 			}
 		}
+	case string(trimmed) == "true":
+		return nil
+	case bytesStartsWith(trimmed, "{"):
+		var childView schemaView
+		if err := json.Unmarshal(s.AdditionalProperties, &childView); err != nil {
+			return fmt.Errorf("%s.additionalProperties is a malformed schema: %w", path, err)
+		}
+		known := make(map[string]bool, len(s.Properties))
+		for name := range s.Properties {
+			known[name] = true
+		}
+		for name, child := range members {
+			if known[name] {
+				continue
+			}
+			if err := childView.validate(child, path+"."+name); err != nil {
+				return err
+			}
+		}
+	default:
+		return fmt.Errorf("%s.additionalProperties is not a boolean or a schema", path)
 	}
 	return nil
 }

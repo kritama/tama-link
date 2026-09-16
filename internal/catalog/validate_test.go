@@ -99,10 +99,114 @@ func TestValidateAgainstSchemaPattern(t *testing.T) {
 	validateTable(t, schema, `"A"`, "pattern")
 }
 
-func TestValidateAgainstSchemaIgnoresUnknownKeywords(t *testing.T) {
-	// Keywords outside the reviewed subset must not reject a matching value.
-	schema := `{"type":"object","$id":"x","description":"y","default":{}}`
+func TestValidateAgainstSchemaIgnoresAnnotationKeywords(t *testing.T) {
+	// Annotation keywords carry no assertion and never reject a matching
+	// value. Assertion keywords outside the enforced vocabulary are rejected
+	// earlier, at profile load, by CheckSchemaVocabulary.
+	schema := `{"type":"object","description":"y","default":{}}`
 	validateTable(t, schema, `{}`, "")
+}
+
+func TestValidateAgainstSchemaNestedAdditionalProperties(t *testing.T) {
+	schema := `{
+		"type": "object",
+		"properties": {"known": {"type": "string"}},
+		"additionalProperties": {"type": "integer", "minimum": 0}
+	}`
+	validateTable(t, schema, `{"known":"a","x":1}`, "")
+	validateTable(t, schema, `{"x":-1}`, "below the pinned minimum")
+	validateTable(t, schema, `{"x":"s"}`, "type")
+}
+
+func TestCheckSchemaVocabularyRejectsUnsupportedAssertions(t *testing.T) {
+	for _, keyword := range []string{
+		"oneOf", "allOf", "anyOf", "not", "if",
+		"minProperties", "maxProperties", "uniqueItems", "contains",
+		"exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+		"dependentRequired", "patternProperties", "format", "$id",
+	} {
+		schema := `{"type":"object","` + keyword + `":{}}`
+		if err := CheckSchemaVocabulary(json.RawMessage(schema)); err == nil ||
+			!strings.Contains(err.Error(), keyword) {
+			t.Fatalf("keyword %s: err = %v, want rejection naming the keyword", keyword, err)
+		}
+	}
+}
+
+func TestCheckSchemaVocabularyRejectsNestedAssertions(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema string
+		want   string
+	}{
+		{"inside property",
+			`{"type":"object","properties":{"a":{"type":"string","minLength":1,"uniqueItems":true}}}`,
+			"$.properties.a"},
+		{"inside items",
+			`{"type":"array","items":{"type":"object","not":{}}}`,
+			"$.items"},
+		{"inside schema additionalProperties",
+			`{"type":"object","additionalProperties":{"type":"string","maxLength":2,"minProperties":1}}`,
+			"$.additionalProperties"},
+		{"deeply nested",
+			`{"type":"object","properties":{"a":{"type":"array","items":{"allOf":[]}}}}`,
+			"$.properties.a.items"},
+	}
+	for _, tc := range cases {
+		err := CheckSchemaVocabulary(json.RawMessage(tc.schema))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: err = %v, want path %q named", tc.name, err, tc.want)
+		}
+	}
+}
+
+func TestCheckSchemaVocabularyAcceptsEnforcedVocabulary(t *testing.T) {
+	schema := `{
+		"type": "object",
+		"title": "T",
+		"description": "D",
+		"required": ["message"],
+		"properties": {
+			"message": {"type": "string", "minLength": 1, "maxLength": 32, "pattern": "^[a-z]+$"},
+			"count": {"type": "integer", "minimum": 0, "maximum": 10},
+			"tags": {"type": "array", "items": {"type": "string"}, "maxItems": 2},
+			"mode": {"enum": ["a", "b"]}
+		},
+		"additionalProperties": false
+	}`
+	if err := CheckSchemaVocabulary(json.RawMessage(schema)); err != nil {
+		t.Fatalf("full enforced vocabulary rejected: %v", err)
+	}
+}
+
+func TestDescriptorValidationRejectsUnsupportedAssertion(t *testing.T) {
+	d := Descriptor{
+		Name:        "op",
+		InputSchema: json.RawMessage(`{"type":"object","oneOf":[]}`),
+		TaskSupport: TaskSupportForbidden,
+		Strategy:    StrategyLocalReplayable,
+	}
+	if digest, err := d.ComputeDigest(); err != nil {
+		t.Fatalf("digest: %v", err)
+	} else {
+		d.Digest = digest
+	}
+	err := d.Validate()
+	if err == nil || !strings.Contains(err.Error(), "oneOf") {
+		t.Fatalf("Validate = %v, want rejection naming oneOf", err)
+	}
+
+	// The same assertion nested one level deeper must be rejected too.
+	d.InputSchema = json.RawMessage(`{"type":"object","properties":{"a":{"uniqueItems":true}}}`)
+	d.Digest = "" // recomputed below
+	if digest, err := d.ComputeDigest(); err != nil {
+		t.Fatalf("digest: %v", err)
+	} else {
+		d.Digest = digest
+	}
+	if err := d.Validate(); err == nil || !strings.Contains(err.Error(), "uniqueItems") {
+		t.Fatalf("Validate = %v, want rejection naming uniqueItems", err)
+	}
 }
 
 func TestValidateAgainstSchemaRejectsMalformedSchema(t *testing.T) {

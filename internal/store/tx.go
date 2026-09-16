@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 )
 
 // writeTx is one IMMEDIATE write transaction on a dedicated pooled
@@ -25,17 +27,34 @@ type writeTx struct {
 func (s *Store) beginWriteTx(ctx context.Context) (*writeTx, error) {
 	conn, err := s.db.Conn(ctx)
 	if err != nil {
-		return nil, err
+		return nil, wrapBusy(err)
 	}
 	if _, err := conn.ExecContext(ctx, "BEGIN IMMEDIATE"); err != nil {
 		_ = conn.Close()
-		return nil, err
+		return nil, wrapBusy(err)
 	}
 	return &writeTx{conn: conn}, nil
 }
 
 func (w *writeTx) ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error) {
-	return w.conn.ExecContext(ctx, query, args...)
+	res, err := w.conn.ExecContext(ctx, query, args...)
+	return res, wrapBusy(err)
+}
+
+// exec runs one autocommit write statement, tagging any write-lock
+// timeout for callers that can defer the work.
+func (s *Store) exec(ctx context.Context, query string, args ...any) (sql.Result, error) {
+	res, err := s.db.ExecContext(ctx, query, args...)
+	return res, wrapBusy(err)
+}
+
+// wrapBusy tags a write-lock timeout so callers can distinguish a
+// transiently busy store from a real state failure.
+func wrapBusy(err error) error {
+	if err == nil || !strings.Contains(err.Error(), "SQLITE_BUSY") {
+		return err
+	}
+	return fmt.Errorf("%w: %v", ErrBusy, err)
 }
 
 func (w *writeTx) QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error) {

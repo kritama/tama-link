@@ -19,6 +19,10 @@ import (
 var (
 	// ErrLeaseHeld reports that another process currently owns the submission.
 	ErrLeaseHeld = errors.New("submission lease held by another worker")
+	// ErrNotRunnable reports that a listed submission no longer needs local
+	// execution: another worker or the sweep already advanced it past the
+	// runnable states. It is progress, not a failure.
+	ErrNotRunnable = errors.New("submission not runnable")
 	// ErrLeaseLost reports that this worker could not renew its ownership.
 	ErrLeaseLost = errors.New("submission lease lost")
 )
@@ -43,10 +47,15 @@ type Executor interface {
 	Execute(context.Context, *store.Submission) (contract.Result, error)
 }
 
-// Config defines one worker identity and lease duration.
+// Config defines one worker identity, lease duration, and sweep cadence.
 type Config struct {
 	Owner    string
 	LeaseTTL time.Duration
+
+	// SweepInterval bounds how long an accepted replayable submission can
+	// wait to be rediscovered from the durable store when the in-memory
+	// queue was saturated. Zero selects the default.
+	SweepInterval time.Duration
 }
 
 // Runner coordinates durable state, lease ownership, and execution.
@@ -86,11 +95,14 @@ func (r *Runner) Run(ctx context.Context, id string) (runErr error) {
 		return ErrLeaseHeld
 	}
 	defer func() {
+		// The release runs on every path: a cancelled or failed run must give
+		// its lease back so recovery can re-claim the still-replayable
+		// submission. It is best effort with bounded retries — a lease that
+		// survives them only lingers until TTL expiry, and a submission whose
+		// terminal state is already published can never be shadowed by it.
 		releaseCtx, cancelRelease := context.WithTimeout(context.Background(), r.ttl)
 		defer cancelRelease()
-		if err := r.state.ReleaseLease(releaseCtx, leaseName, leaseOwner); runErr == nil && err != nil {
-			runErr = fmt.Errorf("release submission %s: %w", id, err)
-		}
+		_ = r.releaseLease(releaseCtx, leaseName, leaseOwner)
 	}()
 
 	execCtx, cancel := context.WithCancel(ctx)
@@ -130,12 +142,36 @@ func (r *Runner) Run(ctx context.Context, id string) (runErr error) {
 	return err
 }
 
+// releaseLease retries the lease release against transient SQLite
+// contention and gives up quietly: the caller has already published a
+// terminal state, and the lease expires on its own.
+func (r *Runner) releaseLease(ctx context.Context, leaseName, leaseOwner string) error {
+	var err error
+	for attempt := 0; attempt < 3; attempt++ {
+		if err = r.state.ReleaseLease(ctx, leaseName, leaseOwner); err == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return err
+		case <-time.After(200 * time.Millisecond):
+		}
+	}
+	return err
+}
+
 func invocationOwner(base string) (string, error) {
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", err
 	}
 	return base + "/" + hex.EncodeToString(nonce[:]), nil
+}
+
+// Runnable lists every durable submission the local worker may execute: the
+// replayable strategy in a non-terminal state, oldest first.
+func (r *Runner) Runnable(ctx context.Context) ([]string, error) {
+	return r.state.ListRunnable(ctx, string(catalog.StrategyLocalReplayable))
 }
 
 // Recover executes all pending locally replayable submissions. Live leases are
@@ -147,7 +183,10 @@ func (r *Runner) Recover(ctx context.Context) error {
 	}
 	var failures []error
 	for _, id := range ids {
-		if err := r.Run(ctx, id); err != nil && !errors.Is(err, ErrLeaseHeld) {
+		if err := r.Run(ctx, id); err != nil &&
+			!errors.Is(err, ErrLeaseHeld) &&
+			!errors.Is(err, ErrNotRunnable) &&
+			!errors.Is(err, store.ErrBusy) {
 			failures = append(failures, fmt.Errorf("recover %s: %w", id, err))
 		}
 	}
@@ -177,7 +216,7 @@ func (r *Runner) prepare(ctx context.Context, id, leaseName, leaseOwner string) 
 	case contract.StatusRunning:
 		// A recovered replayable operation is deliberately executed again.
 	default:
-		return nil, fmt.Errorf("submission %s is not runnable in state %s", id, sub.Status)
+		return nil, fmt.Errorf("%w: submission %s is in state %s", ErrNotRunnable, id, sub.Status)
 	}
 	owned, err := r.renewOnce(ctx, leaseName, leaseOwner)
 	if err != nil {

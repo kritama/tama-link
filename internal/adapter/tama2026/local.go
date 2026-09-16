@@ -32,7 +32,7 @@ func (cn *Connection) ExecuteLocal(ctx context.Context, name string, args json.R
 		return nil, classify(err)
 	}
 	if resp.IsTask() {
-		return nil, fmt.Errorf("%w: synchronous tool %q returned a task result", ErrCatalogMismatch, d.Name)
+		return nil, fmt.Errorf("%w: synchronous tool %q returned a task result", ErrUnexpectedTaskResult, d.Name)
 	}
 	result, err := NormalizeCompleteResult(resp.Raw)
 	if err != nil {

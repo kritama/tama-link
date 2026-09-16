@@ -32,6 +32,10 @@ const fixtureInstructions = "Fixture instructions."
 const statusToolSchema = `{"type":"object","properties":{"detail":{"type":"string"}}}`
 const statusOutSchema = `{"type":"object","properties":{"ok":{"type":"boolean"}},"required":["ok"]}`
 
+// noteToolSchema and noteOutSchema pin the guarded and unsupported tools.
+const noteToolSchema = `{"type":"object","properties":{"note":{"type":"string"}}}`
+const noteOutSchema = `{"type":"object","properties":{"status":{"type":"string"}}}`
+
 // fakeTama is a fixture TamaMCP 2026 upstream with per-tool behavior.
 type fakeTama struct {
 	ts *httptest.Server
@@ -70,7 +74,9 @@ func newFakeTama(t *testing.T) *fakeTama {
 		case "tools/list":
 			writeFake(w, id, `{"resultType":"complete","tools":[
 				{"name":"status","description":"Read status","inputSchema":`+statusToolSchema+`,"outputSchema":`+statusOutSchema+`},
-				{"name":"message","description":"Send a message","inputSchema":{"type":"object","properties":{"message":{"type":"string","minLength":1}},"required":["message"]},"outputSchema":{"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}}
+				{"name":"message","description":"Send a message","inputSchema":{"type":"object","properties":{"message":{"type":"string","minLength":1}},"required":["message"]},"outputSchema":{"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}},
+				{"name":"guarded","description":"Guarded mutation","inputSchema":`+noteToolSchema+`,"outputSchema":`+noteOutSchema+`},
+				{"name":"unstable","description":"Unsupported placeholder","inputSchema":`+noteToolSchema+`,"outputSchema":`+noteOutSchema+`}
 			]}`)
 		case "tools/call":
 			f.calls.Add(1)
@@ -169,7 +175,23 @@ func fixtureProfile(t *testing.T, endpoint string) *profile.Profile {
 		TaskSupport:  catalog.TaskSupportRequired,
 		Strategy:     catalog.StrategyUpstreamTask,
 	}
-	for _, d := range []*catalog.Descriptor{&status, &message} {
+	guarded := catalog.Descriptor{
+		Name:         "guarded",
+		Description:  "Guarded mutation",
+		InputSchema:  json.RawMessage(noteToolSchema),
+		OutputSchema: json.RawMessage(noteOutSchema),
+		TaskSupport:  catalog.TaskSupportForbidden,
+		Strategy:     catalog.StrategyLocalGuarded,
+	}
+	unstable := catalog.Descriptor{
+		Name:         "unstable",
+		Description:  "Unsupported placeholder",
+		InputSchema:  json.RawMessage(noteToolSchema),
+		OutputSchema: json.RawMessage(noteOutSchema),
+		TaskSupport:  catalog.TaskSupportForbidden,
+		Strategy:     catalog.StrategyUnsupported,
+	}
+	for _, d := range []*catalog.Descriptor{&status, &message, &guarded, &unstable} {
 		digest, err := d.ComputeDigest()
 		if err != nil {
 			t.Fatalf("digest: %v", err)
@@ -185,7 +207,7 @@ func fixtureProfile(t *testing.T, endpoint string) *profile.Profile {
 		Instructions: fixtureInstructions,
 		Bounds:       profile.Bounds{ProtocolMin: "2026-07-28", ProtocolMax: "2026-07-28"},
 		State:        profile.StateRefs{Database: "fixture", Credentials: "fixture"},
-		Operations:   []catalog.Descriptor{status, message},
+		Operations:   []catalog.Descriptor{status, message, guarded, unstable},
 	}
 	return p
 }

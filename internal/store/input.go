@@ -47,7 +47,7 @@ func (s *Store) SetInputResponse(ctx context.Context, submissionID, requestID st
 	if err != nil {
 		return fmt.Errorf("seal input response: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := s.exec(ctx, `
 		INSERT INTO input_responses (submission_id, request_id, response_enc, answered_at)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(submission_id, request_id) DO NOTHING`,
@@ -65,7 +65,7 @@ func (s *Store) AttachTaskID(ctx context.Context, submissionID, taskID string) e
 	if submissionID == "" || taskID == "" {
 		return errors.New("submission id and task id are required")
 	}
-	if _, err := s.db.ExecContext(ctx, `
+	if _, err := s.exec(ctx, `
 		UPDATE submissions SET task_id = ?, updated_at = ?
 		WHERE submission_id = ? AND (task_id IS NULL OR task_id = '' OR task_id = ?)`,
 		taskID, s.now().UnixMilli(), submissionID, taskID); err != nil {

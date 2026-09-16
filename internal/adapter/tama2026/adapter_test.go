@@ -380,6 +380,26 @@ func TestExecuteLocalStrategyRejected(t *testing.T) {
 	}
 }
 
+// TestExecuteLocalRejectsTaskResult pins the distinct sentinel: a task
+// envelope for a synchronous tool is an operation-contract violation, not
+// catalog drift.
+func TestExecuteLocalRejectsTaskResult(t *testing.T) {
+	server := newTamaServer(t)
+	// The fixture's default tools/call reply is a task envelope.
+	adapter := newTestAdapter(t, server, pinnedMessage(catalog.StrategyLocalReplayable, catalog.TaskSupportForbidden))
+	cn, err := adapter.Connect(context.Background())
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	_, err = cn.ExecuteLocal(context.Background(), "message", json.RawMessage(`{}`))
+	if !errors.Is(err, ErrUnexpectedTaskResult) {
+		t.Fatalf("err = %v, want ErrUnexpectedTaskResult", err)
+	}
+	if errors.Is(err, ErrCatalogMismatch) {
+		t.Fatalf("err must not report catalog drift: %v", err)
+	}
+}
+
 // assertCallCapabilities checks the per-request _meta capabilities on the
 // wire: the Tasks extension present exactly when the descriptor allows it.
 func assertCallCapabilities(t *testing.T, server *tamaServer, wantTasks bool) {
