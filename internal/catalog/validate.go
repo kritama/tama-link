@@ -1,11 +1,13 @@
 package catalog
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"regexp"
 	"unicode/utf8"
+
+	"github.com/cockroachdb/apd/v3"
 )
 
 // ValidateAgainstSchema validates one JSON value against the pinned schema's
@@ -51,13 +53,6 @@ func (s *schemaView) validate(value json.RawMessage, path string) error {
 			return err
 		}
 	}
-	// Pinned required properties can only be checked on an object. A
-	// non-object value fails here whenever required is present, regardless
-	// of whether a type assertion was absent, already rejected the value,
-	// or even accepted the kind (for example a null-typed value).
-	if len(s.Required) > 0 && kind != jsonKindObject {
-		return fmt.Errorf("%s has type %s, but required properties are pinned, which require an object", path, kind)
-	}
 	switch kind {
 	case jsonKindObject:
 		if err := s.validateObject(trimmed, path); err != nil {
@@ -76,12 +71,19 @@ func (s *schemaView) validate(value json.RawMessage, path string) error {
 			return err
 		}
 	}
-	if s.Const != nil && !jsonValuesEqual(trimmed, s.Const) {
-		return fmt.Errorf("%s does not match the pinned const", path)
+	if s.Const != nil {
+		eq, err := jsonInstanceEqual(trimmed, s.Const)
+		if err != nil {
+			return fmt.Errorf("%s does not match the pinned const: %v", path, err)
+		}
+		if !eq {
+			return fmt.Errorf("%s does not match the pinned const", path)
+		}
 	}
 	if len(s.Enum) > 0 {
 		for _, option := range s.Enum {
-			if jsonValuesEqual(trimmed, option) {
+			eq, err := jsonInstanceEqual(trimmed, option)
+			if err == nil && eq {
 				return nil
 			}
 		}
@@ -135,12 +137,12 @@ func (s *schemaView) validateObject(value json.RawMessage, path string) error {
 	if err := json.Unmarshal(value, &members); err != nil {
 		return fmt.Errorf("%s is not a JSON object: %w", path, err)
 	}
+	// required checks map-key presence only, per JSON Schema: a present
+	// property whose value is an explicit JSON null satisfies the
+	// requirement, and the property's own schema decides whether null is
+	// permitted. No default annotation fills a missing property.
 	for _, name := range s.Required {
-		// A required property present only as an explicit JSON null does not
-		// satisfy the requirement: no default annotation fills it in, so the
-		// value is missing either way.
-		raw, ok := members[name]
-		if !ok || isNullRaw(raw) {
+		if _, ok := members[name]; !ok {
 			return fmt.Errorf("%s is missing the required property %q", path, name)
 		}
 	}
@@ -256,23 +258,29 @@ func (s *schemaView) validateString(value json.RawMessage, path string) error {
 }
 
 func (s *schemaView) validateNumber(value json.RawMessage, path string) error {
-	neg, intPart, fracPart := normalizeNumber(value)
-	if s.Minimum != nil && compareNormalized(neg, intPart, fracPart, s.Minimum.neg, s.Minimum.intPart, s.Minimum.fracPart) < 0 {
+	if s.Minimum == nil && s.Maximum == nil {
+		return nil
+	}
+	num, err := parseJSONNumber(value)
+	if err != nil {
+		return fmt.Errorf("%s: %v", path, err)
+	}
+	if s.Minimum != nil && num.Cmp(s.Minimum.dec) < 0 {
 		return fmt.Errorf("%s is below the pinned minimum", path)
 	}
-	if s.Maximum != nil && compareNormalized(neg, intPart, fracPart, s.Maximum.neg, s.Maximum.intPart, s.Maximum.fracPart) > 0 {
+	if s.Maximum != nil && num.Cmp(s.Maximum.dec) > 0 {
 		return fmt.Errorf("%s is above the pinned maximum", path)
 	}
 	return nil
 }
 
-// numberText is a JSON Schema numeric bound normalized to exact sign and
-// decimal digits, so comparison never routes through float64. It accepts the
-// complete JSON number grammar, including exponent form.
+// numberText is a JSON Schema numeric bound in exact arbitrary-precision
+// decimal form, so comparison never routes through float64 and never
+// allocates in proportion to the exponent magnitude. It accepts the
+// complete JSON number grammar, including exponent form, within the
+// reviewed exponent range.
 type numberText struct {
-	neg      bool
-	intPart  []byte
-	fracPart []byte
+	dec *apd.Decimal
 }
 
 func (n *numberText) UnmarshalJSON(raw []byte) error {
@@ -280,7 +288,11 @@ func (n *numberText) UnmarshalJSON(raw []byte) error {
 	if !isJSONNumber(trimmed) {
 		return fmt.Errorf("bound is not a JSON number")
 	}
-	n.neg, n.intPart, n.fracPart = normalizeNumber(trimmed)
+	dec, err := parseJSONNumber(trimmed)
+	if err != nil {
+		return err
+	}
+	n.dec = dec
 	return nil
 }
 
@@ -314,183 +326,36 @@ func valueKind(trimmed []byte) jsonKind {
 	return "unknown"
 }
 
-// isIntegerLiteral reports whether a number literal denotes an integer: no
-// fractional digits remain after the exponent is applied (1e2 and 15.0 are
-// integers, 1e-1 and 1.5 are not).
+// isIntegerLiteral reports whether a number literal denotes an integer
+// (1e2 and 15.0 are integers, 1e-1 and 1.5 are not), through the exact
+// decimal model. A literal whose exponent is outside the reviewed range
+// cannot be evaluated and therefore does not match.
 func isIntegerLiteral(value []byte) bool {
 	if !isJSONNumber(trimJSON(value)) {
 		return false
 	}
-	_, _, fracPart := normalizeNumber(value)
-	return len(fracPart) == 0
+	dec, err := parseJSONNumber(value)
+	if err != nil {
+		return false
+	}
+	return isExactInteger(dec)
 }
 
-// normalizeNumber reduces one JSON number literal — any valid form, including
-// exponent form — to a sign plus exact integer and fractional digits. The
-// exponent is applied by shifting the decimal point with zero padding, so
-// numeric comparison never routes through float64.
-func normalizeNumber(value []byte) (neg bool, intPart, fracPart []byte) {
-	text := trimJSON(value)
-	i := 0
-	if text[0] == '-' {
-		neg = true
-		i++
+// isExactInteger reports whether one exact decimal denotes an integer value:
+// a non-negative exponent is always integral, and a negative exponent is
+// integral exactly when the coefficient is divisible by 10 to that scale.
+func isExactInteger(dec *apd.Decimal) bool {
+	if dec.Form != apd.Finite || dec.Exponent >= 0 {
+		return dec.Form == apd.Finite
 	}
-	j := i
-	for j < len(text) && text[j] >= '0' && text[j] <= '9' {
-		j++
+	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-dec.Exponent)), nil)
+	coeff, ok := new(big.Int).SetString(dec.Coeff.String(), 10)
+	if !ok {
+		return false
 	}
-	intDigits := text[i:j]
-	var fracDigits []byte
-	if j < len(text) && text[j] == '.' {
-		j++
-		k := j
-		for k < len(text) && text[k] >= '0' && text[k] <= '9' {
-			k++
-		}
-		fracDigits = text[j:k]
-		j = k
-	}
-	exp := 0
-	if j < len(text) && (text[j] == 'e' || text[j] == 'E') {
-		expText := text[j+1:]
-		eStart := 0
-		expNeg := false
-		if eStart < len(expText) && (expText[eStart] == '+' || expText[eStart] == '-') {
-			expNeg = expText[eStart] == '-'
-			eStart++
-		}
-		for _, c := range expText[eStart:] {
-			exp = exp*10 + int(c-'0')
-		}
-		if expNeg {
-			exp = -exp
-		}
-	}
-
-	if exp >= 0 {
-		if exp <= len(fracDigits) {
-			intPart = append(append([]byte{}, intDigits...), fracDigits[:exp]...)
-			fracPart = append([]byte{}, fracDigits[exp:]...)
-		} else {
-			intPart = append(append(append([]byte{}, intDigits...), fracDigits...),
-				bytes.Repeat([]byte("0"), exp-len(fracDigits))...)
-		}
-	} else {
-		shift := -exp
-		if shift <= len(intDigits) {
-			intPart = append([]byte{}, intDigits[:len(intDigits)-shift]...)
-			fracPart = append(append([]byte{}, intDigits[len(intDigits)-shift:]...), fracDigits...)
-		} else {
-			intPart = []byte("0")
-			fracPart = append(append(bytes.Repeat([]byte("0"), shift-len(intDigits)), intDigits...), fracDigits...)
-		}
-	}
-
-	intPart = stripLeadingZeros(intPart)
-	if len(intPart) == 0 {
-		intPart = []byte("0")
-	}
-	for len(fracPart) > 0 && fracPart[len(fracPart)-1] == '0' {
-		fracPart = fracPart[:len(fracPart)-1]
-	}
-	if isAllZeros(intPart) && len(fracPart) == 0 {
-		intPart = []byte("0")
-		neg = false // -0 is 0
-	}
-	return neg, intPart, fracPart
-}
-
-func isAllZeros(digits []byte) bool {
-	for _, c := range digits {
-		if c != '0' {
-			return false
-		}
-	}
-	return true
-}
-
-// compareDecimal compares two JSON number literals exactly, returning -1, 0,
-// or 1, through their normalized decimal digits.
-func compareDecimal(a, b []byte) int {
-	aNeg, aInt, aFrac := normalizeNumber(a)
-	bNeg, bInt, bFrac := normalizeNumber(b)
-	return compareNormalized(aNeg, aInt, aFrac, bNeg, bInt, bFrac)
-}
-
-// compareNormalized compares two normalized numbers exactly: integer parts
-// through their exact digit length, fractions padded to equal length, signs
-// applied last.
-func compareNormalized(aNeg bool, aInt, aFrac []byte, bNeg bool, bInt, bFrac []byte) int {
-	if aNeg != bNeg {
-		if aNeg {
-			return -1
-		}
-		return 1
-	}
-
-	cmp := 0
-	switch {
-	case len(aInt) < len(bInt):
-		cmp = -1
-	case len(aInt) > len(bInt):
-		cmp = 1
-	default:
-		cmp = stringCompare(aInt, bInt)
-	}
-	if cmp == 0 {
-		for i := 0; i < len(aFrac) || i < len(bFrac); i++ {
-			var x, y byte
-			if i < len(aFrac) {
-				x = aFrac[i]
-			}
-			if i < len(bFrac) {
-				y = bFrac[i]
-			}
-			if x != y {
-				if x < y {
-					cmp = -1
-				} else {
-					cmp = 1
-				}
-				break
-			}
-		}
-	}
-	if aNeg {
-		return -cmp
-	}
-	return cmp
-}
-
-func stripLeadingZeros(text []byte) []byte {
-	start := 0
-	for start < len(text)-1 && text[start] == '0' {
-		start++
-	}
-	return text[start:]
-}
-
-func stringCompare(a, b []byte) int {
-	for i := 0; i < len(a) && i < len(b); i++ {
-		if a[i] != b[i] {
-			if a[i] < b[i] {
-				return -1
-			}
-			return 1
-		}
-	}
-	switch {
-	case len(a) < len(b):
-		return -1
-	case len(a) > len(b):
-		return 1
-	}
-	return 0
-}
-
-func bytesStartsWith(b []byte, prefix string) bool {
-	return len(b) >= len(prefix) && string(b[:len(prefix)]) == prefix
+	mod := new(big.Int).Abs(coeff)
+	mod.Mod(mod, divisor)
+	return mod.Sign() == 0
 }
 
 func trimJSON(b []byte) []byte {
@@ -506,6 +371,10 @@ func trimJSON(b []byte) []byte {
 
 func isSpace(c byte) bool {
 	return c == ' ' || c == '\t' || c == '\n' || c == '\r'
+}
+
+func bytesStartsWith(b []byte, prefix string) bool {
+	return len(b) >= len(prefix) && string(b[:len(prefix)]) == prefix
 }
 
 // isJSONNumber reports whether trimmed is a complete JSON number literal:
@@ -553,15 +422,4 @@ func isJSONNumber(trimmed []byte) bool {
 		}
 	}
 	return i == len(trimmed)
-}
-
-// jsonValuesEqual reports whether two JSON literals denote the same value,
-// comparing composite values through their canonical encodings.
-func jsonValuesEqual(a, b json.RawMessage) bool {
-	ca, errA := canonical(a)
-	cb, errB := canonical(b)
-	if errA != nil || errB != nil {
-		return false
-	}
-	return string(ca) == string(cb)
 }

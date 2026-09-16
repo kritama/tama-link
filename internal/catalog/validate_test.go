@@ -218,35 +218,117 @@ func TestValidateAgainstSchemaRejectsMalformedSchema(t *testing.T) {
 	}
 }
 
-// TestValidateAgainstSchemaRequiredFailsNonObjects pins the required
-// contract: a non-object value fails validation whenever required is
-// present, regardless of whether a type assertion is absent or even accepts
-// the kind.
-func TestValidateAgainstSchemaRequiredFailsNonObjects(t *testing.T) {
+// TestValidateAgainstSchemaRequiredSemantics pins the JSON Schema contract:
+// required applies only to object instances (a non-object is constrained
+// only by an independent type assertion), required checks map-key presence
+// only (a present explicit null satisfies it), and no default annotation
+// fills a missing property.
+func TestValidateAgainstSchemaRequiredSemantics(t *testing.T) {
 	for _, tc := range []struct {
+		name                   string
 		schema, value, wantErr string
 	}{
-		{`{"required":["a"]}`, `5`, "required"},
-		{`{"required":["a"]}`, `"s"`, "required"},
-		{`{"required":["a"]}`, `true`, "required"},
-		{`{"required":["a"]}`, `[]`, "required"},
-		{`{"type":"null","required":["a"]}`, `null`, "required"},
-		{`{"type":"object","required":["a"]}`, `{"a":1}`, ""},
-		{`{"type":"object","properties":{"x":{"required":["a"]}}}`, `{"x":5}`, "required"},
+		{"non-object without type assertion is unconstrained",
+			`{"required":["a"]}`, `5`, ""},
+		{"non-object with object type assertion fails on type",
+			`{"type":"object","required":["a"]}`, `5`, "type"},
+		{"object missing the required key fails",
+			`{"type":"object","required":["a"]}`, `{}`, `required property "a"`},
+		{"present explicit null satisfies required when the schema allows it",
+			`{"type":"object","required":["a"],"properties":{"a":{"type":["string","null"]}}}`, `{"a":null}`, ""},
+		{"present explicit null still fails a schema that rejects null",
+			`{"type":"object","required":["a"],"properties":{"a":{"type":"string"}}}`, `{"a":null}`, "type"},
+		{"default never fills a missing required property",
+			`{"type":"object","required":["a"],"default":{"a":"x"}}`, `{}`, `required property "a"`},
 	} {
-		validateTable(t, tc.schema, tc.value, tc.wantErr)
+		t.Run(tc.name, func(t *testing.T) {
+			validateTable(t, tc.schema, tc.value, tc.wantErr)
+		})
 	}
 }
 
-// TestValidateAgainstSchemaRequiredIgnoresDefaultAndNull pins that no
-// default annotation fills a missing required property, and that a required
-// property present only as an explicit JSON null does not satisfy the
-// requirement.
-func TestValidateAgainstSchemaRequiredIgnoresDefaultAndNull(t *testing.T) {
-	schema := `{"type":"object","required":["a"],"properties":{"a":{"type":["string","null"]}},"default":{"a":"x"}}`
-	validateTable(t, schema, `{}`, `required property "a"`)
-	validateTable(t, schema, `{"a":null}`, `required property "a"`)
-	validateTable(t, schema, `{"a":"y"}`, "")
+// TestCheckSchemaVocabularyRejectsOutOfRangeExponents pins the reviewed
+// decimal exponent range: exponents beyond it are rejected at profile load
+// — for numeric bounds and for count constraints — instead of panicking or
+// allocating in proportion to the exponent.
+func TestCheckSchemaVocabularyRejectsOutOfRangeExponents(t *testing.T) {
+	cases := []struct {
+		name   string
+		schema string
+		want   string
+	}{
+		{"huge positive bound exponent",
+			`{"type":"number","minimum":1e9999999999999999999}`, "exponent range"},
+		{"huge negative bound exponent",
+			`{"type":"number","maximum":1e-999999999999999999999}`, "exponent range"},
+		{"just beyond the positive range",
+			`{"type":"number","minimum":1e100001}`, "exponent range"},
+		{"just beyond the negative range",
+			`{"type":"number","maximum":1e-100001}`, "exponent range"},
+		{"count constraint with huge exponent",
+			`{"type":"array","minItems":1e9999999999999999999}`, "exponent range"},
+		{"count constraint just beyond the range",
+			`{"type":"string","minLength":1e100001}`, "exponent range"},
+	}
+	for _, tc := range cases {
+		err := CheckSchemaVocabulary(json.RawMessage(tc.schema))
+		if err == nil || !strings.Contains(err.Error(), tc.want) {
+			t.Fatalf("%s: err = %v, want containing %q", tc.name, err, tc.want)
+		}
+	}
+	// The boundary itself is accepted.
+	if err := CheckSchemaVocabulary(json.RawMessage(`{"type":"number","minimum":1e100000}`)); err != nil {
+		t.Fatalf("boundary exponent rejected: %v", err)
+	}
+	if err := CheckSchemaVocabulary(json.RawMessage(`{"type":"number","maximum":-1e-100000}`)); err != nil {
+		t.Fatalf("negative boundary exponent rejected: %v", err)
+	}
+}
+
+// TestValidateAgainstSchemaExponentsNeverPanic pins the instance side: an
+// out-of-range exponent in a value is a validation result, never a panic or
+// an exponent-sized allocation, and in-range large exponents validate
+// exactly.
+func TestValidateAgainstSchemaExponentsNeverPanic(t *testing.T) {
+	validateTable(t, `{"type":"number","minimum":0}`, `1e9999999999999999999`, "exponent range")
+	validateTable(t, `{"type":"number","maximum":1}`, `1e-999999999999999999999`, "exponent range")
+	validateTable(t, `{"type":"integer"}`, `1e100001`, "type")
+	validateTable(t, `{"const":1}`, `1e9999999999999999999`, "const")
+	validateTable(t, `{"enum":[1]}`, `1e9999999999999999999`, "enum")
+	validateTable(t, `{"type":"number"}`, `1e300`, "")
+	validateTable(t, `{"type":"number","maximum":1e100000}`, `1e99999`, "")
+	validateTable(t, `{"type":"number","minimum":-1e-99999}`, `-5e-100000`, "")
+}
+
+// TestValidateAgainstSchemaNumericInstanceEquality pins JSON Schema
+// instance equality for numbers: mathematical value, exact, recursively
+// through arrays and objects, with 1, 1.0, and 1e0 all equal and adjacent
+// values unequal.
+func TestValidateAgainstSchemaNumericInstanceEquality(t *testing.T) {
+	for _, tc := range []struct {
+		schema, value, wantErr string
+	}{
+		{`{"const":1}`, `1.0`, ""},
+		{`{"const":1}`, `1e0`, ""},
+		{`{"const":1}`, `1.0000000000000000000000`, ""},
+		{`{"const":1}`, `1.0000000000000000000001`, "const"},
+		{`{"const":1.1}`, `1.10000000000000000001`, "const"},
+		{`{"enum":[1]}`, `1.0`, ""},
+		{`{"enum":[1]}`, `1e0`, ""},
+		{`{"enum":[1]}`, `1.0000001`, "enum"},
+		{`{"enum":[1,2.5]}`, `2.500`, ""},
+		{`{"const":{"n":1}}`, `{"n":1.0}`, ""},
+		{`{"const":{"n":1}}`, `{"n":1.0000001}`, "const"},
+		{`{"const":[1,2.5]}`, `[1.0,2.5e0]`, ""},
+		{`{"const":{"a":1,"b":2}}`, `{"b":2.0,"a":1e0}`, ""},
+		{`{"const":{"o":{"n":1}}}`, `{"o":{"n":1e0}}`, ""},
+		{`{"const":true}`, `1`, "const"},
+		{`{"enum":[null]}`, `0`, "enum"},
+		{`{"const":"1"}`, `1`, "const"},
+		{`{"const":"\u00e9"}`, `"\u00e9"`, ""},
+	} {
+		validateTable(t, tc.schema, tc.value, tc.wantErr)
+	}
 }
 
 // TestCheckSchemaVocabularyRejectsMalformedKeywordValues pins the

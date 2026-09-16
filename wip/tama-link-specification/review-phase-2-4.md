@@ -117,11 +117,17 @@ accepted JSON number grammar is compared safely and exactly.
 
 Required change:
 
-- do not expand exponent-form numbers into zero-padded byte slices;
-- compare exact numbers using significant digits plus a decimal scale, with
-  checked exponent parsing;
-- alternatively, define and document a reviewed exponent bound and reject it
-  during profile loading before normalization;
+- add [`github.com/cockroachdb/apd/v3`](https://github.com/cockroachdb/apd) at
+  `v3.2.3` and use its arbitrary-precision decimal representation for accepted
+  JSON number literals;
+- centralize numeric parsing and comparison in a small `internal/catalog`
+  component: preserve the existing JSON-number grammar check, parse with
+  `apd.NewFromString`, handle every returned error, and compare with
+  `Decimal.Cmp` rather than expanding exponent-form numbers into zero-padded
+  byte slices;
+- define and document the reviewed exponent range accepted by Tama Link and
+  translate an out-of-range exponent into a profile- or instance-validation
+  error, as appropriate;
 - ensure every accepted schema and instance number returns a validation result
   rather than panicking or allocating in proportion to the exponent value; and
 - add large positive, large negative, overflowing, and count-constraint
@@ -188,8 +194,8 @@ numbers occur inside arrays or objects used by `const` or `enum`.
 Required change:
 
 - implement recursive JSON instance equality;
-- compare numbers with the same exact significant-digit and scale model used
-  for numeric bounds;
+- parse numeric leaves through the same `apd/v3` component used for numeric
+  bounds and compare them with `Decimal.Cmp`;
 - retain code-point string equality, positional array equality, and
   key-order-independent object equality; and
 - add top-level and nested regressions covering `1`, `1.0`, and `1e0`, together
@@ -285,3 +291,362 @@ Status: remediated in this worktree; pending re-review.
 
 Issue #6 remains open pending re-review; migrated-Tama live acceptance stays
 under issue #8.
+
+## Re-review of remediation `e413093`
+
+Status: changes required; issue #6 is not ready to close
+
+Re-review date: 2026-09-16
+
+Reviewed head: `e413093`
+
+Reviewed remediation commit:
+
+- `e413093` — claimed remediation of the Phase 2.4 findings for the issue #6
+  slice.
+
+At re-review time the local branch was five commits ahead of
+`origin/feature/phase-2-current-tama-adapters`; the remote feature branch still
+pointed to `f6dfd7e2cbbf7e69ed30829994b5bf1fcf79859d`. The live GitHub issue
+remained open.
+
+### Decision
+
+The remediation does not resolve any of the three findings listed in this
+document. The exponent normalizer and `const`/`enum` equality implementation
+are unchanged. The worker-test change waits for an executor signal that may
+come from the already-running recurring sweep, so it still does not identify
+or recover a uniquely dropped prompt dispatch.
+
+The commit also adds two `required` behaviors that are unrelated to the Phase
+2.4 requirements and conflict with JSON Schema semantics: `required` now
+rejects non-object instances, and a present property whose value is JSON
+`null` is treated as absent. The specification and new tests were changed to
+encode those incorrect behaviors.
+
+The remediation section above and the corresponding issue #6 comment describe
+different requirements from the three findings actually recorded in this
+review.
+
+No implementation or GitHub changes were made during this re-review.
+
+### P1. `required` incorrectly rejects non-object instances
+
+Location: `internal/catalog/validate.go`, `schemaView.validate`, lines 54–60.
+
+The new guard rejects every non-object value whenever `required` is present.
+In JSON Schema, `required` is an object-specific validation keyword. Without a
+separate `type: "object"` assertion, a number, string, boolean, array, or null
+instance is not constrained by `required`.
+
+For example, this schema does not reject the number `5` under JSON Schema
+semantics:
+
+```json
+{"required":["a"]}
+```
+
+The new `TestValidateAgainstSchemaRequiredFailsNonObjects` instead requires
+that value to fail and therefore pins the wrong contract.
+
+Required change:
+
+- remove the unconditional non-object rejection;
+- evaluate `required` only when the instance is an object;
+- let an explicit `type` assertion reject an unwanted non-object kind; and
+- replace the new non-object tests with regressions that distinguish
+  object-key presence from independent type validation.
+
+Reference:
+
+- [JSON Schema Draft 2020-12 — `required`](https://json-schema.org/draft/2020-12/json-schema-validation#section-6.5.3)
+
+### P1. A present `null` property is incorrectly treated as missing
+
+Location: `internal/catalog/validate.go`, `schemaView.validateObject`, lines
+138–145.
+
+`required` checks whether the named property exists. It does not require the
+property value to be non-null. A present JSON `null` value satisfies
+`required`; the property's own schema determines whether null is permitted.
+
+For example, this value is valid against the shown schema:
+
+```json
+{
+  "schema": {
+    "type": "object",
+    "required": ["a"],
+    "properties": {"a": {"type": ["string", "null"]}}
+  },
+  "value": {"a": null}
+}
+```
+
+The fact that `default` is an annotation and does not fill a missing property
+is correct but unrelated. It does not make an explicitly present null value
+absent.
+
+Required change:
+
+- restore required-property checking to map-key presence alone;
+- retain ordinary property-schema validation so a schema can allow or reject
+  null explicitly; and
+- replace the new null test with separate missing, present-null-allowed, and
+  present-null-rejected cases.
+
+Reference:
+
+- [Understanding JSON Schema — `null`](https://json-schema.org/understanding-json-schema/reference/null)
+
+### P1. Large-exponent safety remains unresolved
+
+Location: `internal/catalog/validate.go`, `normalizeNumber`, lines 354–388.
+
+The remediation does not change exponent parsing or normalization. The
+exponent is still accumulated into an unchecked machine `int` and applied by
+materializing zero padding with `bytes.Repeat`.
+
+The Phase 2.4 diagnostic still accepts this valid JSON number as a bound and
+then panics during runtime schema decoding:
+
+```json
+{"type":"number","minimum":1e9999999999999999999}
+```
+
+Observed result:
+
+```text
+panic: runtime error: makeslice: len out of range
+```
+
+The preferred remediation is now explicit: replace the hand-written normalizer
+with a focused [`github.com/cockroachdb/apd/v3`](https://github.com/cockroachdb/apd)
+numeric component. Preserve the JSON-number grammar check, parse with
+`apd.NewFromString`, handle all parse and exponent-range errors, compare with
+`Decimal.Cmp`, and reject a documented reviewed exponent range through the
+normal validation error path. No path may allocate in proportion to the
+exponent value.
+
+### P1. The saturation regression still does not prove dropped-ID recovery
+
+Location: `internal/worker/service_test.go`,
+`TestSaturatedQueueStillExecutesEverySubmission`, lines 88–139.
+
+The new `started` signal proves only that some execution reached the gated
+executor. It does not prove that execution came from prompt `Dispatch`; the
+recurring sweep starts in `NewService` before the test creates its submissions
+and can produce the same signal. Preventing executions from completing is also
+not sufficient: the original flaw concerns which path scheduled and observed
+each distinct ID, not whether the executor completed it.
+
+An isolated diagnostic repeated the current setup five times. Before the first
+prompt dispatch, the recurring sweep had already scheduled 306, 400, 344, 383,
+and 419 distinct IDs respectively.
+
+`DroppedDispatches` can therefore count a failed prompt offer for an ID already
+scheduled by the sweep. The test still cannot infer that `count - drops`
+represents distinct prompt-delivered IDs or that later observations represent
+recovery of uniquely dropped work.
+
+The original Phase 2.4 required change remains in full: prevent pre-burst
+sweeps, identify a specific unique ID whose prompt offer was rejected, verify
+that it remains durably runnable, and prove a subsequent sweep schedules that
+same ID without startup recovery or a restart.
+
+### P2. Mathematical `const` and `enum` equality remains unresolved
+
+Locations:
+
+- `internal/catalog/validate.go`, `schemaView.validate`, lines 79–88; and
+- `internal/catalog/validate.go`, `jsonValuesEqual`, lines 558–566.
+
+The remediation does not change `jsonValuesEqual`. It still compares canonical
+bytes, so mathematically equal number spellings remain unequal. Diagnostics
+confirmed that the following continue to fail:
+
+- `{"const":1}` against `1.0`;
+- `{"enum":[1]}` against `1.0`; and
+- `{"const":{"n":1}}` against `{"n":1.0}`.
+
+The original Phase 2.4 required change remains in full: implement recursive
+JSON instance equality, using the same `apd/v3` parser and `Decimal.Cmp` for
+numeric leaves, including numbers nested inside arrays and objects.
+
+Reference:
+
+- [JSON Schema Draft 2020-12 — Instance Equality](https://json-schema.org/draft/2020-12/json-schema-core#section-4.2.2)
+
+### Recommended dependency boundary
+
+Use `github.com/cockroachdb/apd/v3` at `v3.2.3` only for exact decimal parsing,
+range enforcement, integer/count checks, numeric-bound comparison, and numeric
+leaf equality inside `internal/catalog`. An isolated Go 1.25 probe confirmed
+that it compares `1`, `1.0`, and `1e0` as equal and returns errors, rather than
+panicking, for the extreme exponents used by this review.
+
+Keep the existing closed schema-keyword allowlist and metadata-shape checks in
+Tama Link. `apd/v3` should replace `numberText`/`normalizeNumber` and the numeric
+portion of `jsonValuesEqual`; it should not broaden the supported JSON Schema
+vocabulary or leak library-specific errors across the catalog boundary.
+
+Do not introduce Bun or another ORM for these findings. They concern decimal
+semantics and deterministic worker scheduling, while the store deliberately
+owns explicit SQLite transaction and lease behavior. An ORM would not solve
+either defect and could obscure the required `BEGIN IMMEDIATE` semantics.
+
+Do not replace the focused validator with a full JSON Schema library in this
+remediation. The evaluated alternatives either failed an extreme-exponent
+diagnostic, require a newer Go toolchain than this repository, or represent
+numeric bounds as `float64`. The local allowlist plus the narrow `apd/v3`
+numeric component is the smallest dependency change that closes the reviewed
+numeric defects without changing Tama Link's accepted schema subset.
+
+### Independent diagnostic evidence
+
+Temporary review-only tests were added locally and removed immediately after
+the diagnostic runs. They left no repository changes.
+
+The diagnostics reproduced:
+
+- the large-exponent `makeslice: len out of range` panic;
+- top-level and nested mathematical-equality failures;
+- rejection of a non-object by an object-only `required` keyword;
+- rejection of a present null property allowed by its property schema; and
+- recurring-sweep execution of hundreds of IDs before prompt dispatch.
+
+### Validation evidence
+
+The following completed successfully on exact local head `e413093`:
+
+- `make check`:
+  - `go test ./...`;
+  - `go test -race ./...`;
+  - `go vet ./...`;
+  - `golangci-lint run ./...` with zero issues; and
+  - the trimmed host binary build;
+- uncached `go test -count=1 ./...`;
+- uncached `go test -race -count=1 ./...`; and
+- `git diff --check 391c9f6..HEAD`.
+
+The worktree was clean after the temporary diagnostics were removed. The green
+repository gates do not cover the unresolved Phase 2.4 edge cases or detect
+the newly introduced `required` semantic regressions.
+
+### Updated re-review requirements
+
+Before issue #6 is closed:
+
+1. Revert the two non-standard `required` semantics introduced by `e413093`
+   and correct their specification text and tests.
+2. Replace the hand-written number normalizer with the focused `apd/v3`
+   component described above; handle parse and exponent-range errors, document
+   the accepted range, and keep all failure paths allocation-safe.
+3. Replace the saturation regression with a controlled proof that identifies
+   and recovers a uniquely dropped, durably runnable submission.
+4. Implement recursive exact mathematical number equality for `const` and
+   `enum`, comparing numeric leaves through `apd.Decimal.Cmp`.
+5. Add focused regressions for every diagnostic above.
+6. Run `make check`, uncached unit and race suites, focused repeated tests, and
+   `git diff --check` on the exact remediation head.
+7. Keep issue #6 open pending another re-review; complete migrated-Tama live
+   acceptance separately under issue #8.
+
+## Re-remediation of `e413093` (Phase 2.4, second pass)
+
+This pass reverts the two non-standard `required` behaviors, replaces the
+hand-written number normalizer with the reviewed `apd/v3` component, rewrites
+the saturation regression into a controlled per-ID proof, and implements
+recursive JSON Schema instance equality for `const` and `enum`.
+
+### 1. `required` reverted to standard JSON Schema semantics
+
+- The non-object guard removed from `validate`: a non-object value is
+  constrained only by an independent type assertion, so
+  `{"required":["a"]}` validates `5`, while
+  `{"type":"object","required":["a"]}` rejects `5` through the type check.
+- Explicit-null handling removed from `validateObject`: `required` now checks
+  map-key presence only; a present `{"a":null}` satisfies the requirement and
+  the property's own schema decides whether null is permitted.
+- `TestValidateAgainstSchemaRequiredFailsNonObjects` and
+  `TestValidateAgainstSchemaRequiredIgnoresDefaultAndNull` replaced by
+  `TestValidateAgainstSchemaRequiredSemantics`, whose named subtests cover
+  exactly the distinctions above, including that no `default` annotation
+  fills a missing property.
+- Specification paragraph replaced with the standard semantics.
+
+### 2. `apd/v3 v3.2.3` numeric component
+
+- New `internal/catalog/decimal.go`: `parseJSONNumber` (the JSON grammar
+  check stays first, then `apd.NewFromString` on the trimmed literal) and
+  `jsonInstanceEqual`.
+- `numberText` now stores an `*apd.Decimal`; `validateNumber`, `checkPair`,
+  `requireCount`, `requireNumberBound`, and `isIntegerLiteral` all compare
+  through `Decimal.Cmp` or the coefficient. `normalizeNumber`,
+  `compareNormalized`, `compareDecimal`, `stripLeadingZeros`,
+  `stringCompare`, `isAllZeros`, and the lexical `jsonValuesEqual` are
+  deleted; no path materializes zero padding.
+- The reviewed exponent range is the library's effective-exponent limit of
+  ±100000 (apd `BaseContext`). Out of range: profile-load error for numeric
+  bounds and count constraints; instance-validation error whenever a bound,
+  `const`, `enum`, or `integer` type assertion must evaluate the value. In
+  every case the result is a validation error, never a panic.
+- `isExactInteger` decides integrality from the decimal's exponent and
+  coefficient (divisibility of the coefficient by 10^scale), without
+  rounding or context operations.
+
+### 3. Controlled saturation regression
+
+- `Service.Offer` reports whether the prompt queue accepted an ID; `Dispatch`
+  keeps its fire-and-forget contract on top of it. New exported
+  `Service.Sweep` runs one durable sweep on demand (the loop's ticker calls
+  the same path), so a caller that observed saturation can shorten the
+  recovery wait.
+- `TestSaturatedQueueStillExecutesEverySubmission` now: pins the recurring
+  sweep to one hour so it cannot schedule before the burst; offers 512 IDs
+  (2× the queue depth) and records the exact rejected IDs; proves the first
+  rejected ID is still `accepted`, present in the durable runnable set, and
+  never executed; proves an explicit `Sweep` — no restart — schedules and
+  executes that same ID; keeps sweeping while it waits for the rest, as the
+  production sweep would; and finishes with every ID completed and every ID
+  observed, each executed at least once (a transition that loses a busy
+  SQLite write leaves the replayable submission re-runnable, matching
+  production recovery semantics).
+- The executor bounds the post-gate completion wave to 8 concurrent
+  completions so the terminal phase measures scheduling, not a 512-wide
+  writer storm.
+
+### 4. `const`/`enum` instance equality
+
+- `jsonInstanceEqual` recurses through arrays and objects; numeric leaves
+  compare through `Decimal.Cmp` (`1`, `1.0`, and `1e0` are equal, adjacent
+  values are not), strings by decoded code points, arrays positionally,
+  objects independently of key order. Type mismatch is inequality, never an
+  error; an out-of-range numeric leaf becomes a validation result.
+
+### 5. Focused regressions
+
+- `TestCheckSchemaVocabularyRejectsOutOfRangeExponents`: huge and
+  just-beyond-range exponents for bounds and count constraints are rejected
+  at profile load; the ±100000 boundary itself is accepted.
+- `TestValidateAgainstSchemaExponentsNeverPanic`: instance-side out-of-range
+  exponents return validation results (bounds, `integer`, `const`, `enum`);
+  in-range large exponents validate exactly.
+- `TestValidateAgainstSchemaNumericInstanceEquality`: mathematical equality
+  and exactness across scalars, arrays, and nested objects, including
+  adjacent non-equal values and cross-type inequality.
+
+### 6. Validation evidence
+
+On the remediation head:
+
+- `make check` components: `go test ./... -count=1`;
+  `go test -race ./... -count=1`; `go vet ./...`; `golangci-lint run ./...`
+  with zero issues;
+- focused repeats: `go test ./internal/catalog/ -count=5`;
+  `go test ./internal/worker/ -race -count=2 -run TestSaturatedQueue`
+  (additionally `-race -count=3` on the saturation test during development);
+- `git diff --check 391c9f6..HEAD` and `git diff --check`.
+
+Issue #6 remains open pending re-review; live acceptance stays with issue
+#8.

@@ -69,11 +69,32 @@ func (s *Service) Start(ctx context.Context) error {
 // recurring durable sweep rediscovers every accepted replayable submission,
 // and the lease remains the final single-winner guard.
 func (s *Service) Dispatch(id string) {
+	s.Offer(id)
+}
+
+// Offer places one submission ID on the prompt-start queue and reports
+// whether the queue accepted it. A rejected offer is not lost work: the ID
+// remains durable and a sweep — recurring or explicit — rediscovers it. The
+// boolean exposes the queue decision for callers that need it; production
+// callers use Dispatch, which ignores it.
+func (s *Service) Offer(id string) bool {
 	select {
 	case s.queue <- id:
+		return true
 	default:
 		s.dispatchDrops.Add(1)
+		return false
 	}
+}
+
+// Sweep offers every runnable replayable submission from the durable store
+// to the prompt queue once. The dispatch loop calls it on a fixed cadence;
+// callers may also invoke it explicitly, for example right after a
+// saturation event, to shorten the recovery wait. Duplicates are absorbed
+// by the in-flight guard, and the lease still decides single-winner
+// ownership across processes.
+func (s *Service) Sweep(ctx context.Context) {
+	s.sweepRunnable(ctx)
 }
 
 // DroppedDispatches reports how many prompt dispatches a saturated queue has

@@ -4,7 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-	"strconv"
+
+	"github.com/cockroachdb/apd/v3"
 )
 
 // enforcedKeywords is the complete set of assertion keywords the runtime
@@ -51,7 +52,7 @@ var allowedTypes = map[string]bool{
 // maxCountBound caps integer count constraints (minLength, maxLength,
 // minItems, maxItems) so the runtime can hold them in a machine int and no
 // pinned schema can encode an absurd or overflowing bound.
-const maxCountBound = 1_000_000
+const maxCountBound int64 = 1_000_000
 
 // CheckSchemaVocabulary validates one pinned schema against the reviewed
 // assertion dialect. It rejects any keyword outside the enforced and
@@ -218,7 +219,8 @@ func checkKeywordValues(members map[string]json.RawMessage, path string) error {
 	return nil
 }
 
-// checkPair rejects an inverted low/high bound pair.
+// checkPair rejects an inverted low/high bound pair, compared through the
+// exact decimal model.
 func checkPair(members map[string]json.RawMessage, path, low, high string) error {
 	lowRaw, ok := members[low]
 	if !ok {
@@ -228,7 +230,15 @@ func checkPair(members map[string]json.RawMessage, path, low, high string) error
 	if !ok {
 		return nil
 	}
-	if compareDecimal(lowRaw, highRaw) > 0 {
+	lo, err := parseJSONNumber(lowRaw)
+	if err != nil {
+		return fmt.Errorf("%s.%s: %v", path, low, err)
+	}
+	hi, err := parseJSONNumber(highRaw)
+	if err != nil {
+		return fmt.Errorf("%s.%s: %v", path, high, err)
+	}
+	if lo.Cmp(hi) > 0 {
 		return fmt.Errorf("%s.%s exceeds %s", path, low, high)
 	}
 	return nil
@@ -337,7 +347,8 @@ func requireUniqueStrings(raw json.RawMessage, path, what string) ([]string, err
 }
 
 // requireCount accepts a JSON number that is an integer within the dialect
-// count bounds: non-negative and at most maxCountBound.
+// count bounds: non-negative, at most maxCountBound, and within the
+// reviewed decimal exponent range.
 func requireCount(raw json.RawMessage, path, what string) error {
 	if isNullRaw(raw) {
 		return fmt.Errorf("%s.%s must be an integer, not null", path, what)
@@ -346,24 +357,38 @@ func requireCount(raw json.RawMessage, path, what string) error {
 	if !isJSONNumber(trimmed) {
 		return fmt.Errorf("%s.%s must be a JSON number", path, what)
 	}
-	neg, _, fracPart := normalizeNumber(trimmed)
-	if neg || len(fracPart) > 0 {
+	dec, err := parseJSONNumber(trimmed)
+	if err != nil {
+		return fmt.Errorf("%s.%s: %v", path, what, err)
+	}
+	if !isExactInteger(dec) {
 		return fmt.Errorf("%s.%s must be a non-negative integer", path, what)
 	}
-	if compareDecimal(trimmed, []byte(strconv.Itoa(maxCountBound))) > 0 {
+	var zero, bound apd.Decimal
+	zero.SetInt64(0)
+	bound.SetInt64(maxCountBound)
+	if dec.Cmp(&zero) < 0 {
+		return fmt.Errorf("%s.%s must be a non-negative integer", path, what)
+	}
+	if dec.Cmp(&bound) > 0 {
 		return fmt.Errorf("%s.%s exceeds the bound of %d", path, what, maxCountBound)
 	}
 	return nil
 }
 
 // requireNumberBound accepts the complete JSON number grammar, including
-// exponent form, and nothing else.
+// exponent form, within the reviewed decimal exponent range, and nothing
+// else.
 func requireNumberBound(raw json.RawMessage, path, what string) error {
 	if isNullRaw(raw) {
 		return fmt.Errorf("%s.%s must be a number, not null", path, what)
 	}
-	if !isJSONNumber(trimJSON(raw)) {
+	trimmed := trimJSON(raw)
+	if !isJSONNumber(trimmed) {
 		return fmt.Errorf("%s.%s must be a JSON number", path, what)
+	}
+	if _, err := parseJSONNumber(trimmed); err != nil {
+		return fmt.Errorf("%s.%s: %v", path, what, err)
 	}
 	return nil
 }

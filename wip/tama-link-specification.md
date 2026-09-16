@@ -461,7 +461,9 @@ it, so a dropped queue entry is rediscovered within one sweep interval. The
 sweep must not re-offer work this process is already executing: in-flight
 entries would otherwise crowd the prompt queue ahead of dropped IDs and
 starve them. The lease remains the final single-winner guard across
-processes. A worker that
+processes. The sweep also runs on explicit request, so a caller that
+observed queue saturation can shorten the recovery wait without changing
+the durable guarantee. A worker that
 has already published a terminal state releases its lease on a best-effort
 basis: the release is retried against transient SQLite contention and, if it
 still fails, is dropped rather than undoing the terminal transition, because
@@ -560,12 +562,25 @@ syntax, a strict subset of the ECMAScript-compatible regular expressions
 JSON Schema normally assumes, and patterns must compile at profile load.
 At runtime, `minLength` and `maxLength` count Unicode code points, and
 numeric values and bounds accept the complete JSON number grammar,
-including exponent form, compared through exact normalized decimal digits,
-never through `float64`. A non-object value fails validation whenever
-`required` is present, regardless of which type assertion, if any, rejects
-or accepts that kind. No `default` annotation fills a missing required
-property, and a required property present only as an explicit JSON null
-does not satisfy the requirement.
+including exponent form. Numeric work — bound comparison, integer checks,
+and `const`/`enum` equality — runs on exact arbitrary-precision decimals
+(`github.com/cockroachdb/apd/v3`), never through `float64`, and never
+allocates in proportion to the exponent magnitude. The reviewed exponent
+range is the decimal library's effective-exponent limit of ±100000:
+an out-of-range exponent fails profile load for numeric bounds and count
+constraints, and fails instance validation whenever a numeric assertion
+(bound, `const`, `enum`, or `integer` type) must evaluate it, in both
+cases as a validation error rather than a panic. `const` and `enum` use
+JSON Schema instance equality recursively: numbers compare by exact
+mathematical value (`1`, `1.0`, and `1e0` are equal), strings by decoded
+code points, arrays positionally, and objects independently of key order.
+
+`required` follows the standard JSON Schema semantics: it applies only to
+object instances (a non-object value is constrained only by an independent
+type assertion), it checks map-key presence only (a present property whose
+value is an explicit JSON null satisfies it, and the property's own schema
+decides whether null is permitted), and no `default` annotation fills a
+missing required property.
 
 Server instructions are composed from two clearly separated sources:
 

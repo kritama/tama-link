@@ -4,6 +4,7 @@ go 1.25.0
 
 require (
 	github.com/99designs/keyring v1.2.2
+	github.com/cockroachdb/apd/v3 v3.2.3
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	golang.org/x/sys v0.47.0
 	modernc.org/sqlite v1.58.0
