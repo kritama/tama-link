@@ -97,14 +97,17 @@ func New(cfg Config) (*Client, error) {
 	}
 	// Redirects are rejected on every client, default or supplied: copy the
 	// struct and force a refusing callback rather than trusting an existing
-	// one. The client itself carries no overall Timeout because that would
-	// also bound subscription streams; finite requests get a per-request
-	// deadline in callWithMeta.
+	// one. The client carries no overall Timeout, supplied value included,
+	// because that would also bound subscription streams; finite requests
+	// get a per-request deadline in callWithMeta, and the caller context
+	// owns the streams. Transport and other caller configuration survive the
+	// clone.
 	base := cfg.HTTPClient
 	if base == nil {
 		base = &http.Client{}
 	}
 	cloned := *base
+	cloned.Timeout = 0
 	cloned.CheckRedirect = func(*http.Request, []*http.Request) error {
 		return http.ErrUseLastResponse
 	}

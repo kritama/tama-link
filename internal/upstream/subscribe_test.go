@@ -77,7 +77,7 @@ func ackEvent(requestID string, authorized ...string) string {
 // taskEvent renders one notifications/tasks working snapshot.
 func taskEvent(requestID string) string {
 	payload := fmt.Sprintf(
-		`{"jsonrpc":"2.0","method":"notifications/tasks","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":%q},"taskId":%q,"status":"working","ttlMs":86400000,"pollIntervalMs":1000}}`,
+		`{"jsonrpc":"2.0","method":"notifications/tasks","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":%q},"taskId":%q,"status":"working","createdAt":"2026-09-11T10:00:00Z","lastUpdatedAt":"2026-09-11T10:00:00Z","ttlMs":86400000,"pollIntervalMs":1000}}`,
 		requestID, subTaskID)
 	return sseReply(payload)
 }

@@ -173,27 +173,30 @@ func (c *Client) scanSSE(r io.Reader, dispatch func(msg jsonrpc.Message) (stop b
 	scanner.Buffer(make([]byte, 0, 64*1024), int(c.maxBytes)+8)
 	var data []string
 	var eventBytes int64
-	flush := func() error {
+	// flush returns the dispatch stop signal: a successful stop (the
+	// matching finite response or the graceful subscription close) ends the
+	// scan immediately, even while the peer keeps the body open.
+	flush := func() (bool, error) {
 		payload := strings.Join(data, "\n")
 		data = data[:0]
 		eventBytes = 0
 		if payload == "" {
-			return nil
+			return false, nil
 		}
 		msg, err := jsonrpc.DecodeMessage([]byte(payload))
 		if err != nil {
-			return newError(KindTransport, 0, fmt.Errorf("decode SSE payload: jsonrpc"))
+			return false, newError(KindTransport, 0, fmt.Errorf("decode SSE payload: jsonrpc"))
 		}
 		stop, err := dispatch(msg)
 		if stop || err != nil {
-			return err
+			return true, err
 		}
-		return nil
+		return false, nil
 	}
 	for scanner.Scan() {
 		line := scanner.Text()
 		if line == "" {
-			if err := flush(); err != nil {
+			if stopped, err := flush(); stopped || err != nil {
 				return err
 			}
 			continue

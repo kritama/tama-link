@@ -164,17 +164,8 @@ func decodeTaskState(raw json.RawMessage, expectedTaskID string, expectComplete 
 	if !ValidTaskStatus(status) {
 		return nil, newError(KindProtocol, 0, fmt.Errorf("unknown task status %q", status))
 	}
-	for _, field := range []string{"createdAt", "lastUpdatedAt"} {
-		if v, ok := stringMember(members, field); ok {
-			if _, err := time.Parse(time.RFC3339, v); err != nil {
-				return nil, newError(KindProtocol, 0, fmt.Errorf("task state %s is not an RFC3339 timestamp", field))
-			}
-		}
-	}
-	for _, field := range []string{"ttlMs", "pollIntervalMs"} {
-		if v, ok := intMember(members, field); ok && v < 0 {
-			return nil, newError(KindProtocol, 0, fmt.Errorf("task state %s is negative", field))
-		}
+	if err := validateTaskEnvelope(members); err != nil {
+		return nil, err
 	}
 	result, hasResult := members["result"]
 	failure, hasFailure := members["error"]
@@ -266,6 +257,59 @@ func checkCallToolResult(raw json.RawMessage) error {
 	}
 	if view.IsError == nil {
 		return newError(KindProtocol, 0, fmt.Errorf("completed task result has no isError flag"))
+	}
+	return nil
+}
+
+// maxTaskSafeInt is the Tasks schema maximum safe integer (2^53-1), not Go's
+// int64 maximum.
+const maxTaskSafeInt = int64(9_007_199_254_740_991)
+
+// validateTaskEnvelope checks the common task fields shared by detailed task
+// states and the initial tools/call task result: createdAt, lastUpdatedAt,
+// and ttlMs are required, correctly typed, and in range; pollIntervalMs is
+// optional but carries the same bounds. Explicit nulls fail like missing
+// values; the pinned TamaMCP profile never emits unlimited tasks.
+func validateTaskEnvelope(members map[string]json.RawMessage) error {
+	for _, field := range []string{"createdAt", "lastUpdatedAt"} {
+		raw, ok := members[field]
+		if !ok || string(raw) == "null" {
+			return newError(KindProtocol, 0, fmt.Errorf("task state is missing %s", field))
+		}
+		value, isString := stringMember(members, field)
+		if !isString {
+			return newError(KindProtocol, 0, fmt.Errorf("task state %s is not a string", field))
+		}
+		if _, err := time.Parse(time.RFC3339, value); err != nil {
+			return newError(KindProtocol, 0, fmt.Errorf("task state %s is not an RFC3339 timestamp", field))
+		}
+	}
+	if err := checkTaskInt(members, "ttlMs", true); err != nil {
+		return err
+	}
+	return checkTaskInt(members, "pollIntervalMs", false)
+}
+
+// checkTaskInt validates one task integer field: absent only when optional,
+// never null or non-integer, non-negative, and within the Tasks maximum
+// safe integer.
+func checkTaskInt(members map[string]json.RawMessage, field string, required bool) error {
+	raw, ok := members[field]
+	if !ok {
+		if required {
+			return newError(KindProtocol, 0, fmt.Errorf("task state is missing %s", field))
+		}
+		return nil
+	}
+	if string(raw) == "null" {
+		return newError(KindProtocol, 0, fmt.Errorf("task state %s is null", field))
+	}
+	value, isInt := intMember(members, field)
+	if !isInt {
+		return newError(KindProtocol, 0, fmt.Errorf("task state %s is not an integer", field))
+	}
+	if value < 0 || value > maxTaskSafeInt {
+		return newError(KindProtocol, 0, fmt.Errorf("task state %s is out of range", field))
 	}
 	return nil
 }

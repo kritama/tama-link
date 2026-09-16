@@ -321,13 +321,19 @@ func TestCallToolRejectsUnknownResultType(t *testing.T) {
 	}
 }
 
-// TestCallToolRejectsUnknownInitialTaskStatus proves a task-shaped result
-// with an unknown or absent status fails closed on the first response,
-// before any polling begins.
-func TestCallToolRejectsUnknownInitialTaskStatus(t *testing.T) {
+// TestCallToolRejectsInvalidInitialTaskResults proves a task-shaped result
+// fails closed on the first response, before any polling begins: the pinned
+// TamaMCP profile creates tasks in the working state with the full common
+// envelope, so a terminal, unknown, or incomplete initial state is a
+// protocol failure.
+func TestCallToolRejectsInvalidInitialTaskResults(t *testing.T) {
 	for _, tc := range []string{
-		`{"resultType":"task","taskId":"t-1","status":"paused"}`,
+		`{"resultType":"task","taskId":"t-1","status":"paused","createdAt":"2026-09-11T10:00:00Z","lastUpdatedAt":"2026-09-11T10:00:00Z","ttlMs":86400000,"pollIntervalMs":1000}`,
 		`{"resultType":"task","taskId":"t-1"}`,
+		`{"resultType":"task","taskId":"t-1","status":"working"}`,
+		`{"resultType":"task","taskId":"t-1","status":"completed","createdAt":"2026-09-11T10:00:00Z","lastUpdatedAt":"2026-09-11T10:00:00Z","ttlMs":86400000,"pollIntervalMs":1000}`,
+		`{"resultType":"task","taskId":"t-1","status":"working","createdAt":"2026-09-11T10:00:00Z","lastUpdatedAt":"2026-09-11T10:00:00Z","ttlMs":null}`,
+		`{"resultType":"task","taskId":"t-1","status":"working","createdAt":"2026-09-11T10:00:00Z","lastUpdatedAt":"2026-09-11T10:00:00Z","ttlMs":9007199254740992,"pollIntervalMs":1000}`,
 	} {
 		ts := newTestServer(t, func(rec *recordedRequest) (int, string, string) {
 			return 200, "application/json", jsonReply(rec.BodyID, tc)

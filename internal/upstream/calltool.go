@@ -107,8 +107,18 @@ func decodeCallTool(raw json.RawMessage) (*CallToolResponse, error) {
 		if view.TaskID == "" {
 			return nil, newError(KindProtocol, 0, fmt.Errorf("task result has no task id"))
 		}
-		if !ValidTaskStatus(view.Status) {
-			return nil, newError(KindProtocol, 0, fmt.Errorf("unknown initial task status %q", view.Status))
+		// The pinned TamaMCP profile creates tasks in the working state; a
+		// terminal or unknown initial state is a protocol failure, not a
+		// shortcut to a captured result.
+		if view.Status != TaskWorking {
+			return nil, newError(KindProtocol, 0, fmt.Errorf("initial task state %q is not working", view.Status))
+		}
+		var members map[string]json.RawMessage
+		if err := json.Unmarshal(raw, &members); err != nil {
+			return nil, newError(KindProtocol, 0, fmt.Errorf("initial task result is not a JSON object"))
+		}
+		if err := validateTaskEnvelope(members); err != nil {
+			return nil, err
 		}
 	}
 	return &CallToolResponse{

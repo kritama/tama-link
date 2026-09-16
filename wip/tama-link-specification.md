@@ -572,11 +572,24 @@ The stream contract fails closed: the acknowledgement must be the first event
 and may authorize only a subset of the requested task IDs; every later task
 snapshot must carry an acknowledged task ID; the final JSON-RPC response may
 only follow the acknowledgement and marks graceful closure; a final JSON-RPC
-error is a protocol failure, not a clean close. SSE events are bounded as a
-complete encoded event, including multi-line data fields, and an event whose
-delimiter never arrives at end of stream is not dispatched. A stream's
-lifetime is bounded by the caller context, credential expiry, and the
-stream-lifetime owner, never by a finite-request client timeout.
+error is a protocol failure, not a clean close. A successful stop signal — the
+matching finite response or the graceful final response — ends the scan
+immediately; the client never waits for the peer to close a held-open body.
+SSE events are bounded as a complete encoded event, including multi-line data
+fields, and an event whose delimiter never arrives at end of stream is not
+dispatched. A stream's lifetime is bounded by the caller context, credential
+expiry, and the stream-lifetime owner, never by a finite-request client
+timeout. Finite requests additionally receive a per-request deadline (default
+60 seconds); a supplied HTTP client's overall timeout is cleared when the
+transport clones it, so no client-level timeout can terminate a stream.
+
+Detailed task states and initial `tools/call` task results share one common
+envelope: `createdAt`, `lastUpdatedAt`, and `ttlMs` are required, correctly
+typed, non-negative, and bounded by the Tasks maximum safe integer (2^53-1);
+`pollIntervalMs` carries the same bounds when present; explicit nulls fail
+like missing values. The pinned TamaMCP profile creates tasks in the `working`
+state, so an initial task result in any other state is a protocol failure,
+not a shortcut to a captured result.
 
 At discovery time Tama Link records and validates:
 

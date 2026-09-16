@@ -144,7 +144,7 @@ func defaultMessageTool() string {
 }
 
 func defaultTaskResultDoc() string {
-	return `{"resultType":"task","taskId":"task-1","status":"working","ttlMs":86400000,"pollIntervalMs":1000}`
+	return `{"resultType":"task","taskId":"task-1","status":"working","createdAt":"2026-09-11T10:00:00Z","lastUpdatedAt":"2026-09-11T10:00:00Z","ttlMs":86400000,"pollIntervalMs":1000}`
 }
 
 // newTestAdapter wires an adapter against the fixture server.

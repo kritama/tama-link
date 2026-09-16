@@ -313,9 +313,13 @@ Before issues #2–#4 are closed:
 
 ## Remediation report — 2026-09-16
 
-Status: all priority-1 and priority-2 findings addressed on
-`feature/phase-2-current-tama-adapters`; issues #2–#4 remain open pending
-re-review.
+Status (updated after the Phase 2.1 re-review): the original findings were
+addressed as described below, but the re-review in
+`review-phase-2-1.md` identified three residual defects (an SSE stop-signal
+regression introduced by the SSE-bound rewrite, an incomplete task-envelope
+validation, and a supplied-client timeout that still bounded subscriptions).
+Those are addressed in the Phase 2.1 remediation report in that document; see
+its status for the current position.
 
 ### Priority 1
 
