@@ -40,6 +40,9 @@ type Submission struct {
 	CreatedAt        time.Time
 	UpdatedAt        time.Time
 	CompletedAt      *time.Time
+	// PayloadExpiresAt bounds how long the terminal payload is retrievable
+	// after completion. Reads past this deadline return submission_expired.
+	PayloadExpiresAt *time.Time
 
 	encArgs   []byte
 	encEvents []byte

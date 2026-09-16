@@ -140,7 +140,8 @@ func TestOpenRejectsUnsupportedSchemaVersion(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create database: %v", err)
 	}
-	if _, err := s.db.Exec("UPDATE meta SET value = '2' WHERE key = ?", metaSchemaVersion); err != nil {
+	// A version newer than the only supported schema fails closed.
+	if _, err := s.db.Exec("UPDATE meta SET value = '3' WHERE key = ?", metaSchemaVersion); err != nil {
 		t.Fatalf("replace schema version: %v", err)
 	}
 	if err := s.Close(); err != nil {
@@ -148,7 +149,7 @@ func TestOpenRejectsUnsupportedSchemaVersion(t *testing.T) {
 	}
 
 	if _, err := Open(context.Background(), path, keys, Config{Limits: limits.Default()}); !errors.Is(err, ErrUnsupportedSchema) {
-		t.Fatalf("Open schema version 2 = %v, want ErrUnsupportedSchema", err)
+		t.Fatalf("Open schema version 3 = %v, want ErrUnsupportedSchema", err)
 	}
 }
 

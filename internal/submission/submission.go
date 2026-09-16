@@ -24,8 +24,8 @@ const FirstSequence int64 = 1
 func Valid(state State) bool {
 	switch state {
 	case contract.StatusAccepted, contract.StatusQueued, contract.StatusRunning,
-		contract.StatusCompleted, contract.StatusFailed, contract.StatusCancelled,
-		contract.StatusExpired, contract.StatusOutcomeUnknown:
+		contract.StatusInputRequired, contract.StatusCompleted, contract.StatusFailed,
+		contract.StatusCancelled, contract.StatusExpired, contract.StatusOutcomeUnknown:
 		return true
 	default:
 		return false
@@ -44,8 +44,9 @@ func Terminal(state State) bool {
 }
 
 // Allowed reports whether moving from one state to another is legal. The
-// only legal moves are accepted -> queued -> running and running to any
-// terminal state.
+// only legal moves are accepted -> queued -> running, running and
+// input_required to each other, and either pending state to any terminal
+// state.
 func Allowed(from, to State) bool {
 	if !Valid(from) || !Valid(to) {
 		return false
@@ -56,7 +57,9 @@ func Allowed(from, to State) bool {
 	case contract.StatusQueued:
 		return to == contract.StatusRunning
 	case contract.StatusRunning:
-		return Terminal(to)
+		return to == contract.StatusInputRequired || Terminal(to)
+	case contract.StatusInputRequired:
+		return to == contract.StatusRunning || Terminal(to)
 	default:
 		return false
 	}

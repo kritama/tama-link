@@ -37,7 +37,7 @@ func scanSubmission(row *sql.Row) (*Submission, error) {
 	var status string
 	var errorCode, errorMessage sql.NullString
 	var errorRetryable int
-	var completedAt sql.NullInt64
+	var completedAt, payloadExpiresAt sql.NullInt64
 	var createdMs, updatedMs int64
 	var payloadRetentionMs, tombstoneRetentionMs int64
 
@@ -48,7 +48,7 @@ func scanSubmission(row *sql.Row) (*Submission, error) {
 		&sub.AcceptedLimits.ResponseBytes, &sub.AcceptedLimits.ResultBytes,
 		&sub.AcceptedLimits.EventBytes, &sub.AcceptedLimits.MaxEvents, &sub.AcceptedLimits.EventsBytes,
 		&payloadRetentionMs, &tombstoneRetentionMs,
-		&createdMs, &updatedMs, &completedAt,
+		&createdMs, &updatedMs, &completedAt, &payloadExpiresAt,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan submission: %w", err)
@@ -78,6 +78,10 @@ func scanSubmission(row *sql.Row) (*Submission, error) {
 	if completedAt.Valid {
 		completed := time.UnixMilli(completedAt.Int64).UTC()
 		sub.CompletedAt = &completed
+	}
+	if payloadExpiresAt.Valid {
+		expires := time.UnixMilli(payloadExpiresAt.Int64).UTC()
+		sub.PayloadExpiresAt = &expires
 	}
 	return &sub, nil
 }

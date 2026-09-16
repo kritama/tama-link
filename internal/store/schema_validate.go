@@ -23,6 +23,7 @@ func validateRequiredTables(ctx context.Context, conn *sql.Conn) error {
 		FROM (
 			SELECT 'meta' AS name
 			UNION ALL SELECT 'submissions'
+			UNION ALL SELECT 'input_responses'
 			UNION ALL SELECT 'idempotency'
 			UNION ALL SELECT 'leases'
 		) AS expected
@@ -62,6 +63,7 @@ func validateCurrentSchema(ctx context.Context, conn *sql.Conn) error {
 			created_at, updated_at, completed_at,
 			payload_expires_at, tombstone_expires_at, lease_owner, lease_expires_at
 		 FROM submissions LIMIT 0`,
+		`SELECT submission_id, request_id, response_enc, answered_at FROM input_responses LIMIT 0`,
 		`SELECT client_request_id, args_hash, submission_id, created_at FROM idempotency LIMIT 0`,
 		`SELECT name, owner, expires_at FROM leases LIMIT 0`,
 	}

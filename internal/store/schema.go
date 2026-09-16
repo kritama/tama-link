@@ -8,8 +8,9 @@ import (
 	"strconv"
 )
 
-// schemaVersion is the initial database schema this build reads and writes.
-const schemaVersion = 1
+// schemaVersion is the database schema this build reads and writes. Version
+// 2 adds the input_responses table for request-correlated input replay.
+const schemaVersion = 2
 
 // Metadata keys.
 const (
@@ -58,6 +59,14 @@ CREATE TABLE IF NOT EXISTS submissions (
     tombstone_expires_at INTEGER,
     lease_owner TEXT,
     lease_expires_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS input_responses (
+    submission_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    response_enc BLOB NOT NULL,
+    answered_at INTEGER NOT NULL,
+    PRIMARY KEY (submission_id, request_id)
 );
 
 CREATE TABLE IF NOT EXISTS idempotency (

@@ -22,7 +22,10 @@ const (
 	StatusAccepted       Status = "accepted"
 	StatusQueued         Status = "queued"
 	StatusRunning        Status = "running"
-	StatusCompleted      Status = "completed"
+	// StatusInputRequired is a non-terminal waiting state: the upstream task
+	// needs input responses before it can continue.
+	StatusInputRequired Status = "input_required"
+	StatusCompleted     Status = "completed"
 	StatusFailed         Status = "failed"
 	StatusCancelled      Status = "cancelled"
 	StatusExpired        Status = "expired"
