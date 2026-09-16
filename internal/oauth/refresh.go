@@ -117,7 +117,11 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 // invalidateCredential removes the durable refresh credential after the
 // authorization server rejected the grant with invalid_grant: the fence
 // pointer and the fenced slot, plus the legacy label. The caller holds the
-// refresh lease (epoch leaseGeneration). The pointer and the slot's
+// refresh lease (epoch leaseGeneration). The renewal outlives the caller's
+// cancellation for the same reason as the registration's: the fixed-label
+// deletes take no context and cannot be aborted, so a cancel mid-delete
+// must not hand the epoch to another process whose new registration the
+// stale deletion would then remove. The pointer and the slot's
 // retirement record are committed in one transaction — under a renewal
 // span, honoring a lost epoch — before the slot is deleted, so a crash or
 // a later deletion failure can never leave the slot with no durable
@@ -134,16 +138,19 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64) error {
 	// Renew ownership across the cleanup: the failed exchange's renewal
 	// loop has already stopped, and a slow secure-backend deletion must
-	// not outlive the lease TTL.
-	execCtx, cancelExec := context.WithCancel(ctx)
+	// not outlive the lease TTL. The renewal runs on a context that
+	// outlives the caller's cancellation because the fixed-label deletes
+	// take no context and cannot be aborted; the interruptible steps
+	// still observe the caller context directly.
+	renewCtx, cancelExec := context.WithCancel(context.WithoutCancel(ctx))
 	renewed := make(chan struct{})
-	go c.renewLease(execCtx, cancelExec, renewed)
+	go c.renewLease(renewCtx, cancelExec, renewed)
 	defer func() {
 		cancelExec()
 		<-renewed
 	}()
 
-	fenced, err := c.loadFenced(execCtx)
+	fenced, err := c.loadFenced(ctx)
 	if err != nil {
 		return err
 	}
@@ -160,10 +167,10 @@ func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64
 	// before the clear: no window exists — including a crash or a failed
 	// fenced-slot deletion — in which the rejected grant is readable
 	// again.
-	if err := c.lease.MarkRefreshCredentialInvalidated(execCtx); err != nil {
+	if err := c.lease.MarkRefreshCredentialInvalidated(ctx); err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
-	cleared, err := c.lease.ClearCredentialFence(execCtx, refreshLeaseName, c.owner, leaseGeneration, slot)
+	cleared, err := c.lease.ClearCredentialFence(ctx, refreshLeaseName, c.owner, leaseGeneration, slot)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
@@ -177,7 +184,7 @@ func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64
 		if err := c.secrets.DeleteSecret(slot); err != nil {
 			return nil
 		}
-		if err := c.lease.ClearRetiredCredentialSlot(execCtx, slot); err != nil {
+		if err := c.lease.ClearRetiredCredentialSlot(ctx, slot); err != nil {
 			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
 	}
@@ -189,7 +196,7 @@ func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64
 	if err := c.secrets.DeleteSecret(labelRefresh); err != nil {
 		return nil
 	}
-	if err := c.lease.ClearRefreshCredentialInvalidation(execCtx); err != nil {
+	if err := c.lease.ClearRefreshCredentialInvalidation(ctx); err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
 	return nil

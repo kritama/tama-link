@@ -30,6 +30,9 @@ type fakeSecrets struct {
 	// setHook runs just before a set is applied, letting a test cancel
 	// the caller at the moment an uninterruptible write starts.
 	setHook func(label string)
+	// setDoneHook runs just after a set is applied, letting a test model
+	// a writer that lands between this write and its caller's follow-up.
+	setDoneHook func(label string)
 }
 
 func newFakeSecrets() *fakeSecrets {
@@ -94,10 +97,13 @@ func (f *fakeSecrets) SetSecret(label string, data []byte) error {
 		time.Sleep(f.setDelay)
 	}
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	out := make([]byte, len(data))
 	copy(out, data)
 	f.items[label] = out
+	f.mu.Unlock()
+	if f.setDoneHook != nil {
+		f.setDoneHook(label)
+	}
 	return nil
 }
 

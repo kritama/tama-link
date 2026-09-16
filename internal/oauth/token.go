@@ -201,16 +201,21 @@ func (c *Client) Logout(ctx context.Context) error {
 
 	// Renew ownership through the whole cleanup: a slow secure-backend
 	// deletion must not outlive the lease TTL and hand the profile to
-	// another process mid-logout.
-	execCtx, cancelExec := context.WithCancel(ctx)
+	// another process mid-logout. The renewal runs on a context that
+	// outlives the caller's cancellation because the fixed-label deletes
+	// take no context and cannot be aborted; a cancel mid-delete must
+	// not hand the epoch away while the stale deletion could still land
+	// on a new registration. The interruptible steps still observe the
+	// caller context directly.
+	renewCtx, cancelExec := context.WithCancel(context.WithoutCancel(ctx))
 	renewed := make(chan struct{})
-	go c.renewLease(execCtx, cancelExec, renewed)
+	go c.renewLease(renewCtx, cancelExec, renewed)
 	defer func() {
 		cancelExec()
 		<-renewed
 	}()
 
-	_, slot, found, err := c.lease.ReadCredentialFence(execCtx)
+	_, slot, found, err := c.lease.ReadCredentialFence(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
@@ -222,10 +227,10 @@ func (c *Client) Logout(ctx context.Context) error {
 	// Clearing the fence makes a surviving legacy label eligible for the
 	// fence-less fallback, so the durable invalidation marker is
 	// established before the clear; it is cleared once the label is gone.
-	if err := c.lease.MarkRefreshCredentialInvalidated(execCtx); err != nil {
+	if err := c.lease.MarkRefreshCredentialInvalidated(ctx); err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
-	cleared, err := c.lease.ClearCredentialFence(execCtx, refreshLeaseName, c.owner, leaseGeneration, "")
+	cleared, err := c.lease.ClearCredentialFence(ctx, refreshLeaseName, c.owner, leaseGeneration, "")
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
@@ -238,11 +243,11 @@ func (c *Client) Logout(ctx context.Context) error {
 	if err := c.secrets.DeleteSecret(labelRefresh); err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
-	_ = c.lease.ClearRefreshCredentialInvalidation(execCtx)
+	_ = c.lease.ClearRefreshCredentialInvalidation(ctx)
 	// Drain the retirement backlog: slots a failed rotation left behind.
 	// Best effort — a slot whose deletion still fails keeps its durable
 	// record for the next refresh.
-	c.retireFailedSlots(execCtx)
+	c.retireFailedSlots(ctx)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.token = ""

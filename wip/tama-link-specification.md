@@ -807,7 +807,11 @@ and claims the cross-process refresh lease before touching credentials, so
 no concurrent writer can reinstall a fence and slot behind the logout: the
 claim advances the epoch and every in-flight writer's commit fails and
 rolls back its own slot. A contended claim fails logout with a retryable
-error. Ownership is renewed through the whole cleanup, and the fence clear
+error. Ownership is renewed through the whole cleanup, outliving the
+caller's cancellation because the fixed-label deletions take no context
+and cannot be aborted: a cancel mid-delete must not hand the epoch to
+another process whose new registration the stale deletion would then
+remove. The fence clear
 is bound to the claimed epoch, so a logout that loses its lease
 mid-cleanup fails retryably and can never wipe a newer fence installed by
 the process that took over. The committed slot is deleted while the fence
@@ -1018,10 +1022,13 @@ optimistically on both sides of that write: the epoch is verified before
 it, and if it is lost while the uninterruptible write is in flight, the
 stale record the write may have stored over the winner's registration is
 removed again — the credential backend cannot fence the write itself —
-and the post-write check itself runs on a context that outlives the
-caller's, so a cancellation mid-write cannot skip the lost-ownership
-cleanup: a stale registration can never be read as a ready pair, and the
-winner's flow re-registers on its next login. The normal
+and only if the stale write is still the committed record: each write
+stamps the record with a per-write nonce, so a winner whose registration
+landed in between keeps its own record and its authorization flow can
+still complete. The post-write check itself runs on a context that
+outlives the caller's, so a cancellation mid-write cannot skip the
+lost-ownership cleanup: a stale registration can never be read as a
+ready pair. The normal
 first-login path, which stores no credential yet, is unaffected.
 The client auth method is selected from the set the authorization server
 advertises — the field is a set of supported methods, not a single choice:

@@ -255,6 +255,57 @@ func TestRegisterRemovesStaleRecordAfterCanceledCallerAndTakeover(t *testing.T) 
 	}
 }
 
+// TestRegisterKeepsWinnerRecordAfterLostEpochDuringWrite pins the
+// versioned cleanup: a winning process that took over the lease may
+// store its own registration after the stale writer's write returns but
+// before the cleanup runs. The cleanup removes only the record the stale
+// write itself stored (matched by write nonce), so the winner's record
+// survives and its authorization flow can complete.
+func TestRegisterKeepsWinnerRecordAfterLostEpochDuringWrite(t *testing.T) {
+	secrets := newFakeSecrets()
+	secrets.setDelay = 50 * time.Millisecond
+	lease := newFakeLease()
+	client := newStaticClient(t, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
+
+	var calls int32
+	ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
+	// The foreign takeover lands when the write starts; the winner's own
+	// registration lands immediately after the stale write is applied.
+	winner := &ClientRecord{ClientID: "cid-winner", ClientSecret: "sw", AuthMethod: "client_secret_basic", Issuer: testIssuer, RegisteredAt: time.Now().UTC(), WriteNonce: "winner-nonce"}
+	winnerData, err := json.Marshal(winner)
+	if err != nil {
+		t.Fatalf("marshal winner record: %v", err)
+	}
+	secrets.setHook = func(label string) {
+		if label == labelClient {
+			lease.holdOther()
+		}
+	}
+	secrets.setDoneHook = func(label string) {
+		if label == labelClient {
+			secrets.mu.Lock()
+			secrets.items[labelClient] = winnerData
+			secrets.mu.Unlock()
+		}
+	}
+
+	if _, err := client.Register(context.Background(), regMetadata(ts, testIssuer)); !errors.Is(err, ErrLeaseContention) {
+		t.Fatalf("Register = %v, want ErrLeaseContention for the lost epoch", err)
+	}
+	// The winner's registration survived the stale cleanup.
+	data, found, err := secrets.GetSecret(labelClient)
+	if err != nil || !found {
+		t.Fatalf("stored record = found:%v err:%v, want the winner's registration", found, err)
+	}
+	var stored ClientRecord
+	if err := json.Unmarshal(data, &stored); err != nil {
+		t.Fatalf("decode stored record: %v", err)
+	}
+	if stored.ClientID != "cid-winner" || stored.WriteNonce != "winner-nonce" {
+		t.Fatalf("stored record = %+v, want the winner's registration", &stored)
+	}
+}
+
 // TestRegisterRejectsLostLeaseBeforeStoringRecord pins the epoch gate
 // on the final write: if the refresh lease is taken over after the claim
 // but before the client record is stored, another process has already

@@ -185,9 +185,12 @@ mutations — renews the epoch across the whole mutation, outliving caller
 cancellation because the final record write takes no context and cannot
 be aborted, and checks the epoch on both sides of that write: before it, and after
 it on a context that outlives the caller's, where a lost epoch removes
-the stale record the write may have stored, so a cancellation mid-write
-cannot skip the cleanup and the replacement can never be read as a ready
-pair.
+the stale record the write may have stored — matched by a per-write
+nonce, so a winner whose registration landed in between keeps its own
+record — and a cancellation mid-write cannot skip the cleanup. Logout
+and rejected-grant invalidation renew their ownership outlives caller
+cancellation for the same reason: their fixed-label deletions take no
+context and cannot be aborted.
 
 ### D6. Terminal results are captured immediately and owned locally
 

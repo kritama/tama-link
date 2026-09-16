@@ -28,6 +28,10 @@ type ClientRecord struct {
 	// second after which the secret is invalid, or zero when the secret
 	// does not expire.
 	SecretExpiresAt int64 `json:"client_secret_expires_at,omitempty"`
+	// WriteNonce identifies the specific write that stored this record.
+	// A writer whose lease epoch was lost can remove only the record its
+	// own write stored, never a record a winning process stored after it.
+	WriteNonce string `json:"write_nonce,omitempty"`
 }
 
 // secretExpired reports whether the record's client secret has passed its
@@ -234,7 +238,7 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 		return nil, err
 	} else if !ok || generation != leaseGeneration {
 		lost := fmt.Errorf("%w: the refresh lease was lost during the client record write", ErrLeaseContention)
-		if delErr := c.secrets.DeleteSecret(labelClient); delErr != nil {
+		if delErr := c.removeStaleClientRecord(rec); delErr != nil {
 			return nil, fmt.Errorf("%w: %w", lost, delErr)
 		}
 		return nil, lost
@@ -242,8 +246,38 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	return rec, nil
 }
 
+// removeStaleClientRecord removes the client record only if the write
+// that stored it is still the committed record: a winning process that
+// took over the lease may have stored its own registration after this
+// stale write returned, and that record must survive the cleanup.
+func (c *Client) removeStaleClientRecord(rec *ClientRecord) error {
+	data, found, err := c.secrets.GetSecret(labelClient)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	if !found {
+		return nil
+	}
+	var stored ClientRecord
+	if err := json.Unmarshal(data, &stored); err != nil {
+		return fmt.Errorf("stored client record is malformed: json")
+	}
+	if stored.WriteNonce != rec.WriteNonce {
+		return nil
+	}
+	if err := c.secrets.DeleteSecret(labelClient); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	return nil
+}
+
 // storeClient persists the registration record.
 func (c *Client) storeClient(rec *ClientRecord) error {
+	nonce, err := randomToken(16)
+	if err != nil {
+		return fmt.Errorf("generate write nonce: %w", err)
+	}
+	rec.WriteNonce = nonce
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("encode client record: %w", err)
