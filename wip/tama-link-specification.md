@@ -203,10 +203,16 @@ Requirements:
   correlation values the accepted operation can map — never live profile
   state or bound upstream output, so a retry after a profile reconciliation
   reconciles to the original submission instead of reporting a conflict. A
-  context that carries no correlation value is normalized to absence, and a
-  value no binding can map is not part of the identity: a retry that omits
-  the context, sends an empty one, or changes an unmapped value reconciles
-  to the original request. Reconciliation
+  context that carries no correlation value is normalized to absence, so a
+  retry that omits the context or sends an empty one carries no value in
+  any candidate identity. The accepted identity carries the correlation
+  values the operation could map at acceptance, and a retry cannot know
+  that binding set: recovery matches the full client-visible identity and,
+  when the context carries a thread ID, the identity without it, so a retry
+  reconciles whether the tool kept, gained, or lost its thread binding, or
+  left the catalog entirely. A retry that actually changed a correlation
+  value the accepted identity carried still reports a conflict.
+  Reconciliation
   runs before the catalog membership check, argument validation, and binding
   application, in addition to before the readiness and strategy checks
   below. A replay appends no
@@ -940,10 +946,12 @@ transaction — honoring a lost epoch and treating an absent fence as already
 cleared — before the slot is deleted, so a crash or a failed deletion can
 never leave the slot with no durable reference; a failed deletion keeps its
 record for the next refresh or logout, and the record is removed only after
-the deletion succeeds. The legacy label is masked by a durable invalidation
-marker before its deletion, so a failed legacy deletion cannot bring the
-rejected grant back to life through the fence-less legacy fallback; the
-marker is cleared once the label is gone or a new credential commits. With
+the deletion succeeds. The durable invalidation marker is established
+before the fence is cleared — clearing makes a surviving legacy label
+eligible for the fence-less fallback — so a crash or a failed fenced-slot
+deletion can no more bring the rejected grant back to life than a failed
+legacy deletion; the marker is cleared once the label is gone or a new
+credential commits. With
 the credential invalidated, readiness rejects new
 work as `authentication_required` instead of accepting submissions that
 can only fail on the same known-invalid grant. An upstream

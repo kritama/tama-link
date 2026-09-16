@@ -219,6 +219,12 @@ func (c *Client) Logout(ctx context.Context) error {
 			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
 	}
+	// Clearing the fence makes a surviving legacy label eligible for the
+	// fence-less fallback, so the durable invalidation marker is
+	// established before the clear; it is cleared once the label is gone.
+	if err := c.lease.MarkRefreshCredentialInvalidated(execCtx); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
 	cleared, err := c.lease.ClearCredentialFence(execCtx, refreshLeaseName, c.owner, leaseGeneration, "")
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
@@ -227,13 +233,6 @@ func (c *Client) Logout(ctx context.Context) error {
 		return fmt.Errorf("%w: logout lost the refresh lease mid-cleanup; retry", ErrLeaseContention)
 	}
 	if err := c.secrets.DeleteSecret(labelClient); err != nil {
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
-	}
-	// The legacy label may still hold a grant: mask it with the durable
-	// invalidation marker before deleting, so a failed deletion cannot
-	// resurrect it through the fence-less legacy fallback; the marker is
-	// cleared once the label is gone.
-	if err := c.lease.MarkRefreshCredentialInvalidated(execCtx); err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
 	if err := c.secrets.DeleteSecret(labelRefresh); err != nil {

@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -292,7 +293,8 @@ func TestReconcileIdempotentSubmission(t *testing.T) {
 
 	// An exact replay reconciles to the original row without claiming or
 	// mutating anything.
-	got, found, err := s.ReconcileIdempotentSubmission(ctx, "req-1", "message", []byte(`{"message":"hi"}`))
+	got, found, err := s.ReconcileIdempotentSubmission(ctx, "req-1", "message",
+		[]json.RawMessage{[]byte(`{"message":"hi"}`)})
 	if err != nil || !found {
 		t.Fatalf("reconcile = %v found=%v, want the original submission", err, found)
 	}
@@ -301,13 +303,34 @@ func TestReconcileIdempotentSubmission(t *testing.T) {
 	}
 
 	// An unclaimed key is a miss, not an error, and stays free.
-	if _, found, err := s.ReconcileIdempotentSubmission(ctx, "req-2", "message", []byte(`{"message":"hi"}`)); err != nil || found {
+	if _, found, err := s.ReconcileIdempotentSubmission(ctx, "req-2", "message",
+		[]json.RawMessage{[]byte(`{"message":"hi"}`)}); err != nil || found {
 		t.Fatalf("unclaimed reconcile = found=%v err=%v, want miss", found, err)
 	}
 
 	// A key reused with a different client-visible request is a conflict.
-	if _, _, err := s.ReconcileIdempotentSubmission(ctx, "req-1", "message", []byte(`{"message":"different"}`)); !errors.Is(err, store.ErrIdempotencyConflict) {
+	if _, _, err := s.ReconcileIdempotentSubmission(ctx, "req-1", "message",
+		[]json.RawMessage{[]byte(`{"message":"different"}`)}); !errors.Is(err, store.ErrIdempotencyConflict) {
 		t.Fatalf("conflicting reconcile = %v, want ErrIdempotencyConflict", err)
+	}
+
+	// Recovery matches any candidate identity: the stored base shape still
+	// reconciles when the retry's full shape (thread ID included) is tried
+	// alongside it, because the binding set in force at acceptance is not
+	// the one in force now.
+	if _, found, err := s.ReconcileIdempotentSubmission(ctx, "req-1", "message",
+		[]json.RawMessage{
+			[]byte(`{"arguments":{"message":"hi"},"thread_id":"t-1"}`),
+			[]byte(`{"message":"hi"}`),
+		}); err != nil || !found {
+		t.Fatalf("candidate reconcile = found=%v err=%v, want the original submission", found, err)
+	}
+
+	// ...but a retry that offers only the thread-shaped identity does not
+	// silently absorb a change to the correlation value.
+	if _, _, err := s.ReconcileIdempotentSubmission(ctx, "req-1", "message",
+		[]json.RawMessage{[]byte(`{"arguments":{"message":"hi"},"thread_id":"t-2"}`)}); !errors.Is(err, store.ErrIdempotencyConflict) {
+		t.Fatalf("thread-shape-only reconcile = %v, want ErrIdempotencyConflict", err)
 	}
 }
 

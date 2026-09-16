@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kritama/tama-link/internal/catalog"
 	"github.com/kritama/tama-link/internal/contract"
 	"github.com/kritama/tama-link/internal/limits"
 	"github.com/kritama/tama-link/internal/store"
@@ -488,6 +489,86 @@ func TestSubmitReplaysWhenToolReconciledAway(t *testing.T) {
 		Arguments:       json.RawMessage(`{"detail":"unit"}`),
 	}); appErr == nil || appErr.Code != contract.CodeOperationNotAllowed {
 		t.Fatalf("new submission = %+v, want operation_not_allowed", appErr)
+	}
+}
+
+// TestSubmitReplaysWhenBindingsChange pins that retry recovery does not
+// depend on the binding set in force now: the stored identity took the
+// shape the operation could map at acceptance, and reconciliation may
+// have changed that mapping since. Removing a thread binding must not
+// turn an exact retry into a conflict, and adding one must not either.
+func TestSubmitReplaysWhenBindingsChange(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	cfg := fixtureConfigFor(t, f, limits.Default())
+	svc, _, _ := appFromConfig(t, cfg)
+
+	// setStatusThreadBinding reconciles the status tool with or without
+	// its thread-ID binding, keeping the pinned digest honest.
+	setStatusThreadBinding := func(with bool) {
+		for i := range cfg.Profile.Operations {
+			if cfg.Profile.Operations[i].Name != "status" {
+				continue
+			}
+			bindings := []catalog.Binding{
+				{Source: catalog.SourceClientRequestID, Target: "/client_meta/client_request_id", Required: true},
+			}
+			if with {
+				bindings = append(bindings, catalog.Binding{
+					Source: catalog.SourceClientContextThreadID, Target: "/client_meta/thread_id", Required: false,
+				})
+			}
+			cfg.Profile.Operations[i].Bindings = bindings
+			if digest, err := cfg.Profile.Operations[i].ComputeDigest(); err == nil {
+				cfg.Profile.Operations[i].Digest = digest
+			}
+		}
+	}
+
+	retry := func(clientRequestID, threadID string) (string, *contract.Error) {
+		out, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+			Tool:            "status",
+			ClientRequestID: clientRequestID,
+			ClientContext:   &contract.ClientContext{ThreadID: threadID},
+			Arguments:       json.RawMessage(`{"detail":"unit"}`),
+		})
+		if appErr != nil {
+			return "", appErr
+		}
+		return out.SubmissionID, nil
+	}
+
+	// (a) Accepted with the thread binding: the stored identity carries
+	// the thread ID. Reconciliation removes the binding; the exact retry
+	// must still reconcile.
+	first, _ := retry("bind-a", "thread-1")
+	setStatusThreadBinding(false)
+	got, appErr := retry("bind-a", "thread-1")
+	if appErr != nil {
+		t.Fatalf("retry after the thread binding was removed: %s", appErr.Message)
+	}
+	if got != first {
+		t.Fatalf("retry after binding removal returned %s, want %s", got, first)
+	}
+
+	// (b) Accepted without the thread binding: the stored identity does
+	// not carry it. Reconciliation adds the binding; the exact retry —
+	// whose thread value is only now mappable — must still reconcile.
+	second, _ := retry("bind-b", "thread-2")
+	setStatusThreadBinding(true)
+	got, appErr = retry("bind-b", "thread-2")
+	if appErr != nil {
+		t.Fatalf("retry after the thread binding was added: %s", appErr.Message)
+	}
+	if got != second {
+		t.Fatalf("retry after binding addition returned %s, want %s", got, second)
+	}
+
+	// A retry that actually changed the correlation value still conflicts
+	// when the accepted identity carried it.
+	if _, appErr := retry("bind-a", "thread-3"); appErr == nil || appErr.Code != contract.CodeIdempotencyConflict {
+		t.Fatalf("changed thread ID = %+v, want idempotency_conflict", appErr)
 	}
 }
 

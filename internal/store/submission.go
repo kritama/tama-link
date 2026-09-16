@@ -180,24 +180,32 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 // appends events. A retry reconciles through this method from the
 // client-visible request before any current schema, binding, readiness, or
 // strategy state applies, so recovery of an already accepted request never
-// depends on them. A key reused with a different client-visible request is
-// ErrIdempotencyConflict. Input outside the canonical hard ceilings can
-// never match an accepted request and reports a miss.
+// depends on them. The caller supplies the candidate client-visible
+// identities the retry may correspond to: the stored identity was shaped
+// by the binding set in force at acceptance, which the retry cannot know,
+// so recovery matches any candidate and never the current descriptor. A
+// key reused with a different client-visible request is
+// ErrIdempotencyConflict. A candidate outside the canonical hard ceilings
+// can never match an accepted request and is skipped.
 func (s *Store) ReconcileIdempotentSubmission(
 	ctx context.Context,
 	clientRequestID, tool string,
-	requestArguments json.RawMessage,
+	identities []json.RawMessage,
 ) (*Submission, bool, error) {
 	if clientRequestID == "" {
 		return nil, false, errors.New("client request id is required")
 	}
-	arguments, err := canonicalArguments(requestArguments, limits.HardCeiling())
-	if err != nil {
-		return nil, false, nil
+	candidateHashes := make([]string, 0, len(identities))
+	for _, raw := range identities {
+		arguments, err := canonicalArguments(raw, limits.HardCeiling())
+		if err != nil {
+			continue
+		}
+		candidateHashes = append(candidateHashes,
+			hashInput(NewSubmission{Tool: tool, RequestArguments: arguments}))
 	}
-	argsHash := hashInput(NewSubmission{Tool: tool, RequestArguments: arguments})
 	var existingID, existingHash string
-	err = s.db.QueryRowContext(ctx,
+	err := s.db.QueryRowContext(ctx,
 		"SELECT submission_id, args_hash FROM idempotency WHERE client_request_id = ?",
 		clientRequestID,
 	).Scan(&existingID, &existingHash)
@@ -207,15 +215,17 @@ func (s *Store) ReconcileIdempotentSubmission(
 	if err != nil {
 		return nil, false, fmt.Errorf("read idempotency index: %w", err)
 	}
-	if existingHash != argsHash {
-		return nil, false, fmt.Errorf("%w: client_request_id %q was used with different arguments",
-			ErrIdempotencyConflict, clientRequestID)
+	for _, candidate := range candidateHashes {
+		if candidate == existingHash {
+			existing, err := s.GetSubmission(ctx, existingID)
+			if err != nil {
+				return nil, false, err
+			}
+			return existing, true, nil
+		}
 	}
-	existing, err := s.GetSubmission(ctx, existingID)
-	if err != nil {
-		return nil, false, err
-	}
-	return existing, true, nil
+	return nil, false, fmt.Errorf("%w: client_request_id %q was used with different arguments",
+		ErrIdempotencyConflict, clientRequestID)
 }
 
 func (s *Store) reconcileIdempotentSubmission(

@@ -123,9 +123,11 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 // a later deletion failure can never leave the slot with no durable
 // reference; a failed deletion keeps the record for the next refresh or
 // logout, and the record is removed only after the deletion succeeds. The
-// legacy label is masked by the durable invalidation marker before its
-// deletion, so a failed legacy deletion cannot bring the rejected grant
-// back to life through the fence-less legacy fallback. Without
+// durable invalidation marker is established before the fence is
+// cleared, so the rejected grant cannot be resurrected through the
+// fence-less legacy fallback by a legacy label that survives the fence
+// being the active reference, and the marker is cleared only once the
+// label is gone. Without
 // invalidation, HasCredentials would keep reporting the profile ready and
 // every submit would burn an idempotency key on a terminal failure against
 // the same known-invalid grant.
@@ -153,6 +155,14 @@ func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64
 	if fenced != nil && fenced.previousSlot != labelRefresh {
 		slot = fenced.previousSlot
 	}
+	// Clearing the fence makes a surviving legacy label eligible for the
+	// fence-less fallback, so the invalidation marker is established
+	// before the clear: no window exists — including a crash or a failed
+	// fenced-slot deletion — in which the rejected grant is readable
+	// again.
+	if err := c.lease.MarkRefreshCredentialInvalidated(execCtx); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
 	cleared, err := c.lease.ClearCredentialFence(execCtx, refreshLeaseName, c.owner, leaseGeneration, slot)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
@@ -171,15 +181,11 @@ func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64
 			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
 	}
-	// The legacy label holds the rejected grant: mark the invalidation
-	// durable before the deletion, so a failed deletion cannot bring the
-	// grant back to life through the fence-less legacy fallback, and
-	// clear the marker only once the deletion succeeds. The mark itself
-	// is the retryable record; every later refresh and logout keeps the
-	// grant masked.
-	if err := c.lease.MarkRefreshCredentialInvalidated(execCtx); err != nil {
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
-	}
+	// The legacy label holds the rejected grant: the marker is already
+	// durable, so a failed deletion cannot bring the grant back to life
+	// through the fence-less legacy fallback. The marker is cleared only
+	// once the deletion succeeds; the mark itself is the retryable
+	// record, and every later refresh and logout keeps the grant masked.
 	if err := c.secrets.DeleteSecret(labelRefresh); err != nil {
 		return nil
 	}

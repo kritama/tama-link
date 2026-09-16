@@ -333,6 +333,66 @@ func TestInvalidGrantMasksUndeletableLegacyCredential(t *testing.T) {
 	}
 }
 
+// TestInvalidGrantMasksLegacyGrantWhenSlotDeletionFails pins the marker
+// ordering: the legacy label that survived an earlier best-effort
+// deletion becomes eligible for the fence-less fallback the moment the
+// fence is cleared, so the invalidation marker must already be durable
+// when a failed fenced-slot deletion aborts the cleanup — otherwise
+// readiness would again report the rejected grant as live.
+func TestInvalidGrantMasksLegacyGrantWhenSlotDeletionFails(t *testing.T) {
+	server := (&metadataServer{}).start(t)
+	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
+	secrets := newFakeSecrets()
+	lease := newFakeLease()
+	clock := newTestClock(time.Unix(1_700_000_000, 0))
+	client := clientForServer(t, server, secrets, lease, clock)
+	seedCredentials(t, secrets, "cid-1", "shh", server.ts.URL+"/oauth/token", client.issuer, "rt-1")
+	ctx := context.Background()
+
+	// A successful rotation commits the fence; the legacy label is then
+	// restored to model one that a previous best-effort deletion left
+	// behind.
+	if _, err := client.Token(ctx); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	// Expire the cached access token so the next call refreshes the
+	// grant instead of returning the cache.
+	clock.set(clock.current().Add(3601 * time.Second))
+
+	_, slot, found, err := lease.ReadCredentialFence(ctx)
+	if err != nil || !found || slot == "" {
+		t.Fatalf("fence after rotation = slot:%q found:%v err:%v, want a fenced slot", slot, found, err)
+	}
+	legacy, ok, _ := secrets.GetSecret(slot)
+	if !ok {
+		t.Fatalf("fenced slot %s: not found", slot)
+	}
+	if err := secrets.SetSecret(labelRefresh, legacy); err != nil {
+		t.Fatalf("restore legacy label: %v", err)
+	}
+
+	// The grant is rejected and the fenced-slot deletion fails: the
+	// cleanup aborts after clearing the fence, but the legacy grant must
+	// already be masked.
+	server.tokenBody = `{"error":"invalid_grant"}`
+	secrets.failDeletes(slot)
+	if _, err := client.Token(ctx); !errors.Is(err, ErrGrantInvalid) {
+		t.Fatalf("Token = %v, want ErrGrantInvalid", err)
+	}
+	if invalidated, err := lease.RefreshCredentialInvalidated(ctx); err != nil || !invalidated {
+		t.Fatalf("invalidation marker = %v %v, want set while the legacy label survives", invalidated, err)
+	}
+	if _, found, _ := secrets.GetSecret(labelRefresh); !found {
+		t.Fatal("the legacy label is gone; the failed-deletion scenario is not exercised")
+	}
+	if _, _, found, _ := lease.ReadCredentialFence(ctx); found {
+		t.Fatal("the fence is still present; the clear was not exercised")
+	}
+	if ok, err := client.HasCredentials(ctx); err != nil || ok {
+		t.Fatalf("HasCredentials with a masked legacy grant = %v %v, want false without an error", ok, err)
+	}
+}
+
 // fencedSlot reports whether label looks like a per-transaction fenced
 // credential slot (labelRefresh@hex).
 func fencedSlot(label string) bool {

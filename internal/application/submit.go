@@ -33,32 +33,27 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 		in.ClientRequestID = clientRequestID
 	}
 
-	// The pinned descriptor, when the tool is still in the catalog, tells
-	// the identity which correlation values this operation can map. A
-	// read-only lookup: it performs no acceptance checks.
-	var pinned *catalog.Descriptor
-	if d, ok := s.profile.Catalog().Find(in.Tool); ok {
-		pinned = &d
-	}
-
 	// Reconcile an existing idempotency record from the client-visible
 	// request BEFORE any current-profile state applies: catalog
 	// membership, schema validation, bindings, credential readiness, and
 	// the strategy gate are acceptance checks for genuinely new work and
 	// must not block recovery of an already accepted request, even when
-	// the profile was reconciled away from its tool or credentials were
-	// removed since acceptance. A retry that reconciles accepts no new
-	// work, so current catalog state is irrelevant to it. The lookup is
-	// read-only, so a miss leaves the key free for a genuinely new
-	// acceptance below. A generated key is fresh on every call and skips
-	// the lookup.
-	identity, err := requestIdentity(in, pinned)
+	// the profile was reconciled away from its tool, its bindings changed,
+	// or credentials were removed since acceptance. The stored identity
+	// was shaped by the binding set in force at acceptance, which a retry
+	// cannot know, so the candidates — the full client-visible identity
+	// and, when the context carries a thread ID, the identity without it
+	// — cover every accepted shape without consulting the current
+	// descriptor. The lookup is read-only, so a miss leaves the key free
+	// for a genuinely new acceptance below. A generated key is fresh on
+	// every call and skips the lookup.
+	identities, err := retryIdentities(in)
 	if err != nil {
 		return contract.SubmitOutput{}, failed(contract.CodeInvalidRequest,
 			"Arguments must be a valid JSON document.")
 	}
 	if clientRequestID != "" {
-		sub, found, err := s.store.ReconcileIdempotentSubmission(ctx, clientRequestID, in.Tool, identity)
+		sub, found, err := s.store.ReconcileIdempotentSubmission(ctx, clientRequestID, in.Tool, identities)
 		if err != nil {
 			if errors.Is(err, store.ErrIdempotencyConflict) {
 				return contract.SubmitOutput{}, failed(contract.CodeIdempotencyConflict,
@@ -75,6 +70,15 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 	if !ok {
 		return contract.SubmitOutput{}, failed(contract.CodeOperationNotAllowed,
 			"Operation %q is not approved by the selected profile.", in.Tool)
+	}
+
+	// The accepted identity carries the correlation values the pinned
+	// operation can map: when the operation cannot map the thread ID, the
+	// value is not part of the request's durable identity at all.
+	identity, err := requestIdentity(in, identityThreadID(in, &d))
+	if err != nil {
+		return contract.SubmitOutput{}, failed(contract.CodeInvalidRequest,
+			"Arguments must be a valid JSON document.")
 	}
 
 	clientSchema := d.ClientSchema
@@ -164,23 +168,11 @@ func submitOutput(sub *store.Submission) contract.SubmitOutput {
 	}
 }
 
-// requestIdentity renders the client-visible request the idempotency
-// identity covers: the raw argument bytes plus the client-owned correlation
-// values the accepted operation can map. A context that carries no
-// correlation values is normalized to absence, so a retry that omits the
-// context or sends an empty one reconciles to the same identity. The
-// thread ID is included only when the pinned operation can map it; when
-// the operation is no longer in the pinned catalog, every correlation
-// source is included conservatively so an unchanged retry still reconciles
-// to the original submission. Current schema, binding, and descriptor
-// state beyond those mappable correlation sources is deliberately
-// excluded — those are acceptance checks for new work, applied only after
-// reconciliation.
-func requestIdentity(in contract.SubmitInput, d *catalog.Descriptor) (json.RawMessage, error) {
-	threadID := ""
-	if (d == nil || mapsThreadID(d)) && in.ClientContext != nil {
-		threadID = in.ClientContext.ThreadID
-	}
+// requestIdentity renders the client-visible request with one
+// correlation shape: the raw argument bytes plus the thread ID when the
+// shape carries one. An empty thread ID normalizes to absence, so a
+// context that is omitted and one that is sent empty are one identity.
+func requestIdentity(in contract.SubmitInput, threadID string) (json.RawMessage, error) {
 	identity := struct {
 		Arguments json.RawMessage `json:"arguments"`
 		ThreadID  *string         `json:"thread_id,omitempty"`
@@ -189,6 +181,43 @@ func requestIdentity(in contract.SubmitInput, d *catalog.Descriptor) (json.RawMe
 		identity.ThreadID = &threadID
 	}
 	return json.Marshal(identity)
+}
+
+// identityThreadID is the correlation value the accepted identity carries
+// for a genuinely new acceptance: the client thread ID when the pinned
+// operation can map it, absent otherwise. A context that carries no value
+// normalizes to absence in every case.
+func identityThreadID(in contract.SubmitInput, d *catalog.Descriptor) string {
+	if in.ClientContext == nil || !mapsThreadID(d) {
+		return ""
+	}
+	return in.ClientContext.ThreadID
+}
+
+// retryIdentities renders the candidate client-visible identities an exact
+// retry may correspond to: the full identity, and — when the context
+// carries a thread ID — the identity without it. Which shape the accepted
+// identity took depends on the binding set in force at acceptance, which a
+// retry cannot know: reconciliation may have changed the tool's bindings
+// or removed the tool from the catalog, and both candidates still cover
+// the stored shape without consulting the current descriptor.
+func retryIdentities(in contract.SubmitInput) ([]json.RawMessage, error) {
+	threadID := ""
+	if in.ClientContext != nil {
+		threadID = in.ClientContext.ThreadID
+	}
+	full, err := requestIdentity(in, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if threadID == "" {
+		return []json.RawMessage{full}, nil
+	}
+	base, err := requestIdentity(in, "")
+	if err != nil {
+		return nil, err
+	}
+	return []json.RawMessage{full, base}, nil
 }
 
 // mapsThreadID reports whether the descriptor has a binding that can map

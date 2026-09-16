@@ -491,6 +491,12 @@ func (c *testClock) set(t time.Time) {
 	c.now = t
 }
 
+func (c *testClock) current() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
 // testBase is the canonical profile endpoint used by static tests.
 const (
 	testBase     = "https://tama.example"
