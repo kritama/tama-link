@@ -65,10 +65,23 @@ type Leaser interface {
 	// the lease while its secret-store write was blocked can never advance
 	// the fence, even before the winner commits its own generation.
 	CommitCredentialFence(ctx context.Context, fenceGeneration int64, slot, leaseName, leaseOwner string, leaseGeneration int64) (bool, error)
-	// ClearCredentialFence removes the credential fence, so the profile
-	// has no live fenced credential. Logout pairs it with deleting the
-	// committed slot and the legacy labels.
-	ClearCredentialFence(ctx context.Context) error
+	// ClearCredentialFence removes the credential fence when, and only
+	// when, leaseOwner still holds leaseName unexpired in the lease
+	// ownership epoch leaseGeneration. It reports cleared=false for a lost
+	// epoch, so a logout whose lease was lost mid-cleanup can never wipe a
+	// newer fence installed by the process that took over.
+	ClearCredentialFence(ctx context.Context, leaseName, leaseOwner string, leaseGeneration int64) (bool, error)
+	// RecordRetiredCredentialSlot durably records one live credential slot
+	// whose secure-backend deletion failed, so a later refresh or logout
+	// can retry the deletion instead of silently stranding a still-valid
+	// grant.
+	RecordRetiredCredentialSlot(ctx context.Context, slot string) error
+	// RetiredCredentialSlots lists the credential slots recorded for
+	// retirement retry.
+	RetiredCredentialSlots(ctx context.Context) ([]string, error)
+	// ClearRetiredCredentialSlot removes the retirement record for one
+	// slot after its deletion succeeded.
+	ClearRetiredCredentialSlot(ctx context.Context, slot string) error
 }
 
 // Config configures one profile's OAuth client.

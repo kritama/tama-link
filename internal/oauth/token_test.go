@@ -401,11 +401,13 @@ func TestCompleteAuthorizationContentionDoesNotBurnCode(t *testing.T) {
 	clock.set(clock.now.Add(time.Minute))
 }
 
-// TestRefreshRetriesPreviousSlotAfterBackendFailure pins that a previous-
-// slot retirement failure aborts the refresh while the old slot is still
-// fence-referenced, so the next refresh retries the retirement instead of
-// silently stranding a still-valid grant.
-func TestRefreshRetriesPreviousSlotAfterBackendFailure(t *testing.T) {
+// TestRefreshRetiresPreviousSlotAfterBackendFailure pins the durable
+// retirement backlog: a previous-slot deletion that fails is recorded
+// durably and the refresh still succeeds — the committed slot is the only
+// live credential — and a later refresh drains the backlog, deleting the
+// old slot and clearing its record instead of silently stranding a
+// still-valid grant.
+func TestRefreshRetiresPreviousSlotAfterBackendFailure(t *testing.T) {
 	server, client, secrets, lease, clock := tokenFixture(t, "rt-1")
 	ctx := context.Background()
 	if _, err := client.Token(ctx); err != nil {
@@ -419,27 +421,106 @@ func TestRefreshRetriesPreviousSlotAfterBackendFailure(t *testing.T) {
 	clock.set(clock.now.Add(2 * time.Hour))
 	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
 	secrets.failDeletes(slot1)
-	if _, err := client.Token(ctx); err == nil {
-		t.Fatal("refresh succeeded despite the retirement failure")
+	if _, err := client.Token(ctx); err != nil {
+		t.Fatalf("second Token: %v", err)
 	}
-	// The old slot is still live and fence-referenced: the grant is not
-	// stranded.
+	// The new credential is live and the refresh succeeded; the old slot
+	// is no longer referenced but still present, and its deletion is
+	// durably recorded for retry.
+	_, slot2, found, err := lease.ReadCredentialFence(ctx)
+	if err != nil || !found || slot2 == slot1 {
+		t.Fatalf("fence after second refresh: %q found:%v err:%v", slot2, found, err)
+	}
 	if _, ok, _ := secrets.GetSecret(slot1); !ok {
-		t.Fatal("the failed retirement stranded the previous slot")
+		t.Fatal("the old slot vanished without its deletion succeeding")
 	}
-	generation, slot, found, ferr := lease.ReadCredentialFence(ctx)
-	if ferr != nil || !found || slot != slot1 {
-		t.Fatalf("fence after failed retirement = %d %s found:%v err:%v, want slot1", generation, slot, found, ferr)
+	pending, err := lease.RetiredCredentialSlots(ctx)
+	if err != nil || len(pending) != 1 || pending[0] != slot1 {
+		t.Fatalf("retirement backlog = %v err=%v, want [slot1]", pending, err)
 	}
 
-	// With the backend healthy again, the next refresh retires the old
-	// slot and leaves exactly one live credential.
+	// With the backend healthy again, the next refresh drains the backlog
+	// and retires the old slot.
 	secrets.allowDeletes(slot1)
+	clock.set(clock.now.Add(2 * time.Hour))
 	if _, err := client.Token(ctx); err != nil {
-		t.Fatalf("retried Token: %v", err)
+		t.Fatalf("third Token: %v", err)
 	}
 	if _, ok, _ := secrets.GetSecret(slot1); ok {
-		t.Fatal("the retried refresh left the previous slot behind")
+		t.Fatal("the drained refresh left the previous slot behind")
+	}
+	pending, err = lease.RetiredCredentialSlots(ctx)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("retirement backlog after drain = %v err=%v, want empty", pending, err)
+	}
+	clock.set(clock.now.Add(time.Minute))
+}
+
+// TestRefreshRenewsLeaseThroughPersistence pins that renewal spans the
+// credential persistence, not just the token exchange: a slow secret-store
+// write that outlives the original lease TTL must not reject the
+// replacement after the endpoint already rotated the grant.
+func TestRefreshRenewsLeaseThroughPersistence(t *testing.T) {
+	server := (&metadataServer{}).start(t)
+	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+	shared := newFakeSecrets()
+	clock := newTestClock(time.Unix(1_700_000_000, 0))
+	lease := newFakeLease()
+	client := clientForServer(t, server, &delayedSecrets{inner: shared, delay: 400 * time.Millisecond}, lease, clock)
+	seedCredentials(t, shared, "cid-1", "shh", server.ts.URL+"/oauth/token", client.issuer, "rt-1")
+
+	prev := refreshLeaseTTL
+	refreshLeaseTTL = 100 * time.Millisecond
+	defer func() { refreshLeaseTTL = prev }()
+
+	if _, err := client.Token(context.Background()); err != nil {
+		t.Fatalf("Token with a write outliving the lease TTL: %v", err)
+	}
+	// The replacement is committed: the fence points at the new slot.
+	_, slot, found, err := lease.ReadCredentialFence(context.Background())
+	if err != nil || !found {
+		t.Fatalf("fence after slow write: %v", err)
+	}
+	data, ok, serr := shared.GetSecret(slot)
+	if serr != nil || !ok || !strings.Contains(string(data), "rt-2") {
+		t.Fatalf("live credential = %s ok:%v err:%v", data, ok, serr)
+	}
+	clock.set(clock.now.Add(time.Minute))
+}
+
+// TestLogoutLostLeaseKeepsRetryableState pins the epoch-bound cleanup: a
+// logout whose lease is lost mid-cleanup fails retryably and does not
+// clear a fence it no longer owns — the slot stays discoverable so a
+// retried logout finishes the cleanup.
+func TestLogoutLostLeaseKeepsRetryableState(t *testing.T) {
+	_, client, secrets, lease, clock := tokenFixture(t, "rt-1")
+	ctx := context.Background()
+	if _, err := client.Token(context.Background()); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	_, _, found, err := lease.ReadCredentialFence(ctx)
+	if err != nil || !found {
+		t.Fatalf("fence after refresh: %v", err)
+	}
+
+	// The first renewal fails mid-cleanup while the slow slot deletion is
+	// still running: the epoch-bound fence clear must refuse.
+	lease.loseOnRenew()
+	shared := secrets
+	shared.deleteDelay = 60 * time.Millisecond
+	prev := refreshLeaseTTL
+	refreshLeaseTTL = 30 * time.Millisecond
+	defer func() {
+		refreshLeaseTTL = prev
+		shared.deleteDelay = 0
+	}()
+	if err := client.Logout(ctx); err == nil {
+		t.Fatal("Logout succeeded after losing its lease mid-cleanup")
+	}
+	// The fence was not cleared by a lease it no longer owned: the slot
+	// record keeps the cleanup retryable.
+	if _, _, stillFound, ferr := lease.ReadCredentialFence(ctx); ferr != nil || !stillFound {
+		t.Fatalf("fence after lost-lease logout: found=%v err=%v, want still referenced", stillFound, ferr)
 	}
 	clock.set(clock.now.Add(time.Minute))
 }

@@ -145,16 +145,21 @@ func (c *Client) Expiry() (expiry time.Time, ok bool) {
 // epoch, so the claim makes every in-flight writer's commit fail and roll
 // back its own slot, and no writer can reinstall a credential behind the
 // logout. A contended claim fails with ErrLeaseContention so the caller
-// can retry once the other process's refresh completes. The committed slot
+// can retry once the other process's refresh completes. Ownership is
+// renewed through the whole cleanup: a deletion that blocks past the TTL
+// must not let another process take over and reinstall credentials behind
+// a half-finished logout, and the fence clear is bound to the claimed
+// epoch, so a lost lease can never wipe a newer fence. The committed slot
 // is deleted while the fence still references it: a failed deletion keeps
 // the slot discoverable, so a retried logout finishes the cleanup. The
-// fence is cleared once its slot is gone, then the legacy labels are
-// deleted; a later login starts from a clean fence. Logout never touches
-// the state encryption key or the state database.
+// fence is cleared once its slot is gone, then the legacy labels and any
+// retirement backlog are deleted; a later login starts from a clean
+// fence. Logout never touches the state encryption key or the state
+// database.
 func (c *Client) Logout(ctx context.Context) error {
 	c.refreshMu.Lock()
 	defer c.refreshMu.Unlock()
-	_, claimed, err := c.claimRefreshLease(ctx)
+	leaseGeneration, claimed, err := c.claimRefreshLease(ctx)
 	if err != nil {
 		return err
 	}
@@ -163,7 +168,18 @@ func (c *Client) Logout(ctx context.Context) error {
 	}
 	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
 
-	_, slot, found, err := c.lease.ReadCredentialFence(ctx)
+	// Renew ownership through the whole cleanup: a slow secure-backend
+	// deletion must not outlive the lease TTL and hand the profile to
+	// another process mid-logout.
+	execCtx, cancelExec := context.WithCancel(ctx)
+	renewed := make(chan struct{})
+	go c.renewLease(execCtx, cancelExec, renewed)
+	defer func() {
+		cancelExec()
+		<-renewed
+	}()
+
+	_, slot, found, err := c.lease.ReadCredentialFence(execCtx)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
@@ -172,14 +188,22 @@ func (c *Client) Logout(ctx context.Context) error {
 			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
 	}
-	if err := c.lease.ClearCredentialFence(ctx); err != nil {
+	cleared, err := c.lease.ClearCredentialFence(execCtx, refreshLeaseName, c.owner, leaseGeneration)
+	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	if !cleared {
+		return fmt.Errorf("%w: logout lost the refresh lease mid-cleanup; retry", ErrLeaseContention)
 	}
 	for _, label := range []string{labelClient, labelRefresh} {
 		if err := c.secrets.DeleteSecret(label); err != nil {
 			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
 	}
+	// Drain the retirement backlog: slots a failed rotation left behind.
+	// Best effort — a slot whose deletion still fails keeps its durable
+	// record for the next refresh.
+	c.retireFailedSlots(execCtx)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.token = ""

@@ -8,20 +8,23 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sort"
 	"sync"
 	"testing"
 	"time"
 )
 
 // fakeSecrets is an in-memory SecretStore for tests. setDelay blocks
-// SetSecret so a test can hold the credential write open past a lease TTL.
+// SetSecret so a test can hold the credential write open past a lease TTL;
+// deleteDelay blocks DeleteSecret the same way for the cleanup path.
 // failDelete makes DeleteSecret fail for one label so a test can prove a
 // deletion failure stays recoverable.
 type fakeSecrets struct {
-	mu         sync.Mutex
-	items      map[string][]byte
-	setDelay   time.Duration
-	failDelete map[string]error
+	mu          sync.Mutex
+	items       map[string][]byte
+	setDelay    time.Duration
+	deleteDelay time.Duration
+	failDelete  map[string]error
 }
 
 func newFakeSecrets() *fakeSecrets {
@@ -92,6 +95,12 @@ func (f *fakeSecrets) SetSecret(label string, data []byte) error {
 
 func (f *fakeSecrets) DeleteSecret(label string) error {
 	f.mu.Lock()
+	if f.deleteDelay > 0 {
+		d := f.deleteDelay
+		f.mu.Unlock()
+		time.Sleep(d)
+		f.mu.Lock()
+	}
 	defer f.mu.Unlock()
 	if err, ok := f.failDelete[label]; ok {
 		return err
@@ -150,6 +159,9 @@ type fakeLease struct {
 
 	fence          *sharedFence
 	fenceCommitErr error
+	// retired records the retirement backlog: slots whose deletion failed
+	// and that a later refresh or logout must retry.
+	retired map[string]struct{}
 }
 
 func newFakeLease() *fakeLease {
@@ -216,12 +228,18 @@ func (f *sharedFence) commit(generation int64, slot, leaseOwner string) bool {
 	return true
 }
 
-func (f *sharedFence) clear() {
+// clearIfOwned clears the fence only when leaseOwner still owns the
+// shared lease. Returns whether it cleared.
+func (f *sharedFence) clearIfOwned(leaseOwner string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.leaseHolder != leaseOwner {
+		return false
+	}
 	f.generation = 0
 	f.slot = ""
 	f.found = false
+	return true
 }
 
 func (f *fakeLease) holdOther() {
@@ -302,10 +320,48 @@ func (f *fakeLease) CommitCredentialFence(_ context.Context, fenceGeneration int
 	return f.fence.commit(fenceGeneration, slot, leaseOwner), nil
 }
 
-func (f *fakeLease) ClearCredentialFence(_ context.Context) error {
-	if f.fence != nil {
-		f.fence.clear()
+func (f *fakeLease) ClearCredentialFence(_ context.Context, leaseName, leaseOwner string, leaseGeneration int64) (bool, error) {
+	if leaseName != refreshLeaseName {
+		return false, fmt.Errorf("unexpected lease name %q", leaseName)
 	}
+	if f.fence == nil {
+		return false, nil
+	}
+	if f.leaseGen() != leaseGeneration {
+		return false, nil
+	}
+	return f.fence.clearIfOwned(leaseOwner), nil
+}
+
+// leaseGen reports the caller's captured ownership epoch. The fake's
+// per-process generation is always zero, matching the captured value.
+func (f *fakeLease) leaseGen() int64 { return 0 }
+
+func (f *fakeLease) RecordRetiredCredentialSlot(_ context.Context, slot string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.retired == nil {
+		f.retired = map[string]struct{}{}
+	}
+	f.retired[slot] = struct{}{}
+	return nil
+}
+
+func (f *fakeLease) RetiredCredentialSlots(_ context.Context) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	slots := make([]string, 0, len(f.retired))
+	for slot := range f.retired {
+		slots = append(slots, slot)
+	}
+	sort.Strings(slots)
+	return slots, nil
+}
+
+func (f *fakeLease) ClearRetiredCredentialSlot(_ context.Context, slot string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.retired, slot)
 	return nil
 }
 

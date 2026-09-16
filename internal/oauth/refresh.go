@@ -81,27 +81,24 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 	form.Set("resource", c.endpoint)
 
 	// The exchange is a network call and the credential write follows it,
-	// so the lease is renewed on a third of its TTL for the whole critical
-	// section, including the write, and persistence is gated on the
-	// captured epoch.
-	tok, err := c.leasedExchange(ctx, leaseGeneration, func(ectx context.Context) (*tokenResponse, error) {
-		return c.postToken(ectx, cred.TokenEndpoint, rec, form)
-	})
+	// so the lease is renewed on a third of its TTL across the whole
+	// critical section — the exchange and the fenced persistence — and
+	// ownership is verified before the write.
+	tok, err := c.leasedExchangeAndPersist(ctx, leaseGeneration,
+		func(ectx context.Context) (*tokenResponse, error) {
+			return c.postToken(ectx, cred.TokenEndpoint, rec, form)
+		},
+		func(pctx context.Context, tok *tokenResponse) error {
+			// The fenced store is the persistence fence: the slot write
+			// plus the atomic fence commit decide the outcome. The commit
+			// is bound to the lease epoch captured at claim time, so a
+			// writer whose lease a foreign claim took can never advance
+			// the fence. A failed commit deletes the orphan slot, and the
+			// refresh fails instead of reporting a superseded success.
+			return c.applyTokens(pctx, fenced, tok, leaseGeneration)
+		})
 	if err != nil {
 		if errors.Is(err, ErrGrantInvalid) {
-			c.clearToken()
-		}
-		return "", err
-	}
-	// The fenced store is the persistence fence: the slot write plus the
-	// atomic fence commit decide the outcome. The commit is bound to the
-	// lease epoch captured at claim time, so a writer whose lease a
-	// foreign claim took while its secret-store write was blocked can
-	// never advance the fence — even before the winner commits its own
-	// generation. A failed commit deletes the orphan slot, and the refresh
-	// fails instead of reporting a superseded success.
-	if err := c.applyTokens(ctx, fenced, tok, leaseGeneration); err != nil {
-		if ctx.Err() == nil {
 			c.clearToken()
 		}
 		return "", err
@@ -109,18 +106,22 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 	return tok.AccessToken, nil
 }
 
-// leasedExchange renews the claimed refresh lease on a third of its TTL
-// across one token exchange and verifies ownership immediately before
-// persistence: a renewal that fails or reports lost ownership cancels the
-// exchange context, and the atomic commit gate fails for a foreign claim
-// on the captured epoch. The caller has claimed the lease (epoch
-// leaseGeneration) and owns its release. A plain caller cancellation
-// surfaces the exchange error unchanged; the renewal loop only cancels its
-// own context.
-func (c *Client) leasedExchange(
+// leasedExchangeAndPersist renews the claimed refresh lease on a third of
+// its TTL across one token exchange AND the credential persistence that
+// follows it: stopping the renewal between them would let a slow
+// secret-store write outlive the lease TTL and reject the replacement
+// after the endpoint already rotated the grant. Ownership is verified
+// immediately before persistence with an atomic commit gate on the
+// captured epoch; a renewal that fails or reports lost ownership cancels
+// the working context so the stale write aborts. The caller has claimed
+// the lease (epoch leaseGeneration) and owns its release. A plain caller
+// cancellation surfaces the exchange error unchanged; the renewal loop
+// only cancels its own context.
+func (c *Client) leasedExchangeAndPersist(
 	ctx context.Context,
 	leaseGeneration int64,
 	exchange func(context.Context) (*tokenResponse, error),
+	persist func(context.Context, *tokenResponse) error,
 ) (*tokenResponse, error) {
 	execCtx, cancelExec := context.WithCancel(ctx)
 	renewed := make(chan struct{})
@@ -151,6 +152,9 @@ func (c *Client) leasedExchange(
 		return nil, ctx.Err()
 	} else if cerr != nil || !committed {
 		return nil, errors.New("refresh lease lost before the credential write")
+	}
+	if err := persist(execCtx, tok); err != nil {
+		return nil, err
 	}
 	return tok, nil
 }

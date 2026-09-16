@@ -78,8 +78,8 @@ func TestClearCredentialFence(t *testing.T) {
 	if ok, err := fenceCommit(ctx, s, 1, "slot-1", "owner-a", 1); err != nil || !ok {
 		t.Fatalf("commit = %v %v", ok, err)
 	}
-	if err := s.ClearCredentialFence(ctx); err != nil {
-		t.Fatalf("ClearCredentialFence: %v", err)
+	if cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1); err != nil || !cleared {
+		t.Fatalf("ClearCredentialFence = %v %v, want cleared", cleared, err)
 	}
 	if _, _, found, err := s.ReadCredentialFence(ctx); err != nil || found {
 		t.Fatalf("fence after clear = found:%v err:%v, want none", found, err)
@@ -91,5 +91,20 @@ func TestClearCredentialFence(t *testing.T) {
 	}
 	if _, slot, found, err := s.ReadCredentialFence(ctx); err != nil || !found || slot != "slot-2" {
 		t.Fatalf("fence after relogin = %s found:%v err:%v", slot, found, err)
+	}
+
+	// A lost epoch cannot clear a fence installed by the process that
+	// took over: owner-b claims, then owner-a's stale clear is refused and
+	// the fence survives.
+	clk.Advance(2 * time.Minute)
+	if ok, err := s.ClaimLease(ctx, "oauth/refresh", "owner-b", time.Minute); err != nil || !ok {
+		t.Fatalf("owner-b claim = %v %v", ok, err)
+	}
+	cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1)
+	if err != nil || cleared {
+		t.Fatalf("stale-epoch clear = %v %v, want refused", cleared, err)
+	}
+	if _, slot, found, err := s.ReadCredentialFence(ctx); err != nil || !found || slot != "slot-2" {
+		t.Fatalf("fence after refused clear = %s found:%v err:%v", slot, found, err)
 	}
 }

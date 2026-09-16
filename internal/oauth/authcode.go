@@ -103,33 +103,35 @@ func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *C
 	}
 	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
 
-	tok, err := c.leasedExchange(ctx, leaseGeneration, func(ectx context.Context) (*tokenResponse, error) {
-		return c.postToken(ectx, md.AS.TokenEndpoint, rec, form)
-	})
-	if err != nil {
-		return err
-	}
-	if tok.RefreshToken == "" {
-		return fmt.Errorf("%w: authorization code exchange returned no refresh token", ErrNoCredentials)
-	}
-	cred := &refreshCredential{
-		RefreshToken:  tok.RefreshToken,
-		TokenEndpoint: md.AS.TokenEndpoint,
-		Issuer:        md.AS.Issuer,
-		Updated:       c.clock().UTC(),
-	}
 	// The authorization commits its credential through the same fence as
-	// every refresh, so a concurrent rotation is detected by the commit,
-	// never clobbered.
-	fenced, err := c.loadFenced(ctx)
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
-	}
-	if fenced == nil {
-		fenced = &fencedCredential{generation: 1}
-	}
-	fenced.credential = cred
-	return c.applyTokens(ctx, fenced, tok, leaseGeneration)
+	// every refresh, under the same renewal span and pre-write ownership
+	// gate, so a concurrent rotation is detected by the commit, never
+	// clobbered.
+	_, err = c.leasedExchangeAndPersist(ctx, leaseGeneration,
+		func(ectx context.Context) (*tokenResponse, error) {
+			return c.postToken(ectx, md.AS.TokenEndpoint, rec, form)
+		},
+		func(pctx context.Context, tok *tokenResponse) error {
+			if tok.RefreshToken == "" {
+				return fmt.Errorf("%w: authorization code exchange returned no refresh token", ErrNoCredentials)
+			}
+			cred := &refreshCredential{
+				RefreshToken:  tok.RefreshToken,
+				TokenEndpoint: md.AS.TokenEndpoint,
+				Issuer:        md.AS.Issuer,
+				Updated:       c.clock().UTC(),
+			}
+			fenced, err := c.loadFenced(pctx)
+			if err != nil {
+				return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+			}
+			if fenced == nil {
+				fenced = &fencedCredential{generation: 1}
+			}
+			fenced.credential = cred
+			return c.applyTokens(pctx, fenced, tok, leaseGeneration)
+		})
+	return err
 }
 
 // checkLoopbackRedirect enforces D5: the only redirect this client accepts

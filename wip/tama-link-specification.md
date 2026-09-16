@@ -730,20 +730,25 @@ critical section: the lease is renewed on a third of its TTL while the token
 exchange runs and the replacement credential is written, and a lost lease
 aborts before any replacement token is persisted: ownership is re-verified
 by an atomic commit gate immediately before the write, so a lease lost to a
-foreign claim blocks the stale write. The credential persistence itself is
-fenced: every writer commits its replacement at its own unique secure-backend
-slot and then atomically advances a durable fence pointer to that slot's
-generation, and the commit is a single atomic operation that requires both
-an unadvanced fence generation and the writer's own live, unexpired lease
-ownership epoch — with a provider that permits overlapping rotations, a
-writer that lost the lease while its secret-store write was blocked can
-never make its value live, not even before the winner commits its own
-generation. A successful commit leaves the new slot as the only live
-credential. Retirement of the replaced credentials — the legacy label and
-the previous live slot — happens before the commit: the commit is the
-single decision point, so a retirement failure aborts with rollback of the
-new slot while the still-referenced previous slot is retried by the next
-refresh, and a failure can never silently strand a still-valid grant. The
+foreign claim blocks the stale write. The renewal spans the whole critical
+section — the token exchange and the fenced persistence — so a slow
+secret-store write cannot outlive the lease TTL and reject the replacement
+after the endpoint already rotated the grant. The credential persistence
+itself is fenced: every writer commits its replacement at its own unique
+secure-backend slot and then atomically advances a durable fence pointer to
+that slot's generation, and the commit is a single atomic operation that
+requires both an unadvanced fence generation and the writer's own live,
+unexpired lease ownership epoch — with a provider that permits overlapping
+rotations, a writer that lost the lease while its secret-store write was
+blocked can never make its value live, not even before the winner commits
+its own generation. The commit is the last fallible step for the slot
+swap: the previous live slot stays referenced until the commit is durable,
+so a rejected commit can never leave the fence pointing at a deleted
+credential. A successful commit leaves the new slot as the only live
+credential; the replaced credentials — the legacy label and the previous
+live slot — are retired after the commit, and a failed retirement is
+recorded durably so a later refresh or logout retries the deletion instead
+of silently stranding a still-valid grant. The
 authorization-code exchange is a credential rotation too: it claims the
 same refresh lease before redeeming the single-use code and renews the
 lease across both the exchange and the fenced persistence, so a lease
@@ -753,10 +758,13 @@ and claims the cross-process refresh lease before touching credentials, so
 no concurrent writer can reinstall a fence and slot behind the logout: the
 claim advances the epoch and every in-flight writer's commit fails and
 rolls back its own slot. A contended claim fails logout with a retryable
-error. The committed slot is deleted while the fence still references it —
-a failed deletion keeps the slot discoverable, so a retried logout
-finishes the cleanup — and the fence is cleared once its slot is gone; a
-later login starts from a clean fence. The
+error. Ownership is renewed through the whole cleanup, and the fence clear
+is bound to the claimed epoch, so a logout that loses its lease
+mid-cleanup fails retryably and can never wipe a newer fence installed by
+the process that took over. The committed slot is deleted while the fence
+still references it — a failed deletion keeps the slot discoverable, so a
+retried logout finishes the cleanup — and the fence is cleared once its
+slot is gone; a later login starts from a clean fence. The
 fence subsumes post-write ownership checks, which
 cannot repair an unfenced external write. Refresh transactions are also
 serialized inside one process, and a burst of concurrent token requests

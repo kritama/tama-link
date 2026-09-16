@@ -78,14 +78,95 @@ func (s *Store) CommitCredentialFence(
 	return affected > 0, nil
 }
 
-// ClearCredentialFence removes the credential fence row, so the profile
-// has no live fenced credential. Logout pairs it with deleting the
-// committed slot and the legacy labels: readers then see no credential at
-// all instead of following the pointer to a deleted slot and failing with
-// a backend error.
-func (s *Store) ClearCredentialFence(ctx context.Context) error {
-	if _, err := s.exec(ctx, "DELETE FROM credential_fence WHERE name = ?", credentialFenceName); err != nil {
-		return fmt.Errorf("%w: clear credential fence: %w", ErrStateUnavailable, err)
+// ClearCredentialFence removes the credential fence row when, and only
+// when, leaseOwner still holds leaseName unexpired in the lease ownership
+// epoch leaseGeneration. Logout pairs it with deleting the committed slot
+// and the legacy labels; binding the clear to the epoch means a logout
+// whose lease was lost mid-cleanup can never wipe a newer fence installed
+// by the process that took over. It reports cleared=false for a lost
+// epoch, never an error for it.
+func (s *Store) ClearCredentialFence(
+	ctx context.Context,
+	leaseName, leaseOwner string,
+	leaseGeneration int64,
+) (bool, error) {
+	if err := validateLease(leaseName, leaseOwner, time.Minute); err != nil {
+		return false, err
+	}
+	res, err := s.exec(ctx, `
+		DELETE FROM credential_fence
+		WHERE name = ?
+		  AND EXISTS (
+			  SELECT 1 FROM leases
+			  WHERE name = ? AND owner = ? AND generation = ? AND expires_at > ?
+		  )`,
+		credentialFenceName, leaseName, leaseOwner, leaseGeneration, s.now().UnixMilli())
+	if err != nil {
+		return false, fmt.Errorf("%w: clear credential fence: %w", ErrStateUnavailable, err)
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return false, fmt.Errorf("%w: clear credential fence: %w", ErrStateUnavailable, err)
+	}
+	return affected > 0, nil
+}
+
+// retiredCredentialSlotName is the credential-slot record name prefix for
+// the retirement backlog: slots whose secure-backend deletion failed and
+// that a later refresh or logout must retry.
+func retiredCredentialSlotName(slot string) string {
+	return credentialFenceName + "-retired:" + slot
+}
+
+// RecordRetiredCredentialSlot durably records one live credential slot
+// whose secure-backend deletion failed, so a later refresh or logout can
+// retry the deletion instead of silently stranding a still-valid grant.
+func (s *Store) RecordRetiredCredentialSlot(ctx context.Context, slot string) error {
+	if slot == "" {
+		return errors.New("credential slot is required")
+	}
+	if _, err := s.exec(ctx, `
+		INSERT INTO credential_fence (name, generation, slot) VALUES (?, 0, ?)
+		ON CONFLICT(name) DO UPDATE SET slot = excluded.slot`,
+		retiredCredentialSlotName(slot), slot); err != nil {
+		return fmt.Errorf("%w: record retired credential slot: %w", ErrStateUnavailable, err)
+	}
+	return nil
+}
+
+// RetiredCredentialSlots lists the credential slots recorded for retirement
+// retry.
+func (s *Store) RetiredCredentialSlots(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT slot FROM credential_fence WHERE name LIKE ?",
+		credentialFenceName+"-retired:%")
+	if err != nil {
+		return nil, fmt.Errorf("%w: list retired credential slots: %w", ErrStateUnavailable, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var slots []string
+	for rows.Next() {
+		var slot string
+		if err := rows.Scan(&slot); err != nil {
+			return nil, fmt.Errorf("%w: list retired credential slots: %w", ErrStateUnavailable, err)
+		}
+		slots = append(slots, slot)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("%w: list retired credential slots: %w", ErrStateUnavailable, err)
+	}
+	return slots, nil
+}
+
+// ClearRetiredCredentialSlot removes the retirement record for one slot
+// after its deletion succeeded.
+func (s *Store) ClearRetiredCredentialSlot(ctx context.Context, slot string) error {
+	if slot == "" {
+		return errors.New("credential slot is required")
+	}
+	if _, err := s.exec(ctx,
+		"DELETE FROM credential_fence WHERE name = ?", retiredCredentialSlotName(slot)); err != nil {
+		return fmt.Errorf("%w: clear retired credential slot: %w", ErrStateUnavailable, err)
 	}
 	return nil
 }
