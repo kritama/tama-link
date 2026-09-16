@@ -61,6 +61,18 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 	}
 	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
 
+	// The generation identifies this ownership epoch. The credential write
+	// is gated on it, so a lease lost to a foreign claim — which may
+	// rotate the refresh grant again — blocks this stale write instead of
+	// letting it overwrite the newer credential.
+	generation, ok, err := c.lease.LeaseGeneration(ctx, refreshLeaseName, c.owner)
+	if err != nil {
+		return "", err
+	}
+	if !ok {
+		return "", errors.New("refresh lease lost before the credential write")
+	}
+
 	cred, found, err := c.loadRefresh()
 	if err != nil {
 		return "", err
@@ -120,10 +132,13 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 		}
 		return "", err
 	}
-	// Ownership is re-verified immediately before the write, and the
-	// renewal loop keeps running through it, so a blocked credential
-	// backend cannot outlast the lease without the loss cancelling this
-	// path. A lost verification aborts before SetSecret runs.
+	// The write is gated twice on the ownership epoch: the pre-write
+	// commit is the atomic check immediately before SetSecret, and the
+	// post-write commit re-verifies after it. The renewal loop keeps the
+	// lease alive between the two; a foreign claim in the window fails one
+	// of the gates. A lost pre-write gate aborts before any credential
+	// write; a lost post-write gate cannot repair the write, so it fails
+	// the refresh loudly and drops the cached token.
 	if leaseLost {
 		return "", errors.New("refresh lease lost before the credential write")
 	}
@@ -134,6 +149,11 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 		return "", ctx.Err()
 	}
 	if err != nil || !owned {
+		return "", errors.New("refresh lease lost before the credential write")
+	}
+	if committed, cerr := c.lease.CommitLease(ctx, refreshLeaseName, c.owner, generation); ctx.Err() != nil {
+		return "", ctx.Err()
+	} else if cerr != nil || !committed {
 		return "", errors.New("refresh lease lost before the credential write")
 	}
 	if err := c.applyTokens(cred, tok); err != nil {
@@ -152,13 +172,9 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 		c.clearToken()
 		return "", errors.New("refresh lease lost during the credential write")
 	}
-	renewCtx, cancelRenew = context.WithTimeout(ctx, refreshLeaseTTL/2)
-	owned, err = c.lease.RenewLease(renewCtx, refreshLeaseName, c.owner, refreshLeaseTTL)
-	cancelRenew()
-	if ctx.Err() != nil {
+	if committed, cerr := c.lease.CommitLease(ctx, refreshLeaseName, c.owner, generation); ctx.Err() != nil {
 		return "", ctx.Err()
-	}
-	if err != nil || !owned {
+	} else if cerr != nil || !committed {
 		c.clearToken()
 		return "", errors.New("refresh lease lost during the credential write")
 	}

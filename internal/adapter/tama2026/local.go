@@ -47,7 +47,7 @@ func (cn *Connection) ExecuteLocal(ctx context.Context, name string, args json.R
 func NormalizeCompleteResult(raw json.RawMessage) (contract.Result, error) {
 	var view struct {
 		ResultType        string            `json:"resultType"`
-		IsError           bool              `json:"isError"`
+		IsError           *bool             `json:"isError"`
 		Content           []json.RawMessage `json:"content"`
 		StructuredContent json.RawMessage   `json:"structuredContent"`
 		Meta              json.RawMessage   `json:"_meta"`
@@ -58,8 +58,13 @@ func NormalizeCompleteResult(raw json.RawMessage) (contract.Result, error) {
 	if view.ResultType != "complete" {
 		return contract.Result{}, fmt.Errorf("complete result has resultType %q", view.ResultType)
 	}
+	// isError is a required CallToolResult field: a missing or null value
+	// must be a protocol failure, never silently read as a success.
+	if view.IsError == nil {
+		return contract.Result{}, fmt.Errorf("complete result omits the required isError field")
+	}
 	result := contract.Result{
-		IsError:           view.IsError,
+		IsError:           *view.IsError,
 		Content:           view.Content,
 		StructuredContent: view.StructuredContent,
 		Meta:              view.Meta,

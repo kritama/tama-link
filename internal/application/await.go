@@ -31,6 +31,14 @@ func (s *Service) Await(ctx context.Context, in contract.AwaitInput) (contract.A
 	if be != nil {
 		return contract.AwaitOutput{}, be
 	}
+	// A cursor beyond this submission's sequence is a client error (for
+	// example a cursor copied from another submission). Echoing it would
+	// filter out every genuine event until the sequence catches up, so it
+	// is rejected instead of creating a persistent event gap.
+	if after > sub.Sequence {
+		return contract.AwaitOutput{}, failed(contract.CodeInvalidRequest,
+			"cursor %s is beyond the submission's event sequence %d.", in.Cursor, sub.Sequence)
+	}
 	if be := s.beforeWait(ctx, sub, in); be != nil {
 		return contract.AwaitOutput{}, be
 	}
@@ -76,12 +84,14 @@ func (s *Service) resolveWait(timeoutMS int) (time.Duration, *contract.Error) {
 	if timeoutMS == 0 {
 		return limit.AwaitDefault, nil
 	}
-	d := time.Duration(timeoutMS) * time.Millisecond
-	if d > limit.AwaitMax {
+	// Compare in milliseconds before any duration conversion: a value
+	// beyond the maximum must fail, and converting it first overflows
+	// time.Duration on 64-bit builds and can wrap negative.
+	if int64(timeoutMS) > int64(limit.AwaitMax)/int64(time.Millisecond) {
 		return 0, failed(contract.CodeInvalidRequest,
 			"timeout_ms exceeds the profile maximum of %s.", limit.AwaitMax)
 	}
-	return d, nil
+	return time.Duration(timeoutMS) * time.Millisecond, nil
 }
 
 // waitForState re-reads the submission until it is terminal, the budget is

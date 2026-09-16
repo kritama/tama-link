@@ -340,3 +340,28 @@ func stripOuterBraces(doc string) string {
 	}
 	return trimmed
 }
+
+// TestSubscribeRejectsAuthStatusesAsAuth proves a rejected
+// subscriptions/listen stream is classified as an authentication failure,
+// like any rejected request: 401 and 403 both surface through IsAuth so
+// callers can refresh or request reauthorization.
+func TestSubscribeRejectsAuthStatusesAsAuth(t *testing.T) {
+	for _, status := range []int{http.StatusUnauthorized, http.StatusForbidden} {
+		ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(status)
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","error":{"code":-32001,"message":"expired"}}`))
+		}))
+		client := newSubClient(t, ts.URL)
+		err := client.Subscribe(context.Background(), []string{subTaskID}, &SubscribeCallbacks{
+			OnAcknowledged: func([]string) error { return nil },
+			OnTask:         func(TaskState) error { return nil },
+		})
+		if err == nil {
+			t.Fatalf("status %d: SubscribeTasks succeeded", status)
+		}
+		if !IsAuth(err) {
+			t.Fatalf("status %d: err = %v, want an auth failure", status, err)
+		}
+		ts.Close()
+	}
+}

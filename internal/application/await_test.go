@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"encoding/json"
+	"strconv"
 	"testing"
 	"time"
 
@@ -225,5 +226,58 @@ func TestSubmitResultTooLargeFails(t *testing.T) {
 	}
 	if out.Result != nil {
 		t.Fatalf("oversized result must never be returned: %+v", out.Result)
+	}
+}
+
+// TestAwaitRejectsOversizedTimeoutBeforeConversion pins the overflow
+// guard: a timeout_ms beyond the profile maximum is rejected as
+// invalid_request before any duration conversion, where on 64-bit builds
+// the multiplication would wrap negative and bypass the maximum.
+func TestAwaitRejectsOversizedTimeoutBeforeConversion(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, _, _ := fixtureApp(t, f)
+	subID := submitStatus(t, svc, "timeout-1")
+
+	out, appErr := svc.Await(context.Background(), contract.AwaitInput{
+		SubmissionID: subID,
+		TimeoutMS:    int(^uint(0) >> 1), // math.MaxInt64
+	})
+	if appErr == nil || appErr.Code != contract.CodeInvalidRequest {
+		t.Fatalf("Await = %+v err=%v, want invalid_request for an oversized timeout", out, appErr)
+	}
+}
+
+// TestAwaitRejectsCursorBeyondSequence pins the cursor bound: a
+// syntactically valid cursor greater than the submission's sequence (for
+// example copied from another submission) is rejected instead of echoed,
+// which would filter out every genuine event until the sequence caught up.
+func TestAwaitRejectsCursorBeyondSequence(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, st, _ := fixtureApp(t, f)
+	subID := submitStatus(t, svc, "cursor-1")
+
+	sub, err := st.GetSubmission(context.Background(), subID)
+	if err != nil {
+		t.Fatalf("GetSubmission: %v", err)
+	}
+
+	out, appErr := svc.Await(context.Background(), contract.AwaitInput{
+		SubmissionID: subID,
+		Cursor:       "999999",
+	})
+	if appErr == nil || appErr.Code != contract.CodeInvalidRequest {
+		t.Fatalf("Await = %+v err=%v, want invalid_request for a cursor beyond sequence %d", out, appErr, sub.Sequence)
+	}
+
+	// A cursor equal to the current sequence still works and echoes it.
+	if _, appErr := svc.Await(context.Background(), contract.AwaitInput{
+		SubmissionID: subID,
+		Cursor:       strconv.FormatInt(sub.Sequence, 10),
+	}); appErr != nil {
+		t.Fatalf("await at current sequence: %s", appErr.Message)
 	}
 }

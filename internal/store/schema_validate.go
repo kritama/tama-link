@@ -65,7 +65,7 @@ func validateCurrentSchema(ctx context.Context, conn *sql.Conn) error {
 		 FROM submissions LIMIT 0`,
 		`SELECT submission_id, request_id, response_enc, answered_at FROM input_responses LIMIT 0`,
 		`SELECT client_request_id, args_hash, submission_id, created_at FROM idempotency LIMIT 0`,
-		`SELECT name, owner, expires_at FROM leases LIMIT 0`,
+		`SELECT name, owner, expires_at, generation FROM leases LIMIT 0`,
 	}
 	for _, query := range checks {
 		rows, err := conn.QueryContext(ctx, query)

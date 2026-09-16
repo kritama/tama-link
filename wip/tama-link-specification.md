@@ -250,7 +250,10 @@ Input schema:
 
 Requirements:
 
-- `timeout_ms` is bounded by configuration. The initial recommended default is
+- `timeout_ms` is bounded by configuration and is compared in milliseconds
+  before any duration conversion, so values that would overflow a 64-bit
+  duration fail as `invalid_request` instead of wrapping. The initial
+  recommended default is
   20 seconds and the maximum is 30 seconds.
 - Returning because the wait budget elapsed is a successful pending response,
   not a tool error.
@@ -381,7 +384,9 @@ which they return the terminal `submission_expired` error.
 `input_required` is non-terminal and may return to `running` after an accepted
 response or move directly to any terminal state allowed by the upstream task
 contract. `completed` means Tama Link captured an upstream MCP
-`CallToolResult`. The captured result preserves `isError`, content blocks,
+`CallToolResult`, where `isError` is a required field: a complete result that
+omits it or sets it to null is a protocol failure, never a manufactured
+success. The captured result preserves `isError`, content blocks,
 structured content, and safe `_meta`; a completed operation may therefore
 contain `is_error: true`.
 Normalized content blocks and safe `_meta` are retained as validated raw JSON,
@@ -708,9 +713,14 @@ during the write must fail the refresh after it completes instead of
 reporting success), and a lost lease aborts before any replacement token is
 persisted. Refresh transactions are also serialized inside one process: the
 shared owner would otherwise let two in-process refreshes rotate the same
-refresh grant at once. The refresh lead time is capped to a quarter of the
-issued token lifetime so a short token keeps a positive validity window
-instead of refreshing on every request.
+refresh grant at once. The credential write is gated on the lease
+generation: a claim by a different owner advances the generation, and the
+write only runs when an atomic commit gate proves the refresh still holds the
+lease in its own epoch, so a stale writer cannot commit over a newer
+rotation; a post-write gate failure fails the refresh instead of reporting
+success. The refresh lead time is capped to a quarter of the issued token
+lifetime so a short token keeps a positive validity window instead of
+refreshing on every request.
 
 The local worker executes at most a bounded number of submissions
 concurrently; queued work beyond the bound waits for a free slot. The bound
@@ -971,7 +981,9 @@ The first complete implementation is not done until automated tests prove:
     lists the durable backlog and offers it to the bounded worker pool, then
     returns immediately: a large backlog executes in the background and must
     not delay the downstream MCP server accepting clients.
-12. Progress cursors deduplicate ordered events.
+12. Progress cursors deduplicate ordered events. A cursor beyond the
+    submission's current event sequence is an `invalid_request`, never
+    echoed, so a copied cursor cannot create a persistent event gap.
 13. Requested MCP progress notifications are rate limited and correlated.
 14. Credentials and plaintext sensitive inputs do not appear in SQLite
     metadata, JSON output, logs, panic output, or test snapshots; encrypted

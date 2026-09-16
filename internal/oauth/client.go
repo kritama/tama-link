@@ -46,6 +46,13 @@ type Leaser interface {
 	ClaimLease(ctx context.Context, name, owner string, ttl time.Duration) (bool, error)
 	RenewLease(ctx context.Context, name, owner string, ttl time.Duration) (bool, error)
 	ReleaseLease(ctx context.Context, name, owner string) error
+	// LeaseGeneration returns the generation of the held lease, or ok=false
+	// when owner does not hold it.
+	LeaseGeneration(ctx context.Context, name, owner string) (int64, bool, error)
+	// CommitLease atomically verifies that owner still holds the lease in
+	// the given generation. The refresh path gates its credential write
+	// on this so a lease lost to a foreign claim blocks the stale write.
+	CommitLease(ctx context.Context, name, owner string, generation int64) (bool, error)
 }
 
 // Config configures one profile's OAuth client.

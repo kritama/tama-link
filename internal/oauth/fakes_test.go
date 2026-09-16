@@ -55,18 +55,31 @@ func (f *fakeSecrets) DeleteSecret(label string) error {
 	return nil
 }
 
+// recordingSecrets counts SetSecret calls so a test can prove a gated
+// refresh never reached the credential write.
+type recordingSecrets struct {
+	*fakeSecrets
+	sets int
+}
+
+func (r *recordingSecrets) SetSecret(label string, data []byte) error {
+	r.sets++
+	return r.fakeSecrets.SetSecret(label, data)
+}
+
 // fakeLease is an in-memory Leaser. holdOther simulates another process
 // holding the lease; onClaim runs just before a claim succeeds, letting a
 // test write a replacement credential while the claimant waits.
 type fakeLease struct {
-	mu        sync.Mutex
-	holder    string
-	onClaim   func()
-	claims    int
-	released  int
-	renewals  int
-	loseRenew bool
-	loseAfter int
+	mu         sync.Mutex
+	holder     string
+	onClaim    func()
+	claims     int
+	released   int
+	renewals   int
+	loseRenew  bool
+	loseAfter  int
+	generation int
 }
 
 func newFakeLease() *fakeLease { return &fakeLease{} }
@@ -96,8 +109,32 @@ func (f *fakeLease) ClaimLease(_ context.Context, name, owner string, ttl time.D
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.holder != owner {
+		f.generation++
+	}
 	f.holder = owner
 	return true, nil
+}
+
+func (f *fakeLease) LeaseGeneration(_ context.Context, name, owner string) (int64, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if name != refreshLeaseName {
+		return 0, false, fmt.Errorf("unexpected lease name %q", name)
+	}
+	if f.holder == owner {
+		return int64(f.generation), true, nil
+	}
+	return 0, false, nil
+}
+
+func (f *fakeLease) CommitLease(_ context.Context, name, owner string, generation int64) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if name != refreshLeaseName {
+		return false, fmt.Errorf("unexpected lease name %q", name)
+	}
+	return f.holder == owner && int64(f.generation) == generation, nil
 }
 
 // loseAfterRenewals makes renewals after the nth one report lost ownership,

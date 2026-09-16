@@ -259,3 +259,56 @@ func TestListLeases(t *testing.T) {
 		t.Fatalf("leases = %v, want refresh", leases)
 	}
 }
+
+// TestLeaseGenerationGatesCommit proves the credential-write gate: a
+// foreign claim advances the generation, and CommitLease then fails for the
+// previous holder in its old epoch while succeeding for the new holder.
+func TestLeaseGenerationGatesCommit(t *testing.T) {
+	keys, clk := newMemKeys(), newClock()
+	st, _ := openTestStore(t, keys, clk)
+	ctx := context.Background()
+	ttl := 30 * time.Second
+
+	claimed, err := st.ClaimLease(ctx, "oauth/refresh", "proc-a", ttl)
+	if !claimed || err != nil {
+		t.Fatalf("claim A: %v claimed=%v", err, claimed)
+	}
+	genA, ok, err := st.LeaseGeneration(ctx, "oauth/refresh", "proc-a")
+	if err != nil || !ok || genA != 1 {
+		t.Fatalf("generation A = %d ok=%v err=%v, want 1/true", genA, ok, err)
+	}
+	if ok, err := st.CommitLease(ctx, "oauth/refresh", "proc-a", genA); err != nil || !ok {
+		t.Fatalf("commit A in own epoch: ok=%v err=%v", ok, err)
+	}
+
+	// A same-owner re-claim keeps the epoch.
+	if claimed, err = st.ClaimLease(ctx, "oauth/refresh", "proc-a", ttl); !claimed || err != nil {
+		t.Fatalf("re-claim A: %v", err)
+	}
+	if gen, ok, _ := st.LeaseGeneration(ctx, "oauth/refresh", "proc-a"); !ok || gen != 1 {
+		t.Fatalf("generation after same-owner re-claim = %d ok=%v, want 1/true", gen, ok)
+	}
+
+	// Let the lease expire so a foreign claim can steal it.
+	clk.Advance(2 * ttl)
+	claimed, err = st.ClaimLease(ctx, "oauth/refresh", "proc-b", ttl)
+	if !claimed || err != nil {
+		t.Fatalf("claim B: %v claimed=%v", err, claimed)
+	}
+	genB, ok, err := st.LeaseGeneration(ctx, "oauth/refresh", "proc-b")
+	if err != nil || !ok || genB != 2 {
+		t.Fatalf("generation B = %d ok=%v err=%v, want 2/true", genB, ok, err)
+	}
+
+	// The stale holder's epoch is closed: its commit gate must fail, so a
+	// credential write gated on it cannot commit.
+	if ok, err := st.CommitLease(ctx, "oauth/refresh", "proc-a", genA); err != nil || ok {
+		t.Fatalf("stale commit A = ok:%v err:%v, want false/nil", ok, err)
+	}
+	if ok, err := st.CommitLease(ctx, "oauth/refresh", "proc-a", genB); err != nil || ok {
+		t.Fatalf("commit A at foreign generation = ok:%v err:%v, want false/nil", ok, err)
+	}
+	if ok, err := st.CommitLease(ctx, "oauth/refresh", "proc-b", genB); err != nil || !ok {
+		t.Fatalf("commit B in own epoch: ok=%v err=%v", ok, err)
+	}
+}

@@ -412,3 +412,41 @@ func TestTokenSkewScalesForShortLivedTokens(t *testing.T) {
 		t.Errorf("token requests = %d, want 2 (refresh near expiry)", calls)
 	}
 }
+
+// TestRefreshBlocksStaleCredentialWrite proves the generation gate: when a
+// foreign process claims the refresh lease (advancing its generation)
+// while this exchange is in flight, the credential write is blocked by the
+// pre-write commit gate and the secret store is never touched.
+func TestRefreshBlocksStaleCredentialWrite(t *testing.T) {
+	server, client, inner, lease, clock := tokenFixture(t, "rt-1")
+	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+	server.tokenDelay = 100 * time.Millisecond
+	secrets := &recordingSecrets{fakeSecrets: inner}
+	// Re-point the client's secret store at the recording wrapper. The
+	// tokenFixture client already holds `inner`; rebuild is not needed
+	// because the wrapper shares the same map.
+	client.secrets = secrets
+
+	go func() {
+		// Let the first exchange start, then steal the lease.
+		time.Sleep(30 * time.Millisecond)
+		// Expire-free steal: the test drives the store directly, which is
+		// what a foreign process with an expired lease would do.
+		lease.mu.Lock()
+		lease.holder = ""
+		lease.mu.Unlock()
+		_, _ = lease.ClaimLease(context.Background(), refreshLeaseName, "other-process", refreshLeaseTTL)
+	}()
+
+	_, err := client.Token(context.Background())
+	if err == nil {
+		t.Fatal("refresh succeeded, want the stale write blocked")
+	}
+	if !strings.Contains(err.Error(), "credential write") {
+		t.Fatalf("err = %v, want a credential-write gate failure", err)
+	}
+	if secrets.sets != 0 {
+		t.Fatalf("credential write ran %d times, want 0 (stale writer must not commit)", secrets.sets)
+	}
+	clock.set(clock.now.Add(time.Minute))
+}

@@ -76,6 +76,13 @@ func (c *Client) Subscribe(ctx context.Context, taskIDs []string, cb *SubscribeC
 		return err
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		// A rejected stream is an authentication failure exactly like a
+		// rejected request: callers check IsAuth to refresh or request
+		// reauthorization before giving up on the subscription path.
+		drain(resp.Body)
+		return newError(KindAuth, resp.StatusCode, nil)
+	}
 	if resp.StatusCode != http.StatusOK {
 		return c.readHTTPError(resp)
 	}
