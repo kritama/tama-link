@@ -382,6 +382,74 @@ func TestSubmitReplaysBeforeCredentialCheck(t *testing.T) {
 	}
 }
 
+// TestSubmitNormalizesClientContextIdentity pins the identity
+// normalization: a context that carries no mappable correlation value is
+// normalized to absence, so omitting the context and sending an empty one
+// are one identity, and an irrelevant thread ID never conflicts when the
+// operation has no thread binding. A genuinely different client-visible
+// request still conflicts.
+func TestSubmitNormalizesClientContextIdentity(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	cfg := fixtureConfigFor(t, f, limits.Default())
+	// Drop the thread binding so the context carries no mappable value,
+	// and keep the pinned digest honest.
+	for i := range cfg.Profile.Operations {
+		if cfg.Profile.Operations[i].Name == "status" {
+			cfg.Profile.Operations[i].Bindings = nil
+			if digest, err := cfg.Profile.Operations[i].ComputeDigest(); err == nil {
+				cfg.Profile.Operations[i].Digest = digest
+			}
+		}
+	}
+	svc, _, _ := appFromConfig(t, cfg)
+
+	// An absent context is accepted...
+	first, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "norm-1",
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	})
+	if appErr != nil {
+		t.Fatalf("submit: %s", appErr.Message)
+	}
+	// ...and a retry with an empty context is the same identity.
+	out, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "norm-1",
+		ClientContext:   &contract.ClientContext{},
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	})
+	if appErr != nil {
+		t.Fatalf("empty-context retry: %s", appErr.Message)
+	}
+	if out.SubmissionID != first.SubmissionID {
+		t.Fatalf("empty-context retry returned %s, want %s", out.SubmissionID, first.SubmissionID)
+	}
+	// An irrelevant thread ID is not part of the identity either.
+	out, appErr = svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "norm-1",
+		ClientContext:   &contract.ClientContext{ThreadID: "t-irrelevant"},
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	})
+	if appErr != nil {
+		t.Fatalf("irrelevant-thread retry: %s", appErr.Message)
+	}
+	if out.SubmissionID != first.SubmissionID {
+		t.Fatalf("irrelevant-thread retry returned %s, want %s", out.SubmissionID, first.SubmissionID)
+	}
+	// A genuinely different client-visible request still conflicts.
+	if _, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "norm-1",
+		Arguments:       json.RawMessage(`{"detail":"other"}`),
+	}); appErr == nil || appErr.Code != contract.CodeIdempotencyConflict {
+		t.Fatalf("different arguments = %+v, want idempotency_conflict", appErr)
+	}
+}
+
 // TestSubmitReplaysWhenToolReconciledAway pins recovery of a lost submit
 // response when profile reconciliation removed its tool after acceptance:
 // the retry reconciles the durable submission before any current catalog

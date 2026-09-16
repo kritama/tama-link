@@ -199,6 +199,31 @@ func TestClearCredentialFence(t *testing.T) {
 	}
 }
 
+// TestRefreshCredentialInvalidationMarker pins the durable invalidation
+// marker: the legacy label's known-invalid grant is masked while its
+// deletion is pending, and the marker is cleared once the cleanup finishes.
+func TestRefreshCredentialInvalidationMarker(t *testing.T) {
+	keys, clk := newMemKeys(), newClock()
+	s, _ := openTestStore(t, keys, clk)
+	ctx := context.Background()
+
+	if invalidated, err := s.RefreshCredentialInvalidated(ctx); err != nil || invalidated {
+		t.Fatalf("marker on a fresh store = %v %v, want absent", invalidated, err)
+	}
+	if err := s.MarkRefreshCredentialInvalidated(ctx); err != nil {
+		t.Fatalf("MarkRefreshCredentialInvalidated: %v", err)
+	}
+	if invalidated, err := s.RefreshCredentialInvalidated(ctx); err != nil || !invalidated {
+		t.Fatalf("marker after mark = %v %v, want present", invalidated, err)
+	}
+	if err := s.ClearRefreshCredentialInvalidation(ctx); err != nil {
+		t.Fatalf("ClearRefreshCredentialInvalidation: %v", err)
+	}
+	if invalidated, err := s.RefreshCredentialInvalidated(ctx); err != nil || invalidated {
+		t.Fatalf("marker after clear = %v %v, want absent", invalidated, err)
+	}
+}
+
 // TestClearCredentialFenceRetiresSlotAtomically pins that the fence clear
 // and the retired-slot enqueue are one transaction: a cleared pointer
 // always leaves a durable reference to the slot it pointed at, so a crash

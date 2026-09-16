@@ -44,23 +44,22 @@ func (c *Client) loadRefresh() (*refreshCredential, bool, error) {
 	return &cred, true, nil
 }
 
-// HasCredentials reports whether the profile can authenticate without
-// performing a refresh: a cached token that is not already inside its
-// refresh skew, or the complete usable client/refresh pair a refresh
-// would find. It is the submit path's cheap probe for deciding whether
-// accepting work the profile cannot authenticate would only burn the
-// idempotency key on a terminal authentication_required. No network I/O.
-// The probe resolves the same fenced slot Token loads, so a credential
-// stored by any process — legacy label or committed fence — counts. It
-// applies the same issuer and endpoint bindings refreshLocked enforces:
-// a credential refresh could not use — a missing client record, or a
-// record or credential no longer bound to the active profile issuer or
-// its token endpoint — is not ready, so submit keeps the idempotency key
-// free for the reauthorized retry instead of accepting a doomed row.
+// HasCredentials reports whether the profile can authenticate: the
+// complete usable client/refresh pair a refresh would find. It is the
+// submit path's cheap probe for deciding whether accepting work the
+// profile cannot authenticate would only burn the idempotency key on a
+// terminal authentication_required. No network I/O. The probe resolves
+// the same fenced slot Token loads, so a credential stored by any process
+// — legacy label or committed fence — counts. A cached in-memory token
+// does not by itself count: another process may have logged the profile
+// out, and a cached token would keep accepting work that the worker can
+// only terminate as authentication_required. The probe applies the same
+// issuer and endpoint bindings refreshLocked enforces: a credential
+// refresh could not use — a missing client record, or a record or
+// credential no longer bound to the active profile issuer or its token
+// endpoint — is not ready, so submit keeps the idempotency key free for
+// the reauthorized retry instead of accepting a doomed row.
 func (c *Client) HasCredentials(ctx context.Context) (bool, error) {
-	if _, ok := c.validToken(); ok {
-		return true, nil
-	}
 	rec, found, err := c.RegisteredClient()
 	if err != nil {
 		return false, err
@@ -227,11 +226,20 @@ func (c *Client) Logout(ctx context.Context) error {
 	if !cleared {
 		return fmt.Errorf("%w: logout lost the refresh lease mid-cleanup; retry", ErrLeaseContention)
 	}
-	for _, label := range []string{labelClient, labelRefresh} {
-		if err := c.secrets.DeleteSecret(label); err != nil {
-			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
-		}
+	if err := c.secrets.DeleteSecret(labelClient); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
+	// The legacy label may still hold a grant: mask it with the durable
+	// invalidation marker before deleting, so a failed deletion cannot
+	// resurrect it through the fence-less legacy fallback; the marker is
+	// cleared once the label is gone.
+	if err := c.lease.MarkRefreshCredentialInvalidated(execCtx); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	if err := c.secrets.DeleteSecret(labelRefresh); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	_ = c.lease.ClearRefreshCredentialInvalidation(execCtx)
 	// Drain the retirement backlog: slots a failed rotation left behind.
 	// Best effort — a slot whose deletion still fails keeps its durable
 	// record for the next refresh.

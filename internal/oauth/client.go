@@ -89,6 +89,15 @@ type Leaser interface {
 	// can retry the deletion. Cleanup paths that delete without a commit
 	// use it; the fence-advance path enqueues atomically instead.
 	RecordRetiredCredentialSlot(ctx context.Context, slot string) error
+	// MarkRefreshCredentialInvalidated durably records that the profile's
+	// legacy refresh credential is a known-invalid grant, so the legacy
+	// label is never treated as live even if its deletion fails.
+	MarkRefreshCredentialInvalidated(ctx context.Context) error
+	// RefreshCredentialInvalidated reports whether that marker is present.
+	RefreshCredentialInvalidated(ctx context.Context) (bool, error)
+	// ClearRefreshCredentialInvalidation removes the marker after the
+	// legacy deletion succeeds or a new credential commits.
+	ClearRefreshCredentialInvalidation(ctx context.Context) error
 }
 
 // Config configures one profile's OAuth client.

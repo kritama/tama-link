@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -276,6 +277,81 @@ func TestInFlightExecutionsAreBounded(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("only %d of %d bounded submissions completed", done, count)
 		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestParkedWaitersAreBounded pins the memory contract of the bounded
+// pool: while the pool is saturated, dispatched-but-not-started work waits
+// in a bounded parking set — never one goroutine per offered ID — and the
+// excess stays durable and sweep-redelivered.
+func TestParkedWaitersAreBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	keys := newMemoryKeys()
+	st := openStore(t, path, keys)
+	t.Cleanup(func() { _ = st.Close() })
+
+	const maxInFlight = 2
+	exec := &gatedExecutor{started: make(chan struct{}, 1), release: make(chan struct{}), finish: make(chan struct{}, finishConcurrency)}
+	svc, err := worker.NewService(st, exec, worker.Config{
+		Owner:         "worker-parked",
+		LeaseTTL:      30 * time.Second,
+		SweepInterval: time.Hour,
+		MaxInFlight:   maxInFlight,
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	t.Cleanup(svc.Stop)
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	const count = 32
+	ids := make([]string, count)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("sub-parked-%02d", i)
+		createReplayable(t, st, ids[i])
+	}
+
+	baseline := runtime.NumGoroutine()
+	for _, id := range ids {
+		svc.Offer(id)
+	}
+	// Wait until the pool is held behind the gate.
+	deadline := time.Now().Add(10 * time.Second)
+	for exec.activeCount() < maxInFlight {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d executions reached the executor, want %d", exec.activeCount(), maxInFlight)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Let the dispatch loop drain the queue and spawn every waiter it will.
+	time.Sleep(250 * time.Millisecond)
+	if extra := runtime.NumGoroutine() - baseline; extra > 2*maxInFlight+4 {
+		t.Fatalf("dispatch spawned %d goroutines for a held pool of %d; waiters must be bounded by the pool", extra, maxInFlight)
+	}
+
+	close(exec.release)
+	deadline = time.Now().Add(60 * time.Second)
+	for {
+		done := 0
+		for _, id := range ids {
+			sub, err := st.GetSubmission(context.Background(), id)
+			if err != nil {
+				t.Fatalf("GetSubmission: %v", err)
+			}
+			if string(sub.Status) == "completed" {
+				done++
+			}
+		}
+		if done == count {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d submissions completed; the unmarked excess must be sweep-redelivered", done, count)
+		}
+		svc.Sweep(context.Background())
 		time.Sleep(20 * time.Millisecond)
 	}
 }

@@ -123,10 +123,12 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 // a later deletion failure can never leave the slot with no durable
 // reference; a failed deletion keeps the record for the next refresh or
 // logout, and the record is removed only after the deletion succeeds. The
-// slot holds only a rejected grant, so deletion failure changes no
-// readiness outcome. Without invalidation, HasCredentials would keep
-// reporting the profile ready and every submit would burn an idempotency
-// key on a terminal failure against the same known-invalid grant.
+// legacy label is masked by the durable invalidation marker before its
+// deletion, so a failed legacy deletion cannot bring the rejected grant
+// back to life through the fence-less legacy fallback. Without
+// invalidation, HasCredentials would keep reporting the profile ready and
+// every submit would burn an idempotency key on a terminal failure against
+// the same known-invalid grant.
 func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64) error {
 	// Renew ownership across the cleanup: the failed exchange's renewal
 	// loop has already stopped, and a slow secure-backend deletion must
@@ -169,9 +171,21 @@ func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64
 			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
 	}
-	// The legacy label is fixed and every logout retries it; a failure
-	// here needs no durable record.
-	_ = c.secrets.DeleteSecret(labelRefresh)
+	// The legacy label holds the rejected grant: mark the invalidation
+	// durable before the deletion, so a failed deletion cannot bring the
+	// grant back to life through the fence-less legacy fallback, and
+	// clear the marker only once the deletion succeeds. The mark itself
+	// is the retryable record; every later refresh and logout keeps the
+	// grant masked.
+	if err := c.lease.MarkRefreshCredentialInvalidated(execCtx); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	if err := c.secrets.DeleteSecret(labelRefresh); err != nil {
+		return nil
+	}
+	if err := c.lease.ClearRefreshCredentialInvalidation(execCtx); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
 	return nil
 }
 

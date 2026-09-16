@@ -85,6 +85,72 @@ func TestTokenExchangePublicClientNone(t *testing.T) {
 	})
 }
 
+// tokenCallCount returns the recorded token-exchange count under the
+// server's lock so a test can read it while exchanges are in flight.
+func tokenCallCount(t *testing.T, server *metadataServer) int {
+	t.Helper()
+	server.tokenReqMu.Lock()
+	defer server.tokenReqMu.Unlock()
+	return server.tokenCalls
+}
+
+// TestCompleteAuthorizationSerializesWithRefresh pins that a login holds
+// the local refresh lock across the exchange and persistence: an
+// in-process refresh started while the authorization exchange is in flight
+// waits for it instead of racing the fenced commit — the lease alone cannot
+// order in-process mutations because it shares one owner per process.
+func TestCompleteAuthorizationSerializesWithRefresh(t *testing.T) {
+	server := (&metadataServer{}).start(t)
+	server.tokenDelay = 150 * time.Millisecond
+	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
+	secrets := newFakeSecrets()
+	client := clientForServer(t, server, secrets, newFakeLease(), newTestClock(time.Unix(1_700_000_000, 0)))
+	seedMethodCredentials(t, secrets, "cid-1", "", "none", client.issuer, server.ts.URL+"/oauth/token", "rt-0")
+	md := serverMetadata(server.ts.URL)
+	redirect := "http://127.0.0.1:51234/callback"
+	rec, found, err := client.RegisteredClient()
+	if err != nil || !found {
+		t.Fatalf("client record = found:%v err:%v, want present", found, err)
+	}
+	req, err := client.NewAuthorizationRequest(md, rec, redirect)
+	if err != nil {
+		t.Fatalf("NewAuthorizationRequest: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.CompleteAuthorization(context.Background(), md, rec, req, "code-1", redirect)
+	}()
+	// Wait until the exchange reaches the token endpoint.
+	deadline := time.Now().Add(5 * time.Second)
+	for tokenCallCount(t, server) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the authorization exchange never reached the token endpoint")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// A refresh started while the exchange is in flight must not start its
+	// own exchange until the login completes.
+	refreshed := make(chan error, 1)
+	go func() {
+		_, err := client.Refresh(context.Background())
+		refreshed <- err
+	}()
+	time.Sleep(60 * time.Millisecond)
+	if got := tokenCallCount(t, server); got != 1 {
+		t.Fatalf("token exchanges while the login was in flight = %d, want 1 (the refresh raced the login)", got)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("CompleteAuthorization: %v", err)
+	}
+	if err := <-refreshed; err != nil {
+		t.Fatalf("Refresh after the login: %v", err)
+	}
+	if server.tokenMaxConcur != 1 {
+		t.Fatalf("concurrent token exchanges = %d, want at most 1", server.tokenMaxConcur)
+	}
+}
+
 // TestTokenExchangeClientSecretPost covers the second form-based method:
 // client_id and client_secret both ride in the body, with no header.
 func TestTokenExchangeClientSecretPost(t *testing.T) {

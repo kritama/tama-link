@@ -188,6 +188,54 @@ func retiredCredentialSlotName(slot string) string {
 	return credentialFenceName + "-retired:" + slot
 }
 
+// invalidatedCredentialName is the durable invalidation marker: it records
+// that the profile's legacy refresh credential holds a grant the
+// authorization server rejected, so the legacy label must not count as
+// live even when its deletion fails.
+const invalidatedCredentialName = credentialFenceName + "-invalidated"
+
+// MarkRefreshCredentialInvalidated durably records that the profile's
+// legacy refresh credential is a known-invalid grant. The invalid-grant
+// cleanup marks before it deletes the legacy label, so a failed deletion
+// cannot bring the rejected grant back to life through the fence-less
+// legacy fallback; the marker is cleared once the deletion succeeds or a
+// new credential commits.
+func (s *Store) MarkRefreshCredentialInvalidated(ctx context.Context) error {
+	if _, err := s.exec(ctx, `
+		INSERT INTO credential_fence (name, generation, slot) VALUES (?, 0, '')
+		ON CONFLICT(name) DO UPDATE SET slot = ''`,
+		invalidatedCredentialName); err != nil {
+		return fmt.Errorf("%w: mark refresh credential invalidated: %w", ErrStateUnavailable, err)
+	}
+	return nil
+}
+
+// ClearRefreshCredentialInvalidation removes the invalidation marker after
+// the legacy deletion succeeds or a new credential commits.
+func (s *Store) ClearRefreshCredentialInvalidation(ctx context.Context) error {
+	if _, err := s.exec(ctx,
+		"DELETE FROM credential_fence WHERE name = ?", invalidatedCredentialName); err != nil {
+		return fmt.Errorf("%w: clear refresh credential invalidation: %w", ErrStateUnavailable, err)
+	}
+	return nil
+}
+
+// RefreshCredentialInvalidated reports whether the invalidation marker is
+// present, meaning the legacy label holds a known-invalid grant that must
+// not be treated as a live credential.
+func (s *Store) RefreshCredentialInvalidated(ctx context.Context) (bool, error) {
+	var held int
+	err := s.db.QueryRowContext(ctx,
+		"SELECT 1 FROM credential_fence WHERE name = ?", invalidatedCredentialName).Scan(&held)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("%w: read refresh credential invalidation: %w", ErrStateUnavailable, err)
+	}
+	return true, nil
+}
+
 // RecordRetiredCredentialSlot durably records one live credential slot
 // whose secure-backend deletion failed, so a later refresh or logout can
 // retry the deletion instead of silently stranding the blob in the

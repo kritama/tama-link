@@ -200,9 +200,13 @@ Requirements:
 - Repeating the same `client_request_id` with equivalent canonical input must
   return the original submission. The request identity is the client-visible
   request — the tool name, the canonical arguments, and the client-owned
-  correlation values bindings may map — never live profile state or bound
-  upstream output, so a retry after a profile reconciliation reconciles to
-  the original submission instead of reporting a conflict. Reconciliation
+  correlation values the accepted operation can map — never live profile
+  state or bound upstream output, so a retry after a profile reconciliation
+  reconciles to the original submission instead of reporting a conflict. A
+  context that carries no correlation value is normalized to absence, and a
+  value no binding can map is not part of the identity: a retry that omits
+  the context, sends an empty one, or changes an unmapped value reconciles
+  to the original request. Reconciliation
   runs before the catalog membership check, argument validation, and binding
   application, in addition to before the readiness and strategy checks
   below. A replay appends no
@@ -226,7 +230,10 @@ Requirements:
   acceptance, without a refresh or an upstream connection. A usable
   credential is the complete pair a refresh would find: a registered client
   and a refresh credential, both bound to the active profile issuer with an
-  issuer-bound token endpoint. A profile without that complete pair fails
+  issuer-bound token endpoint. A cached in-memory token never counts by
+  itself: another process may have logged the profile out, and accepting on
+  a cached token alone would only burn idempotency keys on work the worker
+  cannot authenticate. A profile without that complete pair fails
   `submit` as `authentication_required`, and the idempotency key stays free,
   so the reauthorize-and-retry flow replays as a genuinely new acceptance
   instead of returning a permanently failed submission.
@@ -488,10 +495,15 @@ downstream client disconnected.
 
 Successful `submit` means Tama Link durably accepted responsibility for
 executing the operation, and that acceptance must always reach execution or a
-terminal state without a process restart. The in-memory worker queue is a
-prompt-start aid only: when it is saturated, a recurring durable sweep
-re-derives every runnable replayable submission from the store and re-offers
-it, so a dropped queue entry is rediscovered within one sweep interval. The
+terminal state without a process restart. The execution pool bounds live
+executions and waiting goroutines alike: at most the configured maximum
+executes concurrently and at most that many more wait for a slot in a
+bounded parking set; a saturated pool never spawns one waiting goroutine per
+offered ID, and the excess stays durable in the store until the sweep
+redelivers it. The in-memory worker queue is a prompt-start aid only: when
+it is saturated, a recurring durable sweep re-derives every runnable
+replayable submission from the store and re-offers it, so a dropped queue
+entry is rediscovered within one sweep interval. The
 sweep must not re-offer work this process is already executing: in-flight
 entries would otherwise crowd the prompt queue ahead of dropped IDs and
 starve them. The lease remains the final single-winner guard across
@@ -760,11 +772,13 @@ replaced credentials — the legacy label and the previous live slot — are
 retired after the commit, the backlog record is cleared on success, and a
 failed retirement keeps its durable record so a later refresh or logout
 retries the deletion instead of silently stranding a still-valid grant. The
-authorization-code exchange is a credential rotation too: it claims the
-same refresh lease before redeeming the single-use code and renews the
-lease across both the exchange and the fenced persistence, so a lease
-contention can never burn the code, and it commits its credential through
-the same fence under its own epoch. Logout holds the local refresh lock
+authorization-code exchange is a credential rotation too: it holds the
+local refresh lock across the exchange and persistence, so an in-process
+refresh or logout waits for the login instead of racing it through the
+shared lease owner, and it claims the same refresh lease before redeeming
+the single-use code and renews the lease across both the exchange and the
+fenced persistence, so a lease contention can never burn the code; it
+commits its credential through the same fence under its own epoch. Logout holds the local refresh lock
 and claims the cross-process refresh lease before touching credentials, so
 no concurrent writer can reinstall a fence and slot behind the logout: the
 claim advances the epoch and every in-flight writer's commit fails and
@@ -926,8 +940,11 @@ transaction — honoring a lost epoch and treating an absent fence as already
 cleared — before the slot is deleted, so a crash or a failed deletion can
 never leave the slot with no durable reference; a failed deletion keeps its
 record for the next refresh or logout, and the record is removed only after
-the deletion succeeds. With the
-credential invalidated, readiness rejects new
+the deletion succeeds. The legacy label is masked by a durable invalidation
+marker before its deletion, so a failed legacy deletion cannot bring the
+rejected grant back to life through the fence-less legacy fallback; the
+marker is cleared once the label is gone or a new credential commits. With
+the credential invalidated, readiness rejects new
 work as `authentication_required` instead of accepting submissions that
 can only fail on the same known-invalid grant. An upstream
 subscription closes no later than credential expiry; after successful refresh,

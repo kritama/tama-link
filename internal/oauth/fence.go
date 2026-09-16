@@ -48,6 +48,15 @@ func (c *Client) loadFenced(ctx context.Context) (*fencedCredential, error) {
 		return nil, fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
 	if !found {
+		// A durable invalidation marker outlives a failed legacy deletion:
+		// the rejected grant at the legacy label must not count as live.
+		invalidated, err := c.lease.RefreshCredentialInvalidated(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+		}
+		if invalidated {
+			return nil, nil
+		}
 		cred, ok, err := c.loadRefresh()
 		if err != nil {
 			return nil, err
@@ -132,7 +141,12 @@ func (c *Client) storeFenced(ctx context.Context, fenced *fencedCredential) erro
 	}
 	// The commit is durable: the new slot is the only live credential and
 	// the previous slot is durably enqueued for retirement retry. Retire
-	// the replaced credentials and clear the record on success.
+	// the replaced credentials and clear the record on success. A new
+	// credential also retires any invalidation marker: the fenced slot is
+	// now the live grant, and the legacy fallback is out of play until the
+	// fence is cleared again. Best effort — a marker left behind can only
+	// mask a legacy label this commit just replaced.
+	_ = c.lease.ClearRefreshCredentialInvalidation(ctx)
 	_ = c.secrets.DeleteSecret(labelRefresh)
 	if previous != "" {
 		if err := c.secrets.DeleteSecret(previous); err != nil {

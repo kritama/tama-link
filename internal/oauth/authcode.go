@@ -69,11 +69,15 @@ func (c *Client) NewAuthorizationRequest(md *Metadata, rec *ClientRecord, redire
 // authorization-code grant requires the token request's redirect_uri to
 // equal the value sent in the authorization request, so observedRedirectURI
 // must equal req.RedirectURI exactly; a mismatch is rejected before any
-// token request is sent. The refresh lease is claimed and renewed across
-// the redemption and the fenced persistence — the code is single-use, so a
-// lease contention must never burn it: the exchange never runs unless the
-// epoch is held. The exchanged access token is held in memory; the refresh
-// credential is persisted.
+// token request is sent. The local refresh lock is held across the whole
+// exchange: the cross-process lease shares one owner per process, so it
+// alone cannot order a login against this process's own refresh or logout,
+// and the code is single-use — a concurrent in-process mutation must wait
+// instead of racing the fenced commit. The refresh lease is claimed and
+// renewed across the redemption and the fenced persistence — the code is
+// single-use, so a cross-process lease contention must never burn it
+// either: the exchange never runs unless the epoch is held. The exchanged
+// access token is held in memory; the refresh credential is persisted.
 func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *ClientRecord, req *AuthorizationRequest, code, observedRedirectURI string) error {
 	if code == "" {
 		return fmt.Errorf("authorization code is required")
@@ -93,6 +97,12 @@ func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *C
 	form.Set("redirect_uri", req.RedirectURI)
 	form.Set("code_verifier", req.Verifier)
 	form.Set("resource", c.endpoint)
+
+	// Serialize against this process's own refresh and logout: with the
+	// shared lease owner, only the local lock orders in-process credential
+	// mutations.
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
 
 	leaseGeneration, claimed, err := c.claimRefreshLease(ctx)
 	if err != nil {

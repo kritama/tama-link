@@ -204,7 +204,7 @@ func TestRefreshIssuerMismatch(t *testing.T) {
 }
 
 func TestHasCredentialsAndLogout(t *testing.T) {
-	_, client, secrets, _, _ := tokenFixture(t, "rt-1")
+	_, client, secrets, lease, _ := tokenFixture(t, "rt-1")
 	ctx := context.Background()
 	if ok, err := client.HasCredentials(ctx); err != nil || !ok {
 		t.Fatalf("HasCredentials = %v %v", ok, err)
@@ -234,6 +234,102 @@ func TestHasCredentialsAndLogout(t *testing.T) {
 		if _, found, _ := secrets.GetSecret(label); found {
 			t.Errorf("credential %q survived logout", label)
 		}
+	}
+	// The legacy label is gone, so the invalidation marker is cleared
+	// behind it: a later login starts from a clean profile.
+	if invalidated, err := lease.RefreshCredentialInvalidated(ctx); err != nil || invalidated {
+		t.Fatalf("invalidation marker after logout = %v %v, want cleared", invalidated, err)
+	}
+}
+
+// TestHasCredentialsChecksDurablePairWithCachedToken pins that the probe
+// checks the durable pair even when a cached token is held: a logout from
+// another process sharing the credential store removes the durable
+// credential, and this process's cached token must not keep accepting
+// work the worker can only terminate as authentication_required.
+func TestHasCredentialsChecksDurablePairWithCachedToken(t *testing.T) {
+	server := (&metadataServer{}).start(t)
+	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
+	shared := newFakeSecrets()
+	clock := newTestClock(time.Unix(1_700_000_000, 0))
+	leaseA, leaseB := newFakeLease(), newFakeLease()
+	leaseB.fence = leaseA.fence
+	clientA := clientForServer(t, server, shared, leaseA, clock)
+	clientB := clientForServer(t, server, shared, leaseB, clock)
+	seedCredentials(t, shared, "cid-1", "shh", server.ts.URL+"/oauth/token", clientA.issuer, "rt-1")
+
+	ctx := context.Background()
+	if _, err := clientA.Token(ctx); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if ok, err := clientA.HasCredentials(ctx); err != nil || !ok {
+		t.Fatalf("HasCredentials before logout = %v %v, want true", ok, err)
+	}
+
+	// A second process logs the profile out; clientA's cached token stays
+	// in its own memory.
+	if err := clientB.Logout(ctx); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if _, ok := clientA.Expiry(); !ok {
+		t.Fatal("the cached token disappeared from clientA's memory; the scenario is not exercised")
+	}
+	if ok, err := clientA.HasCredentials(ctx); err != nil || ok {
+		t.Fatalf("HasCredentials with a cached token after a foreign logout = %v %v, want false", ok, err)
+	}
+}
+
+// TestInvalidGrantMasksUndeletableLegacyCredential pins the durable
+// invalidation marker: when the legacy label deletion fails after
+// invalid_grant, the rejected grant must not come back to life through
+// the fence-less legacy fallback, and a reauthorization commits through
+// the fence over the masked label.
+func TestInvalidGrantMasksUndeletableLegacyCredential(t *testing.T) {
+	server := (&metadataServer{}).start(t)
+	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
+	secrets := newFakeSecrets()
+	client := clientForServer(t, server, secrets, newFakeLease(), newTestClock(time.Unix(1_700_000_000, 0)))
+	seedCredentials(t, secrets, "cid-1", "shh", server.ts.URL+"/oauth/token", client.issuer, "rt-1")
+	ctx := context.Background()
+
+	// No exchange before the rejection: the credential stays at the
+	// legacy label, and the grant is rejected from there. The legacy
+	// deletion fails.
+	server.tokenBody = `{"error":"invalid_grant"}`
+	secrets.failDeletes(labelRefresh)
+	if _, err := client.Token(ctx); !errors.Is(err, ErrGrantInvalid) {
+		t.Fatalf("Token = %v, want ErrGrantInvalid", err)
+	}
+	// The label still holds the rejected grant, but the marker keeps it
+	// out of readiness: the fence is absent and the legacy fallback must
+	// not report the rejected grant as live.
+	if _, found, _ := secrets.GetSecret(labelRefresh); !found {
+		t.Fatal("the legacy label is gone; the failed-deletion scenario is not exercised")
+	}
+	if ok, err := client.HasCredentials(ctx); err != nil || ok {
+		t.Fatalf("HasCredentials with a masked legacy grant = %v %v, want false without an error", ok, err)
+	}
+
+	// A reauthorization commits a fenced credential and retires the mask.
+	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+	rec, found, err := client.RegisteredClient()
+	if err != nil || !found {
+		t.Fatalf("client registration = found:%v err:%v, want present for reauthorization", found, err)
+	}
+	md := serverMetadata(server.ts.URL)
+	redirect := "http://127.0.0.1:51234/callback"
+	req, err := client.NewAuthorizationRequest(md, rec, redirect)
+	if err != nil {
+		t.Fatalf("NewAuthorizationRequest: %v", err)
+	}
+	if err := client.CompleteAuthorization(ctx, md, rec, req, "code-1", redirect); err != nil {
+		t.Fatalf("CompleteAuthorization: %v", err)
+	}
+	if ok, err := client.HasCredentials(ctx); err != nil || !ok {
+		t.Fatalf("HasCredentials after reauthorization = %v %v, want true", ok, err)
+	}
+	if invalidated, err := client.lease.RefreshCredentialInvalidated(ctx); err != nil || invalidated {
+		t.Fatalf("invalidation marker after reauthorization = %v %v, want cleared", invalidated, err)
 	}
 }
 

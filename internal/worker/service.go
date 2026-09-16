@@ -27,13 +27,16 @@ const defaultMaxInFlight = 8
 // and a recurring durable sweep that re-derives runnable work from the
 // store. It owns every goroutine it starts: Stop cancels the loop and
 // in-flight work and waits for shutdown. At most Config.MaxInFlight
-// submissions execute concurrently; the rest wait for a slot. A submission
-// is never executed concurrently twice in one process, and the durable
-// lease keeps that true across processes.
+// submissions execute concurrently; at most MaxInFlight more wait for a
+// slot in the bounded parking set, and everything else stays durable in the
+// store until the sweep redelivers it. A submission is never executed
+// concurrently twice in one process, and the durable lease keeps that true
+// across processes.
 type Service struct {
 	runner        *Runner
 	queue         chan string
 	slots         chan struct{}
+	parked        chan struct{}
 	sweep         time.Duration
 	inFlight      sync.Map // submission ID -> struct{}
 	dispatchDrops atomic.Int64
@@ -62,6 +65,10 @@ func NewService(state State, executor Executor, cfg Config) (*Service, error) {
 		runner: runner,
 		queue:  make(chan string, queueDepth),
 		slots:  make(chan struct{}, maxInFlight),
+		// The parking set is bounded with the pool, so a saturated pool
+		// holds a bounded number of waiting goroutines; the rest of the
+		// backlog stays durable and sweep-redelivered.
+		parked: make(chan struct{}, maxInFlight),
 		sweep:  sweep,
 		cancel: cancel,
 		done:   make(chan struct{}),
@@ -150,38 +157,59 @@ func (s *Service) loop(ctx context.Context) {
 				continue
 			}
 			if _, loaded := s.inFlight.LoadOrStore(id, struct{}{}); loaded {
-				// Already running. (Parked slot-waiters do not hold the
-				// mark, so they can be offered again by the sweep; the
-				// duplicate is absorbed at claim time.)
+				// Already executing or parked: the mark is held until the
+				// execution starts or the waiter is cancelled, so a
+				// duplicate offer is absorbed here.
 				continue
 			}
 			s.wg.Add(1)
-			go func() {
-				defer s.wg.Done()
-				// The slot is taken before any lease claim or store write,
-				// so a full pool parks goroutines (which cost little) while
-				// the number of live SQLite transactions and upstream calls
-				// stays bounded. While parked the ID is not in-flight: a
-				// sweep may deliver it again, and the duplicate is absorbed
-				// when this goroutine later starts (the claim rejects the
-				// already-leased run, or the first writer wins the
-				// transition). Without the release, a full pool would hold
-				// queued-but-parked IDs against the sweep and starve IDs
-				// dropped on a saturated queue.
-				defer s.inFlight.Delete(id)
+			holdsSlot := false
+			select {
+			case s.slots <- struct{}{}:
+				holdsSlot = true
+			default:
+			}
+			if !holdsSlot {
 				select {
-				case s.slots <- struct{}{}:
-					defer func() { <-s.slots }()
-				case <-ctx.Done():
-					return
+				case s.parked <- struct{}{}:
+				default:
+					// Neither the pool nor the parking set has room: the
+					// ID stays durable and unmarked, so the sweep
+					// redelivers it once a slot or a parking place frees.
+					// Spawning a waiter here would be one goroutine per
+					// backlog ID, unbounded by MaxInFlight.
+					s.inFlight.Delete(id)
+					s.wg.Done()
+					continue
 				}
-				s.inFlight.Store(id, struct{}{})
-				_ = s.runner.Run(ctx, id)
-			}()
+			}
+			go s.execute(ctx, id, holdsSlot)
 		case <-ticker.C:
 			s.sweepRunnable(ctx)
 		}
 	}
+}
+
+// execute runs one submission under a pool slot, taking one first when it
+// does not already hold one. The slot is held before any lease claim or
+// store write, so the number of live SQLite transactions and upstream calls
+// stays bounded at MaxInFlight. A parked waiter keeps its in-flight mark
+// while it waits, so the sweep redelivers dropped IDs — never the ones
+// already held against a slot — and Stop still joins every waiter: a
+// cancelled waiter releases its parking place and the mark.
+func (s *Service) execute(ctx context.Context, id string, holdsSlot bool) {
+	defer s.wg.Done()
+	defer s.inFlight.Delete(id)
+	if !holdsSlot {
+		defer func() { <-s.parked }()
+		select {
+		case s.slots <- struct{}{}:
+		case <-ctx.Done():
+			return
+		}
+	}
+	defer func() { <-s.slots }()
+	_ = s.runner.Run(ctx, id)
 }
 
 // sweepRunnable re-derives every runnable replayable submission from the

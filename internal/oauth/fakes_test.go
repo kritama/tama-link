@@ -158,6 +158,9 @@ type fakeLease struct {
 	loseRenew  bool
 	loseAfter  int
 	generation int
+	// invalidated is the durable invalidation marker: a known-invalid
+	// legacy grant that must not count as live.
+	invalidated bool
 
 	fence          *sharedFence
 	fenceCommitErr error
@@ -390,6 +393,26 @@ func (f *fakeLease) ClearRetiredCredentialSlot(_ context.Context, slot string) e
 
 func (f *fakeLease) RecordRetiredCredentialSlot(_ context.Context, slot string) error {
 	f.retire(slot)
+	return nil
+}
+
+func (f *fakeLease) MarkRefreshCredentialInvalidated(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.invalidated = true
+	return nil
+}
+
+func (f *fakeLease) RefreshCredentialInvalidated(context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.invalidated, nil
+}
+
+func (f *fakeLease) ClearRefreshCredentialInvalidation(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.invalidated = false
 	return nil
 }
 

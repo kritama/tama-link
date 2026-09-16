@@ -33,6 +33,14 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 		in.ClientRequestID = clientRequestID
 	}
 
+	// The pinned descriptor, when the tool is still in the catalog, tells
+	// the identity which correlation values this operation can map. A
+	// read-only lookup: it performs no acceptance checks.
+	var pinned *catalog.Descriptor
+	if d, ok := s.profile.Catalog().Find(in.Tool); ok {
+		pinned = &d
+	}
+
 	// Reconcile an existing idempotency record from the client-visible
 	// request BEFORE any current-profile state applies: catalog
 	// membership, schema validation, bindings, credential readiness, and
@@ -44,7 +52,7 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 	// read-only, so a miss leaves the key free for a genuinely new
 	// acceptance below. A generated key is fresh on every call and skips
 	// the lookup.
-	identity, err := requestIdentity(in)
+	identity, err := requestIdentity(in, pinned)
 	if err != nil {
 		return contract.SubmitOutput{}, failed(contract.CodeInvalidRequest,
 			"Arguments must be a valid JSON document.")
@@ -158,14 +166,40 @@ func submitOutput(sub *store.Submission) contract.SubmitOutput {
 
 // requestIdentity renders the client-visible request the idempotency
 // identity covers: the raw argument bytes plus the client-owned correlation
-// values that reviewed bindings may map. Current schema, binding, and
-// descriptor state is deliberately excluded — those are acceptance checks
-// for new work, applied only after reconciliation.
-func requestIdentity(in contract.SubmitInput) (json.RawMessage, error) {
-	return json.Marshal(struct {
-		Arguments     json.RawMessage         `json:"arguments"`
-		ClientContext *contract.ClientContext `json:"client_context"`
-	}{Arguments: in.Arguments, ClientContext: in.ClientContext})
+// values the accepted operation can map. A context that carries no
+// correlation values is normalized to absence, so a retry that omits the
+// context or sends an empty one reconciles to the same identity. The
+// thread ID is included only when the pinned operation can map it; when
+// the operation is no longer in the pinned catalog, every correlation
+// source is included conservatively so an unchanged retry still reconciles
+// to the original submission. Current schema, binding, and descriptor
+// state beyond those mappable correlation sources is deliberately
+// excluded — those are acceptance checks for new work, applied only after
+// reconciliation.
+func requestIdentity(in contract.SubmitInput, d *catalog.Descriptor) (json.RawMessage, error) {
+	threadID := ""
+	if (d == nil || mapsThreadID(d)) && in.ClientContext != nil {
+		threadID = in.ClientContext.ThreadID
+	}
+	identity := struct {
+		Arguments json.RawMessage `json:"arguments"`
+		ThreadID  *string         `json:"thread_id,omitempty"`
+	}{Arguments: in.Arguments}
+	if threadID != "" {
+		identity.ThreadID = &threadID
+	}
+	return json.Marshal(identity)
+}
+
+// mapsThreadID reports whether the descriptor has a binding that can map
+// the client thread ID upstream.
+func mapsThreadID(d *catalog.Descriptor) bool {
+	for _, b := range d.Bindings {
+		if b.Source == catalog.SourceClientContextThreadID {
+			return true
+		}
+	}
+	return false
 }
 
 // strategyGate rejects execution strategies the initial production profiles
