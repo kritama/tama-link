@@ -158,6 +158,39 @@ func TestRegisteredClientTreatsLegacySecretlessRecordAsAbsent(t *testing.T) {
 	}
 }
 
+// TestRegisterCompletesWriteAfterCallerCancellation pins the
+// uninterruptible final write: the record write takes no context, so a
+// caller cancellation that lands while the secure backend is busy must
+// not abort the write — and must not stop the lease renewal that keeps
+// the epoch alive while the write blocks past the TTL. The write
+// completes and the record is stored.
+func TestRegisterCompletesWriteAfterCallerCancellation(t *testing.T) {
+	secrets := newFakeSecrets()
+	secrets.setDelay = 100 * time.Millisecond
+	client := newStaticClient(t, secrets, newFakeLease(), newTestClock(time.Unix(1_700_000_000, 0)))
+
+	var calls int32
+	ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
+	ctx, cancel := context.WithCancel(context.Background())
+	// Cancel the caller at the moment the record write starts.
+	secrets.setHook = func(label string) {
+		if label == labelClient {
+			cancel()
+		}
+	}
+
+	rec, err := client.Register(ctx, regMetadata(ts, testIssuer))
+	if err != nil {
+		t.Fatalf("Register with a caller cancellation during the write: %v", err)
+	}
+	if rec.ClientID != "cid-1" {
+		t.Fatalf("Register = %+v, want the registered record", rec)
+	}
+	if _, found, _ := secrets.GetSecret(labelClient); !found {
+		t.Fatal("the record write did not complete after the caller cancellation")
+	}
+}
+
 // TestRegisterRejectsLostLeaseBeforeStoringRecord pins the epoch gate
 // on the final write: if the refresh lease is taken over after the claim
 // but before the client record is stored, another process has already

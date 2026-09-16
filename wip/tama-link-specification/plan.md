@@ -181,8 +181,9 @@ grant is then retired) or aborts, never pairing the new client with a grant
 issued under the old one. The registration mutation holds the local lock
 that orders completions, refreshes, and logouts — a same-owner lease claim
 never advances the epoch, so the lease alone cannot order in-process
-mutations — renews the epoch across the whole mutation, and rejects the
-final record write if the epoch is lost.
+mutations — renews the epoch across the whole mutation, outliving caller
+cancellation because the final record write takes no context and cannot
+be aborted, and rejects the final record write if the epoch is lost.
 
 ### D6. Terminal results are captured immediately and owned locally
 

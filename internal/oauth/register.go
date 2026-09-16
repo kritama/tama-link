@@ -186,23 +186,25 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	}
 	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
 
-	// Renew ownership across the whole mutation: the final record write
-	// takes no context, so a secure backend that blocks beyond the lease
-	// TTL would hand the epoch to another process, whose registration
-	// and grant this stale record could then overwrite. The renewal loop
-	// is what keeps the epoch alive through that write.
-	execCtx, cancelExec := context.WithCancel(ctx)
+	// Renew ownership across the whole mutation on a context that
+	// outlives the caller's cancellation: the final record write takes
+	// no context and cannot be aborted, so if the secure backend blocks
+	// beyond the lease TTL the renewal is the only thing keeping the
+	// epoch alive, and a caller cancellation during that write must not
+	// hand the epoch to another process. Every interruptible step still
+	// observes the caller context directly.
+	renewCtx, cancelExec := context.WithCancel(context.WithoutCancel(ctx))
 	renewed := make(chan struct{})
-	go c.renewLease(execCtx, cancelExec, renewed)
+	go c.renewLease(renewCtx, cancelExec, renewed)
 	defer func() {
 		cancelExec()
 		<-renewed
 	}()
 
-	if existing, err := c.loadFenced(execCtx); err != nil {
+	if existing, err := c.loadFenced(ctx); err != nil {
 		return nil, err
 	} else if existing != nil {
-		if err := c.invalidateCredential(execCtx, leaseGeneration); err != nil {
+		if err := c.invalidateCredential(ctx, leaseGeneration); err != nil {
 			return nil, err
 		}
 	}
@@ -210,7 +212,7 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	// longer held at this generation, another process has already
 	// registered and may have committed a matching grant, and this
 	// stale record would pair it with the wrong client.
-	if generation, ok, err := c.lease.LeaseGeneration(execCtx, refreshLeaseName, c.owner); err != nil {
+	if generation, ok, err := c.lease.LeaseGeneration(ctx, refreshLeaseName, c.owner); err != nil {
 		return nil, err
 	} else if !ok || generation != leaseGeneration {
 		return nil, fmt.Errorf("%w: the refresh lease was lost before storing the client record", ErrLeaseContention)

@@ -27,6 +27,9 @@ type fakeSecrets struct {
 	setDelay    time.Duration
 	deleteDelay time.Duration
 	failDelete  map[string]error
+	// setHook runs just before a set is applied, letting a test cancel
+	// the caller at the moment an uninterruptible write starts.
+	setHook func(label string)
 }
 
 func newFakeSecrets() *fakeSecrets {
@@ -84,6 +87,9 @@ func (f *fakeSecrets) GetSecret(label string) ([]byte, bool, error) {
 }
 
 func (f *fakeSecrets) SetSecret(label string, data []byte) error {
+	if f.setHook != nil {
+		f.setHook(label)
+	}
 	if f.setDelay > 0 {
 		time.Sleep(f.setDelay)
 	}
