@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -221,6 +222,46 @@ func TestExecutionFailureBecomesTerminal(t *testing.T) {
 	}
 	if got.ErrorMessage == "private upstream failure" {
 		t.Fatal("private executor error leaked into durable client-facing state")
+	}
+}
+
+func TestDeferredExecutionStaysRecoverable(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	s := openStore(t, path, newMemoryKeys())
+	t.Cleanup(func() { _ = s.Close() })
+	createReplayable(t, s, "sub-1")
+	deferred := &executor{err: fmt.Errorf("%w: refresh lease contended", worker.ErrExecutionDeferred)}
+	runner, err := worker.New(s, deferred, worker.Config{Owner: "worker-a", LeaseTTL: time.Second})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	if err := runner.Run(context.Background(), "sub-1"); !errors.Is(err, worker.ErrExecutionDeferred) {
+		t.Fatalf("Run = %v, want ErrExecutionDeferred", err)
+	}
+	got, err := s.GetSubmission(context.Background(), "sub-1")
+	if err != nil {
+		t.Fatalf("GetSubmission: %v", err)
+	}
+	// A deferred run records no terminal failure: the submission keeps its
+	// non-terminal state and the sweep redelivers it.
+	if got.Status != contract.StatusRunning || got.ErrorCode != "" {
+		t.Fatalf("deferred submission = status %s code %q", got.Status, got.ErrorCode)
+	}
+	// Recovery with a healthy executor completes the same row.
+	healthy := &executor{}
+	runner, err = worker.New(s, healthy, worker.Config{Owner: "worker-b", LeaseTTL: time.Second})
+	if err != nil {
+		t.Fatalf("New recovery runner: %v", err)
+	}
+	if err := runner.Run(context.Background(), "sub-1"); err != nil {
+		t.Fatalf("recovery Run: %v", err)
+	}
+	got, err = s.GetSubmission(context.Background(), "sub-1")
+	if err != nil {
+		t.Fatalf("GetSubmission after recovery: %v", err)
+	}
+	if got.Status != contract.StatusCompleted || healthy.count() != 1 {
+		t.Fatalf("recovered submission = status %s, calls %d", got.Status, healthy.count())
 	}
 }
 

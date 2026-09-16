@@ -80,3 +80,17 @@ func IsAuth(err error) bool {
 	var e *Error
 	return errors.As(err, &e) && e.Kind == KindAuth
 }
+
+// ErrTokenContended is wrapped around a token-provider failure by callers
+// whose provider could not claim the refresh lease because another process
+// is refreshing the same credential. The credential is valid and the
+// winner's refresh is in flight, so the failure is transient contention —
+// never an authentication rejection. Callers should retry or defer the
+// work instead of failing it as authentication_required.
+var ErrTokenContended = errors.New("token provider lease is contended")
+
+// IsTokenContended reports whether err failed because the token provider
+// could not claim the refresh lease.
+func IsTokenContended(err error) bool {
+	return errors.Is(err, ErrTokenContended)
+}

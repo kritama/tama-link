@@ -22,4 +22,12 @@ var (
 	// ErrMetadata reports that protected-resource or authorization-server
 	// metadata is missing, malformed, or fails validation.
 	ErrMetadata = errors.New("oauth: metadata validation failed")
+
+	// ErrLeaseContention reports that another process currently owns the
+	// refresh lease, so this process could not run a token exchange. The
+	// credential is valid and the winner is refreshing it; the failure is
+	// transient contention, not an authentication failure. Callers should
+	// retry or defer the work instead of failing it as
+	// authentication_required.
+	ErrLeaseContention = errors.New("oauth: refresh lease is held by another process")
 )

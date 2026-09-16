@@ -39,19 +39,21 @@ func (c *Client) loadRefresh() (*refreshCredential, bool, error) {
 
 // HasCredentials reports whether the profile can authenticate without
 // performing a refresh: a cached token that is not already inside its
-// refresh skew, or a stored refresh credential. It is the submit path's
-// cheap probe for deciding whether accepting work the profile cannot
-// authenticate would only burn the idempotency key on a terminal
-// authentication_required. No network I/O.
-func (c *Client) HasCredentials() (bool, error) {
+// refresh skew, or a live refresh credential behind the credential fence.
+// It is the submit path's cheap probe for deciding whether accepting work
+// the profile cannot authenticate would only burn the idempotency key on a
+// terminal authentication_required. No network I/O. The probe resolves the
+// same fenced slot Token loads, so a credential stored by any process —
+// legacy label or committed fence — counts.
+func (c *Client) HasCredentials(ctx context.Context) (bool, error) {
 	if _, ok := c.validToken(); ok {
 		return true, nil
 	}
-	_, found, err := c.loadRefresh()
+	fenced, err := c.loadFenced(ctx)
 	if err != nil {
 		return false, err
 	}
-	return found, nil
+	return fenced != nil, nil
 }
 
 // applyTokens records a successful token exchange: the in-memory access
@@ -135,11 +137,20 @@ func (c *Client) Expiry() (expiry time.Time, ok bool) {
 }
 
 // Logout removes every OAuth credential for the profile from the secure
-// backend and clears the in-memory token. It never touches the state
+// backend and clears the in-memory token. It resolves the live credential
+// fence and deletes the committed slot as well as the legacy labels, so a
+// fenced credential cannot survive logout. It never touches the state
 // encryption key or the state database.
-func (c *Client) Logout() error {
+func (c *Client) Logout(ctx context.Context) error {
 	for _, label := range []string{labelClient, labelRefresh} {
 		if err := c.secrets.DeleteSecret(label); err != nil {
+			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+		}
+	}
+	if _, slot, found, err := c.lease.ReadCredentialFence(ctx); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	} else if found && slot != "" {
+		if err := c.secrets.DeleteSecret(slot); err != nil {
 			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
 	}

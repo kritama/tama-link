@@ -366,6 +366,38 @@ func TestTokenFailureClassifiesAsAuth(t *testing.T) {
 	}
 }
 
+// TestTokenContentionClassifiesAsTransport covers the lease-contention
+// carve-out: a token provider that reports refresh-lease contention
+// (ErrTokenContended) describes transient coordination with another
+// process, not a credential rejection, so it must not classify as KindAuth.
+func TestTokenContentionClassifiesAsTransport(t *testing.T) {
+	ts := newTestServer(t, func(rec *recordedRequest) (int, string, string) {
+		return 200, "application/json", jsonReply(rec.BodyID, `{}`)
+	})
+	client, err := New(Config{
+		Endpoint:           ts.URL,
+		ClientInfo:         mcp.Implementation{Name: "tama-link", Version: "0.1.0"},
+		ClientCapabilities: json.RawMessage(`{}`),
+		TokenProvider: func(context.Context) (string, error) {
+			return "", fmt.Errorf("%w: the winning process is refreshing the credential", ErrTokenContended)
+		},
+		MaxResponseBytes: 1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	_, err = client.Discover(context.Background())
+	if !IsTokenContended(err) {
+		t.Fatalf("err = %v, want token contention", err)
+	}
+	if IsAuth(err) {
+		t.Fatal("contention classified as an authentication rejection")
+	}
+	if len(ts.requests) != 0 {
+		t.Fatalf("%d requests reached the endpoint", len(ts.requests))
+	}
+}
+
 // TestResponseBounds covers oversized bodies and oversized SSE frames.
 func TestResponseBounds(t *testing.T) {
 	t.Run("json body", func(t *testing.T) {

@@ -22,24 +22,6 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 		return contract.SubmitOutput{}, failed(contract.CodeOperationNotAllowed,
 			"Operation %q is not approved by the selected profile.", in.Tool)
 	}
-	if be := s.strategyGate(d); be != nil {
-		return contract.SubmitOutput{}, be
-	}
-	// Authenticate before claiming the idempotency key: a profile with no
-	// usable credential would turn every accepted submission into a
-	// terminal authentication_required failure, and the key would then
-	// forever replay that failure instead of the reauthorized retry.
-	if s.credentialsReady != nil {
-		ready, err := s.credentialsReady(ctx)
-		if err != nil {
-			return contract.SubmitOutput{}, failed(contract.CodeStateUnavailable,
-				"Cannot verify profile credentials: %v", err)
-		}
-		if !ready {
-			return contract.SubmitOutput{}, failed(contract.CodeAuthenticationRequired,
-				"Tama requires authentication. Complete authorization for the selected profile, then retry.")
-		}
-	}
 	clientRequestID := in.ClientRequestID
 	if clientRequestID == "" {
 		// The public contract makes client_request_id optional: when the
@@ -69,6 +51,52 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 	if err := catalog.ValidateAgainstSchema(d.InputSchema, upstreamArgs); err != nil {
 		return contract.SubmitOutput{}, failed(contract.CodeInvalidRequest,
 			"Arguments do not satisfy the pinned upstream schema: %v", err)
+	}
+
+	// Reconcile an existing idempotency record before any readiness or
+	// strategy check: repeating the same key with equivalent canonical
+	// input must return the original submission even when credentials were
+	// removed or the profile was reconciled since acceptance. The lookup is
+	// read-only, so a miss leaves the key free for a genuinely new
+	// acceptance below. A generated key is fresh on every call and skips
+	// the lookup.
+	if clientRequestID != "" {
+		sub, found, err := s.store.ReconcileIdempotentSubmission(ctx, clientRequestID, store.NewSubmission{
+			Tool:      d.Name,
+			Arguments: upstreamArgs,
+		})
+		if err != nil {
+			if errors.Is(err, store.ErrIdempotencyConflict) {
+				return contract.SubmitOutput{}, failed(contract.CodeIdempotencyConflict,
+					"client_request_id was already used with different arguments for this profile.")
+			}
+			return contract.SubmitOutput{}, s.storeError(err)
+		}
+		if found {
+			return submitOutput(sub), nil
+		}
+	}
+
+	// Authenticate before durable acceptance: a profile with no usable
+	// credential would turn every accepted submission into a terminal
+	// authentication_required failure, and the key would then forever
+	// replay that failure instead of the reauthorized retry.
+	if s.credentialsReady != nil {
+		ready, err := s.credentialsReady(ctx)
+		if err != nil {
+			return contract.SubmitOutput{}, failed(contract.CodeStateUnavailable,
+				"Cannot verify profile credentials: %v", err)
+		}
+		if !ready {
+			return contract.SubmitOutput{}, failed(contract.CodeAuthenticationRequired,
+				"Tama requires authentication. Complete authorization for the selected profile, then retry.")
+		}
+	}
+	// The strategy gate runs only for genuinely new acceptance: rejected
+	// calls leave no row behind, so the same client_request_id stays free
+	// for a clean retry.
+	if be := s.strategyGate(d); be != nil {
+		return contract.SubmitOutput{}, be
 	}
 
 	id, err := newSubmissionID()
@@ -104,19 +132,25 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 		// already running work is at best noise.
 		s.worker.Dispatch(sub.ID)
 	}
+	return submitOutput(sub), nil
+}
+
+// submitOutput renders the durable submission for the submit response.
+func submitOutput(sub *store.Submission) contract.SubmitOutput {
 	return contract.SubmitOutput{
 		SubmissionID:    sub.ID,
 		Status:          sub.Status,
 		ClientRequestID: sub.ClientRequestID,
 		SubmittedAt:     &sub.CreatedAt,
 		NextPollMS:      1000,
-	}, nil
+	}
 }
 
 // strategyGate rejects execution strategies the initial production profiles
 // do not enable, before any durable acceptance, idempotency claim, or
-// upstream mutation. Rejected calls leave no row behind: the same
-// client_request_id stays free for a clean retry.
+// upstream mutation. It runs only for genuinely new acceptance: rejected
+// calls leave no row behind, so the same client_request_id stays free for a
+// clean retry.
 func (s *Service) strategyGate(d catalog.Descriptor) *contract.Error {
 	switch d.Strategy {
 	case catalog.StrategyUpstreamTask:

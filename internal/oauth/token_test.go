@@ -114,8 +114,8 @@ func TestRefreshLeaseContention(t *testing.T) {
 
 	start := time.Now()
 	_, err := client.Token(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "refresh lease") {
-		t.Fatalf("err = %v, want lease contention", err)
+	if !errors.Is(err, ErrLeaseContention) {
+		t.Fatalf("err = %v, want ErrLeaseContention", err)
 	}
 	if lease.claims != claimAttempts {
 		t.Errorf("claims = %d, want bounded %d", lease.claims, claimAttempts)
@@ -164,16 +164,16 @@ func TestRefreshIssuerMismatch(t *testing.T) {
 
 func TestHasCredentialsAndLogout(t *testing.T) {
 	_, client, secrets, _, _ := tokenFixture(t, "rt-1")
-	if ok, err := client.HasCredentials(); err != nil || !ok {
+	if ok, err := client.HasCredentials(context.Background()); err != nil || !ok {
 		t.Fatalf("HasCredentials = %v %v", ok, err)
 	}
 	if _, err := client.Token(context.Background()); err != nil {
 		t.Fatalf("Token: %v", err)
 	}
-	if err := client.Logout(); err != nil {
+	if err := client.Logout(context.Background()); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
-	if ok, _ := client.HasCredentials(); ok {
+	if ok, _ := client.HasCredentials(context.Background()); ok {
 		t.Error("credentials survived logout")
 	}
 	if _, ok := client.Expiry(); ok {
@@ -181,6 +181,24 @@ func TestHasCredentialsAndLogout(t *testing.T) {
 	}
 	if _, found, _ := secrets.GetSecret(labelClient); found {
 		t.Error("client record survived logout")
+	}
+}
+
+// TestHasCredentialsSeesFencedCredential pins the fence-aware probe: after
+// any successful exchange the refresh credential lives only at the committed
+// fence slot (the legacy label is retired), and the probe must still report
+// the profile as ready.
+func TestHasCredentialsSeesFencedCredentialOnly(t *testing.T) {
+	_, client, secrets, _, _ := tokenFixture(t, "rt-1")
+	ctx := context.Background()
+	if _, err := client.Token(ctx); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if _, found, _ := secrets.GetSecret(labelRefresh); found {
+		t.Fatal("legacy refresh label survived the fenced store")
+	}
+	if ok, err := client.HasCredentials(ctx); err != nil || !ok {
+		t.Fatalf("HasCredentials behind the fence = %v %v, want true", ok, err)
 	}
 }
 

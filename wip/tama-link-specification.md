@@ -198,9 +198,17 @@ Requirements:
   `client_context.thread_id`, omission is `invalid_request`. Tama Link must not
   substitute a profile-global or process-global conversation identity.
 - Repeating the same `client_request_id` with equivalent canonical input must
-  return the original submission. A replay appends no progress events and
-  re-offers nothing to the worker: an already advanced row keeps a monotonic
-  event sequence.
+  return the original submission. The request identity is the client-visible
+  input — the tool name and the canonical arguments — never live profile state,
+  so a retry after a profile reconciliation reconciles to the original
+  submission instead of reporting a conflict. A replay appends no progress
+  events and re-offers nothing to the worker: an already advanced row keeps a
+  monotonic event sequence.
+- Reconciliation of an existing idempotency record precedes the readiness and
+  strategy checks: recovery of an already accepted request must not depend on
+  current credentials or a later profile policy change. The authenticate-first
+  verification and the strategy gate below apply only to genuinely new
+  acceptance.
 - Lowering a profile limit must not make an already accepted idempotent request
   unrecoverable. Tama Link canonicalizes and reconciles an existing request
   within implementation hard ceilings before applying current profile limits;
@@ -489,7 +497,11 @@ a lease that outlives a terminal submission only lingers until its TTL
 expiry and can never shadow terminal work. A lease claim or transition that
 times out against the store's busy timeout is a transient condition, not a
 submission failure: startup recovery defers it and the recurring sweep
-retries it.
+retries it. Refresh-lease contention is likewise transient, never a failure
+of the work: an execution whose token provider could not claim the refresh
+lease keeps its non-terminal state and is redelivered by the sweep, instead
+of recording a terminal authentication failure for a credential that another
+process is merely refreshing.
 
 The store must tolerate multiple Tama Link processes opening the same profile.
 SQLite uses WAL mode, bounded busy handling, transactional idempotency, and
@@ -889,7 +901,9 @@ result, 16 KiB per progress event, 128 retained events and 1 MiB total event
 data per submission, seven days for terminal payloads, and 30 days from
 completion for payload-free expiry tombstones. Profiles may lower these values;
 raising them requires explicit values within implementation hard ceilings and
-a reconciled profile digest.
+a reconciled profile digest. Deleting a lapsed tombstone also deletes the
+input responses retained for that submission: retained response payloads must
+not outlive the tombstone that bounds them.
 
 All network destinations come from a validated profile. Discovered metadata,
 JWKS locations, and authorization endpoints require the same SSRF and origin

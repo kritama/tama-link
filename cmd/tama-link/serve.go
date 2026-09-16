@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -121,8 +122,21 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 			Version: version.Version,
 		},
 		ClientCapabilities: []byte(`{"extensions":{"io.modelcontextprotocol/tasks":{}}}`),
-		TokenProvider:      oauthClient.Token,
-		MaxResponseBytes:   int64(limits.ResponseBytes),
+		TokenProvider: func(ctx context.Context) (string, error) {
+			tok, err := oauthClient.Token(ctx)
+			if err != nil {
+				// Refresh-lease contention is transient: the credential is
+				// valid and the winning process is refreshing it. Report
+				// contention so the failure defers the work instead of
+				// recording an authentication rejection.
+				if errors.Is(err, oauth.ErrLeaseContention) {
+					return "", fmt.Errorf("%w: %w", upstream.ErrTokenContended, err)
+				}
+				return "", err
+			}
+			return tok, nil
+		},
+		MaxResponseBytes: int64(limits.ResponseBytes),
 	})
 	if err != nil {
 		_ = st.Close()
@@ -158,8 +172,8 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 		Connect:        connect,
 		Worker:         workerService,
 		AdapterVersion: version.Version,
-		CredentialsReady: func(context.Context) (bool, error) {
-			return oauthClient.HasCredentials()
+		CredentialsReady: func(ctx context.Context) (bool, error) {
+			return oauthClient.HasCredentials(ctx)
 		},
 	})
 	if err != nil {

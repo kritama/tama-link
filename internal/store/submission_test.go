@@ -251,6 +251,67 @@ func TestCreateIdempotencyIgnoresRuntimeVersions(t *testing.T) {
 	}
 }
 
+func TestCreateIdempotencyIgnoresDescriptorAndStrategy(t *testing.T) {
+	t.Parallel()
+
+	// The strategy and the pinned descriptor are live profile state: a
+	// retry after a profile reconciliation must reconcile to the original
+	// submission instead of reporting a conflict solely because those
+	// fields changed.
+	s, _ := openTestStore(t, newMemKeys(), newClock())
+	ctx := context.Background()
+	first, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1"))
+	if err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	retry := testSubmission("sub-2", "req-1")
+	retry.Strategy = "local_replayable"
+	retry.DescriptorDigest = "sha256:reconciled"
+	got, created, err := s.CreateSubmission(ctx, retry)
+	if err != nil {
+		t.Fatalf("retry after profile reconciliation: %v", err)
+	}
+	if created || got.ID != first.ID {
+		t.Fatalf("retry returned %q created=%v, want original %q", got.ID, created, first.ID)
+	}
+	// The original row keeps its accepted descriptor and strategy.
+	if got.DescriptorDigest != first.DescriptorDigest || got.Strategy != first.Strategy {
+		t.Fatalf("reconciled row changed profile fields: %+v", got)
+	}
+}
+
+func TestReconcileIdempotentSubmission(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestStore(t, newMemKeys(), newClock())
+	ctx := context.Background()
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+
+	// An exact replay reconciles to the original row without claiming or
+	// mutating anything.
+	got, found, err := s.ReconcileIdempotentSubmission(ctx, "req-1", testSubmission("sub-2", "req-1"))
+	if err != nil || !found {
+		t.Fatalf("reconcile = %v found=%v, want the original submission", err, found)
+	}
+	if got.ID != "sub-1" {
+		t.Fatalf("reconcile returned %q, want sub-1", got.ID)
+	}
+
+	// An unclaimed key is a miss, not an error, and stays free.
+	if _, found, err := s.ReconcileIdempotentSubmission(ctx, "req-2", testSubmission("sub-3", "req-2")); err != nil || found {
+		t.Fatalf("unclaimed reconcile = found=%v err=%v, want miss", found, err)
+	}
+
+	// A key reused with different arguments is a conflict.
+	conflict := testSubmission("sub-4", "req-1")
+	conflict.Arguments = []byte(`{"message":"different"}`)
+	if _, _, err := s.ReconcileIdempotentSubmission(ctx, "req-1", conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
+		t.Fatalf("conflicting reconcile = %v, want ErrIdempotencyConflict", err)
+	}
+}
+
 func TestCreateValidatesInput(t *testing.T) {
 	t.Parallel()
 

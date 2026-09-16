@@ -21,7 +21,9 @@ import (
 // TokenProvider supplies a bearer token for one upstream request.
 // Implementations must refresh under their own coordination (the lease-based
 // credential store). A provider failure and an endpoint rejection (401/403)
-// both classify as KindAuth.
+// both classify as KindAuth — unless the provider reports lease contention
+// by wrapping ErrTokenContended, which classifies as KindTransport because
+// the credential is valid and another process is merely refreshing it.
 type TokenProvider func(ctx context.Context) (string, error)
 
 // DefaultRequestTimeout bounds one finite upstream request. It applies per
@@ -185,6 +187,12 @@ func (c *Client) doRequest(ctx context.Context, method, name string, params, met
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	token, err := c.tokens(ctx)
 	if err != nil {
+		// Lease contention is transient: the credential is valid and the
+		// winning process is refreshing it. It must not surface as an
+		// authentication rejection, which callers treat as terminal.
+		if IsTokenContended(err) {
+			return "", nil, newError(KindTransport, 0, err)
+		}
 		return "", nil, newError(KindAuth, 0, err)
 	}
 	req.Header.Set("Authorization", "Bearer "+token)

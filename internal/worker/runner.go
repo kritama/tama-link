@@ -25,6 +25,11 @@ var (
 	ErrNotRunnable = errors.New("submission not runnable")
 	// ErrLeaseLost reports that this worker could not renew its ownership.
 	ErrLeaseLost = errors.New("submission lease lost")
+	// ErrExecutionDeferred reports that execution could not start for a
+	// transient reason — for example refresh-lease contention in another
+	// process. The submission keeps its non-terminal state and the
+	// recurring sweep redelivers it; no terminal failure is recorded.
+	ErrExecutionDeferred = errors.New("execution deferred by transient contention")
 )
 
 // State is the durable behavior a Runner consumes.
@@ -121,6 +126,11 @@ func (r *Runner) Run(ctx context.Context, id string) (runErr error) {
 		result, executeErr = r.executor.Execute(execCtx, sub)
 		if executeErr == nil {
 			_, err = r.state.CompleteLeased(execCtx, id, leaseName, leaseOwner, result)
+		} else if errors.Is(executeErr, ErrExecutionDeferred) {
+			// Transient contention is not a failure of the work: the row
+			// stays in its non-terminal state, the lease is released below,
+			// and the sweep redelivers it.
+			err = executeErr
 		} else if execCtx.Err() == nil {
 			failure := contract.NewError(contract.CodeUpstreamExecutionFailed, "The local operation could not be completed.")
 			var carrier interface{ ContractError() *contract.Error }
@@ -191,6 +201,7 @@ func (r *Runner) Recover(ctx context.Context) error {
 		if err := r.Run(ctx, id); err != nil &&
 			!errors.Is(err, ErrLeaseHeld) &&
 			!errors.Is(err, ErrNotRunnable) &&
+			!errors.Is(err, ErrExecutionDeferred) &&
 			!errors.Is(err, store.ErrBusy) {
 			failures = append(failures, fmt.Errorf("recover %s: %w", id, err))
 		}

@@ -339,6 +339,49 @@ func TestSubmitIdempotentReplayDoesNotAppendEvents(t *testing.T) {
 	}
 }
 
+// TestSubmitReplaysBeforeCredentialCheck pins recovery of a lost submit
+// response: an exact retry of an accepted client_request_id returns the
+// durable submission even when credentials have since been removed. The
+// replay accepts no new work, so current authentication state is
+// irrelevant to it.
+func TestSubmitReplaysBeforeCredentialCheck(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	ready := true
+	cfg := fixtureConfigFor(t, f, limits.Default())
+	cfg.CredentialsReady = func(context.Context) (bool, error) { return ready, nil }
+	svc, _, _ := appFromConfig(t, cfg)
+
+	first := submitStatus(t, svc, "recover-1")
+
+	// Credentials disappear after acceptance (logout, keyring loss). The
+	// retry must still reconcile the original submission.
+	ready = false
+	out, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "recover-1",
+		ClientContext:   &contract.ClientContext{ThreadID: "thread-1"},
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	})
+	if appErr != nil {
+		t.Fatalf("replay without credentials: %s", appErr.Message)
+	}
+	if out.SubmissionID != first {
+		t.Fatalf("replay returned %s, want %s", out.SubmissionID, first)
+	}
+
+	// A genuinely new submission still fails closed while unauthorized.
+	if _, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "recover-2",
+		ClientContext:   &contract.ClientContext{ThreadID: "thread-1"},
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	}); appErr == nil || appErr.Code != contract.CodeAuthenticationRequired {
+		t.Fatalf("new submission = %+v, want authentication_required", appErr)
+	}
+}
+
 // TestSubmitProbesCredentialsBeforeAccepting pins the authenticate-first
 // contract: a profile with no usable credential fails submit as
 // authentication_required before durable acceptance, and the idempotency

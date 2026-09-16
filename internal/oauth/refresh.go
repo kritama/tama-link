@@ -47,7 +47,7 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 		return "", err
 	}
 	if !claimed {
-		return "", errors.New("oauth: refresh lease is held by another process")
+		return "", fmt.Errorf("%w: the winning process is refreshing the credential", ErrLeaseContention)
 	}
 	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
 

@@ -70,8 +70,11 @@ func (s *Store) expirePayloads(ctx context.Context, tx *writeTx, nowMs int64) (G
 	return GCSummary{Expired: int(affected)}, nil
 }
 
-// deleteLapsedTombstones removes submissions past tombstone retention and
-// their idempotency entries.
+// deleteLapsedTombstones removes submissions past tombstone retention with
+// their idempotency entries and retained input responses. input_responses
+// has no foreign key to the submissions row, so the encrypted payloads are
+// deleted in the same transaction: a tombstone leaves no orphan rows and
+// payload retention stays bounded.
 func (s *Store) deleteLapsedTombstones(ctx context.Context, tx *writeTx, nowMs int64) (int, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT submission_id, client_request_id
@@ -90,6 +93,11 @@ func (s *Store) deleteLapsedTombstones(ctx context.Context, tx *writeTx, nowMs i
 		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM submissions WHERE submission_id = ?", id); err != nil {
 			return 0, fmt.Errorf("delete submission %s: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM input_responses WHERE submission_id = ?", id,
+		); err != nil {
+			return 0, fmt.Errorf("delete input responses for submission %s: %w", id, err)
 		}
 		if _, err := tx.ExecContext(ctx,
 			"DELETE FROM idempotency WHERE client_request_id = ?", clientRequestID,

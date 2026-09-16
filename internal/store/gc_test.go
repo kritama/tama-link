@@ -2,6 +2,8 @@ package store_test
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -135,6 +137,57 @@ func TestGCClearsPayloadFromAlreadyExpiredSubmission(t *testing.T) {
 	if len(got.Arguments) != 0 || len(got.Events) != 0 || got.TaskID != "" ||
 		got.ErrorCode != "" || got.ErrorMessage != "" || got.ErrorRetryable {
 		t.Fatalf("expired tombstone still carries payload: %+v", got)
+	}
+}
+
+// TestGCTombstoneDeletesInputResponses pins that a lapsed tombstone also
+// removes its retained input responses: input_responses has no foreign key
+// to the submissions row, so the deletion must be explicit or the encrypted
+// payloads would linger as unbounded orphans.
+func TestGCTombstoneDeletesInputResponses(t *testing.T) {
+	keys, clk := newMemKeys(), newClock()
+	s, path := openTestStore(t, keys, clk)
+	ctx := context.Background()
+
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+	if err := s.SetInputResponse(ctx, "sub-1", "in-1", json.RawMessage(`{"answer":1}`)); err != nil {
+		t.Fatalf("SetInputResponse: %v", err)
+	}
+
+	// Drive the row to a terminal state and past both retention windows.
+	for _, state := range []submission.State{contract.StatusQueued, contract.StatusRunning} {
+		if _, err := s.Transition(ctx, "sub-1", state, store.TransitionDetail{}); err != nil {
+			t.Fatalf("transition to %s: %v", state, err)
+		}
+	}
+	failure := contract.NewError(contract.CodeUpstreamExecutionFailed, "gone")
+	if _, err := s.Transition(ctx, "sub-1", contract.StatusFailed, store.TransitionDetail{Error: &failure}); err != nil {
+		t.Fatalf("Transition: %v", err)
+	}
+	clk.Advance(7*24*time.Hour + 30*24*time.Hour + time.Minute)
+	summary, err := s.GC(ctx)
+	if err != nil {
+		t.Fatalf("GC: %v", err)
+	}
+	if summary.Deleted != 1 {
+		t.Fatalf("GC summary = %+v, want one deleted tombstone", summary)
+	}
+
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open state db: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	var responses int
+	if err := db.QueryRowContext(ctx,
+		"SELECT COUNT(*) FROM input_responses WHERE submission_id = ?", "sub-1",
+	).Scan(&responses); err != nil {
+		t.Fatalf("count input responses: %v", err)
+	}
+	if responses != 0 {
+		t.Fatalf("%d input responses survived tombstone deletion", responses)
 	}
 }
 

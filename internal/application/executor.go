@@ -2,10 +2,13 @@ package application
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/kritama/tama-link/internal/adapter/tama2026"
 	"github.com/kritama/tama-link/internal/contract"
 	"github.com/kritama/tama-link/internal/store"
+	"github.com/kritama/tama-link/internal/upstream"
+	"github.com/kritama/tama-link/internal/worker"
 )
 
 // Executor executes local_replayable submissions through one verified
@@ -37,6 +40,9 @@ func NewExecutor(resolve func(ctx context.Context) (*tama2026.Connection, error)
 func (e *Executor) Execute(ctx context.Context, sub *store.Submission) (contract.Result, error) {
 	cn, err := e.resolve(ctx)
 	if err != nil {
+		if deferredErr := deferredIfContended(err); deferredErr != nil {
+			return contract.Result{}, deferredErr
+		}
 		return contract.Result{}, &BoundaryError{E: *classify(err)}
 	}
 	if err := checkDescriptorDigest(cn, sub); err != nil {
@@ -44,9 +50,23 @@ func (e *Executor) Execute(ctx context.Context, sub *store.Submission) (contract
 	}
 	result, err := cn.ExecuteLocal(ctx, sub.Tool, sub.Arguments)
 	if err != nil {
+		if deferredErr := deferredIfContended(err); deferredErr != nil {
+			return contract.Result{}, deferredErr
+		}
 		return contract.Result{}, &BoundaryError{E: *classify(err)}
 	}
 	return *result, nil
+}
+
+// deferredIfContended maps refresh-lease contention to a deferred execution:
+// another process owns the refresh lease and is refreshing the same valid
+// credential, so the work must be redelivered by the sweep rather than
+// failed as an authentication error.
+func deferredIfContended(err error) error {
+	if !upstream.IsTokenContended(err) {
+		return nil
+	}
+	return fmt.Errorf("%w: refresh lease contended in another process", worker.ErrExecutionDeferred)
 }
 
 // checkDescriptorDigest verifies that the submission's accepted descriptor
