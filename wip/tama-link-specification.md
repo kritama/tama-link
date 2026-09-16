@@ -208,6 +208,12 @@ Requirements:
 - Reusing it with different input must fail with `idempotency_conflict`.
 - Success means Tama Link durably accepted responsibility for the operation in
   its local store, not that Tama accepted or completed it.
+- Tama Link verifies that the profile can authenticate before durable
+  acceptance, without a refresh or an upstream connection: a profile with no
+  usable credential fails `submit` as `authentication_required`, and the
+  idempotency key stays free, so the reauthorize-and-retry flow replays as a
+  genuinely new acceptance instead of returning a permanently failed
+  submission.
 - The response must not block until graph completion.
 
 For the initial App `message` projection, the profile may bind
@@ -706,21 +712,24 @@ validated issuer, because the authorization code and any client secret are
 sent there. The same origin policy re-validates the stored token endpoint
 before every refresh. A refresh holds its cross-process lease for the whole
 critical section: the lease is renewed on a third of its TTL while the token
-exchange runs and the replacement credential is written, ownership is
-re-verified immediately before and after the credential write (a blocked
-write can outlive the lease and cannot observe the renewal loop, so a loss
-during the write must fail the refresh after it completes instead of
-reporting success), and a lost lease aborts before any replacement token is
-persisted. Refresh transactions are also serialized inside one process: the
-shared owner would otherwise let two in-process refreshes rotate the same
-refresh grant at once. The credential write is gated on the lease
-generation: a claim by a different owner advances the generation, and the
-write only runs when an atomic commit gate proves the refresh still holds the
-lease in its own epoch, so a stale writer cannot commit over a newer
-rotation; a post-write gate failure fails the refresh instead of reporting
-success. The refresh lead time is capped to a quarter of the issued token
-lifetime so a short token keeps a positive validity window instead of
-refreshing on every request.
+exchange runs and the replacement credential is written, and a lost lease
+aborts before any replacement token is persisted: ownership is re-verified
+by an atomic commit gate immediately before the write, so a lease lost to a
+foreign claim blocks the stale write. The credential persistence itself is
+fenced: every writer commits its replacement at its own unique secure-backend
+slot and then atomically advances a durable fence pointer to that slot's
+generation, and the commit is a compare-and-swap that a concurrent rotation
+already passed is rejected. A writer whose secret-store write blocks past
+its lease therefore cannot make its value live: the fence commit fails, the
+orphan slot is deleted, and the refresh fails instead of reporting a
+superseded success. The fence subsumes post-write ownership checks, which
+cannot repair an unfenced external write. Refresh transactions are also
+serialized inside one process, and a burst of concurrent token requests
+reuses one rotation: queued callers recheck the cached token under the
+single-flight lock, while an explicit forced refresh never coalesces. The
+refresh lead time is capped to a quarter of the issued token lifetime so a
+short token keeps a positive validity window instead of refreshing on every
+request.
 
 The local worker executes at most a bounded number of submissions
 concurrently; queued work beyond the bound waits for a free slot. The bound
@@ -984,6 +993,11 @@ The first complete implementation is not done until automated tests prove:
 12. Progress cursors deduplicate ordered events. A cursor beyond the
     submission's current event sequence is an `invalid_request`, never
     echoed, so a copied cursor cannot create a persistent event gap.
+13. Recording an input response detects a concurrent winner in the same
+    operation: when another process answered the same outstanding request
+    with a different value, the loser gets `idempotency_conflict` and
+    reconciles against the durable winner instead of silently assuming its
+    value was stored. An exact replay of the recorded value is a no-op.
 13. Requested MCP progress notifications are rate limited and correlated.
 14. Credentials and plaintext sensitive inputs do not appear in SQLite
     metadata, JSON output, logs, panic output, or test snapshots; encrypted

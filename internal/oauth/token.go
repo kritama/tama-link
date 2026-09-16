@@ -18,18 +18,6 @@ type refreshCredential struct {
 	Updated       time.Time `json:"updated"`
 }
 
-// storeRefresh atomically persists the refresh credential.
-func (c *Client) storeRefresh(cred *refreshCredential) error {
-	data, err := json.Marshal(cred)
-	if err != nil {
-		return fmt.Errorf("encode refresh credential: %w", err)
-	}
-	if err := c.secrets.SetSecret(labelRefresh, data); err != nil {
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
-	}
-	return nil
-}
-
 // loadRefresh returns the stored refresh credential, or found=false.
 func (c *Client) loadRefresh() (*refreshCredential, bool, error) {
 	data, found, err := c.secrets.GetSecret(labelRefresh)
@@ -49,14 +37,33 @@ func (c *Client) loadRefresh() (*refreshCredential, bool, error) {
 	return &cred, true, nil
 }
 
+// HasCredentials reports whether the profile can authenticate without
+// performing a refresh: a cached token that is not already inside its
+// refresh skew, or a stored refresh credential. It is the submit path's
+// cheap probe for deciding whether accepting work the profile cannot
+// authenticate would only burn the idempotency key on a terminal
+// authentication_required. No network I/O.
+func (c *Client) HasCredentials() (bool, error) {
+	if _, ok := c.validToken(); ok {
+		return true, nil
+	}
+	_, found, err := c.loadRefresh()
+	if err != nil {
+		return false, err
+	}
+	return found, nil
+}
+
 // applyTokens records a successful token exchange: the in-memory access
-// token plus, atomically, any replacement refresh token.
-func (c *Client) applyTokens(cred *refreshCredential, tok *tokenResponse) error {
+// token plus, at the fenced slot the caller derived before the exchange,
+// any replacement refresh token.
+func (c *Client) applyTokens(ctx context.Context, fenced *fencedCredential, tok *tokenResponse) error {
+	cred := fenced.credential
 	if tok.RefreshToken != "" {
 		cred.RefreshToken = tok.RefreshToken
 	}
 	cred.Updated = c.clock().UTC()
-	if err := c.storeRefresh(cred); err != nil {
+	if err := c.storeFenced(ctx, fenced); err != nil {
 		return err
 	}
 	expiresIn := tok.ExpiresIn
@@ -84,14 +91,38 @@ func (c *Client) applyTokens(cred *refreshCredential, tok *tokenResponse) error 
 // ErrNoCredentials means interactive reauthorization is required; this
 // method never opens a browser.
 func (c *Client) Token(ctx context.Context) (string, error) {
-	c.mu.Lock()
-	valid := c.hasToken && c.tokenExpiry.After(c.clock().Add(c.skew))
-	if valid {
-		defer c.mu.Unlock()
-		return c.token, nil
+	if tok, ok := c.validToken(); ok {
+		return tok, nil
 	}
-	c.mu.Unlock()
-	return c.refresh(ctx)
+	// Coalesced refresh: take the single-flight lock, then recheck. A
+	// caller ahead in the queue may have installed a fresh token while we
+	// waited, and reusing it spares a sequential rotation per caller in a
+	// burst of concurrent expiries.
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	if tok, ok := c.validToken(); ok {
+		return tok, nil
+	}
+	return c.refreshLocked(ctx)
+}
+
+func (c *Client) validToken() (string, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.hasToken && c.tokenExpiry.After(c.clock().Add(c.skew)) {
+		return c.token, true
+	}
+	return "", false
+}
+
+// Refresh forces one refresh exchange under the profile lease and returns
+// the new access token, even when a valid token is cached. It never
+// coalesces with a concurrent refresh's result. The subscription owner
+// calls it after closing a stream at credential expiry.
+func (c *Client) Refresh(ctx context.Context) (string, error) {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	return c.refreshLocked(ctx)
 }
 
 // Expiry returns the held in-memory access token's expiry without
@@ -101,13 +132,6 @@ func (c *Client) Expiry() (expiry time.Time, ok bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.tokenExpiry, c.hasToken
-}
-
-// HasCredentials reports whether a refresh credential is stored for this
-// profile.
-func (c *Client) HasCredentials() (bool, error) {
-	_, found, err := c.loadRefresh()
-	return found, err
 }
 
 // Logout removes every OAuth credential for the profile from the secure

@@ -33,9 +33,17 @@ func (s *Store) GetInputResponse(ctx context.Context, submissionID, requestID st
 	return decoded, true, nil
 }
 
+// ErrInputResponseConflict reports that a different response is already
+// recorded for an input-request ID. The caller must reconcile through the
+// winner (GetInputResponse); its own value was not stored.
+var ErrInputResponseConflict = errors.New("a different response is already recorded for this input request")
+
 // SetInputResponse records the canonical response for one input-request ID.
-// An existing record is left untouched; the caller must reconcile an existing
-// record through GetInputResponse first.
+// Recording is atomic with conflict detection: when another process wins a
+// concurrent insert with a different value, ErrInputResponseConflict is
+// returned in the same operation, so the loser can reconcile against the
+// durable winner instead of silently assuming its value won. An exact
+// replay (the same normalized value) is a no-op.
 func (s *Store) SetInputResponse(ctx context.Context, submissionID, requestID string, response json.RawMessage) error {
 	if submissionID == "" || requestID == "" {
 		return errors.New("submission id and request id are required")
@@ -47,14 +55,30 @@ func (s *Store) SetInputResponse(ctx context.Context, submissionID, requestID st
 	if err != nil {
 		return fmt.Errorf("seal input response: %w", err)
 	}
-	if _, err := s.exec(ctx, `
+	res, err := s.db.ExecContext(ctx, `
 		INSERT INTO input_responses (submission_id, request_id, response_enc, answered_at)
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(submission_id, request_id) DO NOTHING`,
-		submissionID, requestID, sealed, s.now().UnixMilli()); err != nil {
+		submissionID, requestID, sealed, s.now().UnixMilli())
+	if err != nil {
 		return fmt.Errorf("record input response: %w", err)
 	}
-	return nil
+	if inserted, _ := res.RowsAffected(); inserted > 0 {
+		return nil
+	}
+	// The row already existed: inspect the winner. An identical replay
+	// succeeds; anything else is a conflict.
+	stored, found, err := s.GetInputResponse(ctx, submissionID, requestID)
+	if err != nil {
+		return err
+	}
+	if !found {
+		return errors.New("input response vanished between insert and read")
+	}
+	if string(stored) == string(response) {
+		return nil
+	}
+	return ErrInputResponseConflict
 }
 
 // AttachTaskID records the owner-bound upstream task ID on a submission whose

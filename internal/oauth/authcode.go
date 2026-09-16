@@ -103,7 +103,18 @@ func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *C
 		Issuer:        md.AS.Issuer,
 		Updated:       c.clock().UTC(),
 	}
-	return c.applyTokens(cred, tok)
+	// The authorization commits its credential through the same fence as
+	// every refresh, so a concurrent rotation is detected by the commit,
+	// never clobbered.
+	fenced, err := c.loadFenced(ctx)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	if fenced == nil {
+		fenced = &fencedCredential{generation: 1}
+	}
+	fenced.credential = cred
+	return c.applyTokens(ctx, fenced, tok)
 }
 
 // checkLoopbackRedirect enforces D5: the only redirect this client accepts

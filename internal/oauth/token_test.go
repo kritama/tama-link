@@ -73,11 +73,8 @@ func TestTokenRefreshOnExpiry(t *testing.T) {
 		t.Error("refresh wire carries no resource binding")
 	}
 	// Stable refresh: the same refresh token is retained.
-	data, found, err := secrets.GetSecret(labelRefresh)
-	if err != nil || !found {
-		t.Fatalf("credential = %v", err)
-	}
-	if !strings.Contains(string(data), "rt-1") {
+	data := liveCredential(t, lease, secrets)
+	if !strings.Contains(data, "rt-1") {
 		t.Errorf("stable refresh token lost: %s", data)
 	}
 	if lease.released != 2 {
@@ -86,17 +83,14 @@ func TestTokenRefreshOnExpiry(t *testing.T) {
 }
 
 func TestTokenReplacementRefresh(t *testing.T) {
-	server, client, secrets, _, _ := tokenFixture(t, "rt-1")
+	server, client, secrets, lease, _ := tokenFixture(t, "rt-1")
 	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
 
 	if _, err := client.Token(context.Background()); err != nil {
 		t.Fatalf("Token: %v", err)
 	}
-	data, found, err := secrets.GetSecret(labelRefresh)
-	if err != nil || !found {
-		t.Fatalf("credential = %v", err)
-	}
-	if !strings.Contains(string(data), "rt-2") || strings.Contains(string(data), "rt-1") {
+	data := liveCredential(t, lease, secrets)
+	if !strings.Contains(data, "rt-2") || strings.Contains(data, "rt-1") {
 		t.Errorf("replacement refresh token not stored atomically: %s", data)
 	}
 }
@@ -277,13 +271,10 @@ func TestRefreshAbortsWhenLeaseLost(t *testing.T) {
 	if elapsed := time.Since(start); elapsed >= 400*time.Millisecond {
 		t.Errorf("exchange ran %s after the lease was lost, want abort", elapsed)
 	}
-	data, found, err := secrets.GetSecret(labelRefresh)
-	if err != nil || !found {
-		t.Fatalf("credential = %v", err)
-	}
+	data := liveCredential(t, lease, secrets)
 	// The replacement token from the aborted exchange must not be
 	// persisted: another process now owns the credential.
-	if strings.Contains(string(data), "rt-2") || !strings.Contains(string(data), "rt-1") {
+	if strings.Contains(data, "rt-2") || !strings.Contains(data, "rt-1") {
 		t.Errorf("replacement credential persisted after lease loss: %s", data)
 	}
 }
@@ -321,57 +312,114 @@ func TestRefreshSerializesInProcess(t *testing.T) {
 	if concur > 1 {
 		t.Errorf("token endpoint saw %d concurrent refreshes from one process, want at most 1", concur)
 	}
-	if calls != 2 {
-		t.Errorf("token requests = %d, want 2 (each caller refreshed once)", calls)
+	// Coalescing: the second caller rechecked under the single-flight lock
+	// and reused the token the first refresh installed, so exactly one
+	// rotation happened for the whole burst.
+	if calls != 1 {
+		t.Errorf("token requests = %d, want 1 (the burst reuses one refresh)", calls)
+	}
+	clock.set(clock.now.Add(time.Minute))
+}
+
+// TestRefreshForcedBypassesCoalescing pins the Refresh contract: a forced
+// refresh never reuses a concurrent refresh's installed token; it performs
+// its own rotation.
+func TestRefreshForcedBypassesCoalescing(t *testing.T) {
+	server, client, _, _, clock := tokenFixture(t, "rt-1")
+	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+
+	tok, err := client.Refresh(context.Background())
+	if err != nil || tok != "at-2" {
+		t.Fatalf("Refresh = %q err=%v, want at-2", tok, err)
+	}
+	server.tokenReqMu.Lock()
+	calls := server.tokenCalls
+	server.tokenReqMu.Unlock()
+	if calls != 1 {
+		t.Fatalf("token requests = %d, want 1 forced rotation", calls)
 	}
 	clock.set(clock.now.Add(time.Minute))
 }
 
 // TestRefreshVerifiesOwnershipBeforeCredentialWrite proves the pre-write
-// verification: when renewals report lost ownership, the refresh aborts
-// before SetSecret starts, and no replacement credential is persisted.
+// verification: a foreign claim that takes the lease right after ours
+// fails the atomic commit gate, so the refresh aborts before any
+// replacement credential is persisted.
 func TestRefreshVerifiesOwnershipBeforeCredentialWrite(t *testing.T) {
 	server, client, secrets, lease, clock := tokenFixture(t, "rt-1")
 	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
-	lease.loseAllRenews()
+	lease.onClaim = func() { lease.holdOther() }
 
 	_, err := client.Token(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "before the credential write") {
 		t.Fatalf("err = %v, want pre-write ownership failure", err)
 	}
-	data, found, err := secrets.GetSecret(labelRefresh)
-	if err != nil || !found {
-		t.Fatalf("credential = %v", err)
-	}
-	if strings.Contains(string(data), "rt-2") {
+	data := liveCredential(t, lease, secrets)
+	if strings.Contains(data, "rt-2") {
 		t.Errorf("replacement credential persisted after losing ownership: %s", data)
 	}
 	clock.set(clock.now.Add(time.Minute))
 }
 
-// TestRefreshDetectsLeaseLossDuringCredentialWrite proves the post-write
-// re-verification: when the renewal loop loses the lease while a delayed
-// credential write is in flight (the write cannot observe the cancellation
-// because the secret-store API has no context), the refresh must not report
-// success and must not keep the token cached.
-func TestRefreshDetectsLeaseLossDuringCredentialWrite(t *testing.T) {
-	server, client, secrets, lease, clock := tokenFixture(t, "rt-1")
+// TestRefreshFenceRejectsStaleWriter proves the persistence fence under the
+// blocked-write scenario: process A's credential write blocks past its
+// lease, process B claims the lease, completes its own rotation and commits
+// the fence first; when A's write resumes, A's fence commit is rejected, A's
+// orphan slot is deleted, and B's credential stays live — a stale writer
+// never makes its value live.
+func TestRefreshFenceRejectsStaleWriter(t *testing.T) {
+	server := (&metadataServer{}).start(t)
 	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
-	prev := refreshLeaseTTL
-	refreshLeaseTTL = 100 * time.Millisecond
-	defer func() { refreshLeaseTTL = prev }()
-	// The write outlasts the lease; a renewal during the write loses
-	// ownership. Renewal order: pre-write verification (#1), then the
-	// loop's renewals during the 150 ms write; the third loses.
-	lease.loseAfterRenewals(3)
-	secrets.setDelay = 150 * time.Millisecond
+	server.tokenDelay = 80 * time.Millisecond
+	store := newFakeSecrets()
+	fence := newSharedFence()
+	clock := newTestClock(time.Unix(1_700_000_000, 0))
 
-	_, err := client.Token(context.Background())
-	if err == nil || !strings.Contains(err.Error(), "during the credential write") {
-		t.Fatalf("err = %v, want lease loss during the credential write", err)
+	leaseA := newFakeLease()
+	leaseA.fence = fence
+	leaseB := newFakeLease()
+	leaseB.fence = fence
+	clientA := clientForServer(t, server, &delayedSecrets{inner: store, delay: 150 * time.Millisecond}, leaseA, clock)
+	clientB := clientForServer(t, server, store, leaseB, clock)
+	seedCredentials(t, store, "cid-1", "shh", server.ts.URL+"/oauth/token", server.ts.URL+"/oauth", "rt-1")
+
+	prev := refreshLeaseTTL
+	refreshLeaseTTL = 300 * time.Millisecond
+	defer func() { refreshLeaseTTL = prev }()
+
+	doneA := make(chan error, 1)
+	go func() {
+		_, err := clientA.Token(context.Background())
+		doneA <- err
+	}()
+	// B claims the lease while A's exchange and write are in flight, then
+	// completes its own rotation with an unblocked write.
+	time.Sleep(120 * time.Millisecond)
+	tokB, errB := clientB.Token(context.Background())
+	if errB != nil || tokB != "at-2" {
+		t.Fatalf("B Token = %q err=%v, want at-2", tokB, errB)
 	}
-	if _, ok := client.Expiry(); ok {
-		t.Fatal("the superseded token stayed cached after a lost lease")
+	errA := <-doneA
+	if errA == nil || !strings.Contains(errA.Error(), "superseded by a concurrent rotation") {
+		t.Fatalf("A err = %v, want the stale writer rejected by the fence", errA)
+	}
+	if _, ok := clientA.Expiry(); ok {
+		t.Fatal("the stale writer kept its token cached")
+	}
+	// Exactly one credential slot survived: B's. A's orphan slot and the
+	// legacy label are gone.
+	_, slot, found, ferr := leaseA.ReadCredentialFence(context.Background())
+	if ferr != nil || !found {
+		t.Fatalf("fence = found:%v err:%v", found, ferr)
+	}
+	data, ok, serr := store.GetSecret(slot)
+	if serr != nil || !ok || !strings.Contains(string(data), "rt-2") {
+		t.Fatalf("live credential = %s ok:%v err:%v", data, ok, serr)
+	}
+	for _, label := range store.secretLabels() {
+		if label != slot && label != labelClient {
+			t.Errorf("orphan credential entry %q survived", label)
+		}
 	}
 	clock.set(clock.now.Add(time.Minute))
 }

@@ -25,6 +25,21 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 	if be := s.strategyGate(d); be != nil {
 		return contract.SubmitOutput{}, be
 	}
+	// Authenticate before claiming the idempotency key: a profile with no
+	// usable credential would turn every accepted submission into a
+	// terminal authentication_required failure, and the key would then
+	// forever replay that failure instead of the reauthorized retry.
+	if s.credentialsReady != nil {
+		ready, err := s.credentialsReady(ctx)
+		if err != nil {
+			return contract.SubmitOutput{}, failed(contract.CodeStateUnavailable,
+				"Cannot verify profile credentials: %v", err)
+		}
+		if !ready {
+			return contract.SubmitOutput{}, failed(contract.CodeAuthenticationRequired,
+				"Tama requires authentication. Complete authorization for the selected profile, then retry.")
+		}
+	}
 	clientRequestID := in.ClientRequestID
 	if clientRequestID == "" {
 		// The public contract makes client_request_id optional: when the

@@ -158,6 +158,9 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 		Connect:        connect,
 		Worker:         workerService,
 		AdapterVersion: version.Version,
+		CredentialsReady: func(context.Context) (bool, error) {
+			return oauthClient.HasCredentials()
+		},
 	})
 	if err != nil {
 		workerService.Stop()

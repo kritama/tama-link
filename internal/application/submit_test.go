@@ -1,13 +1,15 @@
 package application
 
 import (
-	"time"
-
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+	"time"
 
 	"github.com/kritama/tama-link/internal/contract"
+	"github.com/kritama/tama-link/internal/limits"
+	"github.com/kritama/tama-link/internal/store"
 )
 
 func TestSubmitReplayableCompletes(t *testing.T) {
@@ -334,5 +336,46 @@ func TestSubmitIdempotentReplayDoesNotAppendEvents(t *testing.T) {
 	}
 	if again.Sequence != sub.Sequence {
 		t.Fatalf("replay advanced the sequence from %d to %d; replays must not append", sub.Sequence, again.Sequence)
+	}
+}
+
+// TestSubmitProbesCredentialsBeforeAccepting pins the authenticate-first
+// contract: a profile with no usable credential fails submit as
+// authentication_required before durable acceptance, and the idempotency
+// key stays free, so the reauthorize-and-retry flow works.
+func TestSubmitProbesCredentialsBeforeAccepting(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	ready := false
+	cfg := fixtureConfigFor(t, f, limits.Default())
+	cfg.CredentialsReady = func(context.Context) (bool, error) { return ready, nil }
+	svc, st, _ := appFromConfig(t, cfg)
+
+	out, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "cred-1",
+		Arguments:       json.RawMessage(`{}`),
+	})
+	if appErr == nil || appErr.Code != contract.CodeAuthenticationRequired {
+		t.Fatalf("Submit = %+v err=%v, want authentication_required", out, appErr)
+	}
+	// Nothing was durably accepted: the key must still be free.
+	if _, err := st.GetSubmission(context.Background(), "cred-1"); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("GetSubmission = %v, want not found (key not consumed)", err)
+	}
+
+	// After reauthorization the same key is accepted.
+	ready = true
+	out, appErr = svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "cred-1",
+		Arguments:       json.RawMessage(`{}`),
+	})
+	if appErr != nil {
+		t.Fatalf("retry after authorization: %s", appErr.Message)
+	}
+	if out.SubmissionID == "" {
+		t.Fatalf("no submission id: %+v", out)
 	}
 }

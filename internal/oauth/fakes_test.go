@@ -24,6 +24,44 @@ func newFakeSecrets() *fakeSecrets {
 	return &fakeSecrets{items: map[string][]byte{}}
 }
 
+// secretLabels lists the stored labels, for slot-leak assertions.
+func (f *fakeSecrets) secretLabels() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.items))
+	for label := range f.items {
+		out = append(out, label)
+	}
+	return out
+}
+
+// delayedSecrets fronts a shared fake store with one writer's own set delay,
+// so two fake processes can share the durable store while one write blocks.
+type delayedSecrets struct {
+	inner *fakeSecrets
+	delay time.Duration
+}
+
+func (d *delayedSecrets) GetSecret(label string) ([]byte, bool, error) {
+	return d.inner.GetSecret(label)
+}
+
+func (d *delayedSecrets) SetSecret(label string, data []byte) error {
+	if d.delay > 0 {
+		time.Sleep(d.delay)
+	}
+	d.inner.mu.Lock()
+	defer d.inner.mu.Unlock()
+	out := make([]byte, len(data))
+	copy(out, data)
+	d.inner.items[label] = out
+	return nil
+}
+
+func (d *delayedSecrets) DeleteSecret(label string) error {
+	return d.inner.DeleteSecret(label)
+}
+
 func (f *fakeSecrets) GetSecret(label string) ([]byte, bool, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -80,9 +118,42 @@ type fakeLease struct {
 	loseRenew  bool
 	loseAfter  int
 	generation int
+
+	fence          *sharedFence
+	fenceCommitErr error
 }
 
 func newFakeLease() *fakeLease { return &fakeLease{} }
+
+// sharedFence models the credential fence the way production models it:
+// one durable fence shared by every process using the profile, while each
+// process has its own lease view.
+type sharedFence struct {
+	mu         sync.Mutex
+	generation int64
+	slot       string
+	found      bool
+}
+
+func newSharedFence() *sharedFence { return &sharedFence{} }
+
+func (f *sharedFence) read() (int64, string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.generation, f.slot, f.found
+}
+
+func (f *sharedFence) commit(generation int64, slot string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if generation <= f.generation {
+		return false
+	}
+	f.generation = generation
+	f.slot = slot
+	f.found = true
+	return true
+}
 
 func (f *fakeLease) holdOther() {
 	f.mu.Lock()
@@ -102,17 +173,14 @@ func (f *fakeLease) ClaimLease(_ context.Context, name, owner string, ttl time.D
 		return false, nil
 	}
 	f.claims++
+	f.holder = owner
 	hook := f.onClaim
 	f.mu.Unlock()
 	if hook != nil {
+		// Runs with the claim recorded, so a hook can model a foreign
+		// takeover immediately after this claim wins.
 		hook()
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	if f.holder != owner {
-		f.generation++
-	}
-	f.holder = owner
 	return true, nil
 }
 
@@ -137,22 +205,22 @@ func (f *fakeLease) CommitLease(_ context.Context, name, owner string, generatio
 	return f.holder == owner && int64(f.generation) == generation, nil
 }
 
-// loseAfterRenewals makes renewals after the nth one report lost ownership,
-// so a test can lose the lease while a delayed credential write is in
-// flight.
-func (f *fakeLease) loseAfterRenewals(n int) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.loseAfter = n
+func (f *fakeLease) ReadCredentialFence(_ context.Context) (int64, string, bool, error) {
+	if f.fence == nil {
+		return 0, "", false, nil
+	}
+	gen, slot, found := f.fence.read()
+	return gen, slot, found, nil
 }
 
-// loseAllRenews makes every renewal report lost ownership, so the test can
-// prove a refresh aborts at the pre-write verification before any
-// credential write starts.
-func (f *fakeLease) loseAllRenews() {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.loseRenew = true
+func (f *fakeLease) CommitCredentialFence(_ context.Context, generation int64, slot string) (bool, error) {
+	if f.fence == nil {
+		f.fence = newSharedFence()
+	}
+	if f.fenceCommitErr != nil {
+		return false, f.fenceCommitErr
+	}
+	return f.fence.commit(generation, slot), nil
 }
 
 // renewLease makes the next renewal report lost ownership, so the test can
@@ -316,7 +384,7 @@ func (s *metadataServer) start(t *testing.T) *metadataServer {
 
 // clientForServer builds the test client against one metadata server so the
 // endpoint and issuer point at the fixture.
-func clientForServer(t *testing.T, server *metadataServer, secrets *fakeSecrets, lease *fakeLease, clock *testClock) *Client {
+func clientForServer(t *testing.T, server *metadataServer, secrets SecretStore, lease *fakeLease, clock *testClock) *Client {
 	t.Helper()
 	client, err := New(Config{
 		Endpoint:   server.ts.URL + "/mcp/app",
@@ -395,4 +463,23 @@ func serverAS(serverURL string) string {
 		"response_types_supported": ["code"],
 		"token_endpoint_auth_methods_supported": ["client_secret_basic"]
 	}`, issuer, serverURL+"/oauth/authorize", serverURL+"/oauth/token", serverURL+"/oauth/register")
+}
+
+// liveCredential reads the credential the fence points at (or the legacy
+// label when no fence has been committed), for test assertions.
+func liveCredential(t *testing.T, lease *fakeLease, secrets *fakeSecrets) string {
+	t.Helper()
+	_, slot, found, err := lease.ReadCredentialFence(context.Background())
+	if err != nil {
+		t.Fatalf("ReadCredentialFence: %v", err)
+	}
+	label := labelRefresh
+	if found {
+		label = slot
+	}
+	data, ok, err := secrets.GetSecret(label)
+	if err != nil || !ok {
+		t.Fatalf("credential at %s: found=%v err=%v", label, ok, err)
+	}
+	return string(data)
 }

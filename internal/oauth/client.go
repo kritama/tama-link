@@ -50,9 +50,18 @@ type Leaser interface {
 	// when owner does not hold it.
 	LeaseGeneration(ctx context.Context, name, owner string) (int64, bool, error)
 	// CommitLease atomically verifies that owner still holds the lease in
-	// the given generation. The refresh path gates its credential write
-	// on this so a lease lost to a foreign claim blocks the stale write.
+	// the given generation. The refresh path uses it as a cheap pre-write
+	// gate: a lease lost to a foreign claim blocks the stale write.
 	CommitLease(ctx context.Context, name, owner string, generation int64) (bool, error)
+	// ReadCredentialFence returns the generation and secure-backend slot
+	// the fence currently points at, or found=false when no fenced
+	// credential has been committed yet.
+	ReadCredentialFence(ctx context.Context) (generation int64, slot string, found bool, err error)
+	// CommitCredentialFence atomically points the fence at slot for
+	// generation when, and only when, the fence has not advanced past
+	// generation. It is the credential-side compare-and-swap that a stale
+	// writer cannot pass.
+	CommitCredentialFence(ctx context.Context, generation int64, slot string) (bool, error)
 }
 
 // Config configures one profile's OAuth client.

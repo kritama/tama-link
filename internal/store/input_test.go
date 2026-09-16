@@ -3,7 +3,10 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
+
+	"github.com/kritama/tama-link/internal/store"
 )
 
 func TestInputResponseRoundTrip(t *testing.T) {
@@ -26,13 +29,20 @@ func TestInputResponseRoundTrip(t *testing.T) {
 		t.Fatalf("response = %s, want %s", got, resp)
 	}
 
-	// A second write for the same ID never replaces the first record.
-	if err := s.SetInputResponse(ctx, "sub-1", "approval", json.RawMessage(`{"action":"deny"}`)); err != nil {
-		t.Fatalf("second SetInputResponse: %v", err)
+	// A racing write of a different value loses: the record is untouched and
+	// the loser gets ErrInputResponseConflict in the same operation.
+	err = s.SetInputResponse(ctx, "sub-1", "approval", json.RawMessage(`{"action":"deny"}`))
+	if !errors.Is(err, store.ErrInputResponseConflict) {
+		t.Fatalf("conflicting SetInputResponse err = %v, want ErrInputResponseConflict", err)
 	}
 	got, found, err = s.GetInputResponse(ctx, "sub-1", "approval")
 	if err != nil || !found || string(got) != string(resp) {
 		t.Fatalf("record mutated: %s found=%v err=%v", got, found, err)
+	}
+
+	// An exact replay is a no-op, not a conflict.
+	if err := s.SetInputResponse(ctx, "sub-1", "approval", resp); err != nil {
+		t.Fatalf("exact replay: %v", err)
 	}
 
 	// Distinct submissions are isolated.

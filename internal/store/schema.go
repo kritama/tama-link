@@ -12,7 +12,7 @@ import (
 // 2 adds the input_responses table for request-correlated input replay;
 // version 3 adds the lease generation counter used to gate credential
 // writes behind one lease holder.
-const schemaVersion = 3
+const schemaVersion = 4
 
 // Metadata keys.
 const (
@@ -83,6 +83,12 @@ CREATE TABLE IF NOT EXISTS leases (
     owner TEXT NOT NULL,
     expires_at INTEGER NOT NULL,
     generation INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS credential_fence (
+    name TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL,
+    slot TEXT NOT NULL
 );
 `
 

@@ -15,14 +15,7 @@ const claimAttempts = 3
 // claimInterval is the pause between lease claim attempts.
 const claimInterval = 250 * time.Millisecond
 
-// Refresh forces one refresh exchange under the profile lease and returns
-// the new access token. The subscription owner calls it after closing a
-// stream at credential expiry and before reconciling through tasks/get.
-func (c *Client) Refresh(ctx context.Context) (string, error) {
-	return c.refresh(ctx)
-}
-
-// refresh performs the lease-coordinated refresh transaction:
+// refreshLocked performs the lease-coordinated refresh transaction:
 //
 //  1. load the stored client record and refresh credential;
 //  2. claim the profile refresh lease (bounded attempts);
@@ -30,7 +23,14 @@ func (c *Client) Refresh(ctx context.Context) (string, error) {
 //     written by another process is adopted before the exchange;
 //  4. exchange the refresh grant;
 //  5. atomically retain any replacement refresh token.
-func (c *Client) refresh(ctx context.Context) (string, error) {
+//
+// refreshLocked performs one refresh transaction. The caller holds
+// refreshMu for the whole call, which is what makes the in-process
+// serialization hold: the cross-process lease is shared by every refresh
+// in this process (ClaimLease treats a lease already held by this owner as
+// acquired), so without the mutex concurrent in-process refreshes would
+// rotate the same refresh grant at once.
+func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 	rec, found, err := c.RegisteredClient()
 	if err != nil {
 		return "", err
@@ -38,19 +38,9 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 	if !found {
 		return "", fmt.Errorf("%w: no client registration", ErrNoCredentials)
 	}
-	if _, found, err := c.loadRefresh(); err != nil {
+	if _, err := c.loadFenced(ctx); err != nil {
 		return "", err
-	} else if !found {
-		return "", fmt.Errorf("%w: no refresh credential", ErrNoCredentials)
 	}
-
-	// In-process serialization: the cross-process lease is shared by every
-	// refresh in this process (ClaimLease treats a lease already held by
-	// this owner as acquired), so concurrent in-process refreshes would
-	// otherwise rotate the same refresh grant at once. The mutex makes the
-	// whole claim-through-release section one-at-a-time per process.
-	c.refreshMu.Lock()
-	defer c.refreshMu.Unlock()
 
 	claimed, err := c.claimRefreshLease(ctx)
 	if err != nil {
@@ -61,25 +51,14 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 	}
 	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
 
-	// The generation identifies this ownership epoch. The credential write
-	// is gated on it, so a lease lost to a foreign claim — which may
-	// rotate the refresh grant again — blocks this stale write instead of
-	// letting it overwrite the newer credential.
-	generation, ok, err := c.lease.LeaseGeneration(ctx, refreshLeaseName, c.owner)
+	fenced, err := c.loadFenced(ctx)
 	if err != nil {
 		return "", err
 	}
-	if !ok {
-		return "", errors.New("refresh lease lost before the credential write")
-	}
-
-	cred, found, err := c.loadRefresh()
-	if err != nil {
-		return "", err
-	}
-	if !found {
+	if fenced == nil {
 		return "", fmt.Errorf("%w: no refresh credential", ErrNoCredentials)
 	}
+	cred := fenced.credential
 	// Both stored values must bind the active profile issuer: if the profile
 	// changed issuer while retaining its credential namespace, refresh fails
 	// closed instead of replaying a foreign token to a stored endpoint.
@@ -132,51 +111,35 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 		}
 		return "", err
 	}
-	// The write is gated twice on the ownership epoch: the pre-write
-	// commit is the atomic check immediately before SetSecret, and the
-	// post-write commit re-verifies after it. The renewal loop keeps the
-	// lease alive between the two; a foreign claim in the window fails one
-	// of the gates. A lost pre-write gate aborts before any credential
-	// write; a lost post-write gate cannot repair the write, so it fails
-	// the refresh loudly and drops the cached token.
+	// Pre-write gate: the renewal loop keeps the lease alive, and this
+	// atomic commit fails when a foreign claim has already taken it, so
+	// the stale exchange never reaches the credential write.
 	if leaseLost {
 		return "", errors.New("refresh lease lost before the credential write")
 	}
-	renewCtx, cancelRenew := context.WithTimeout(ctx, refreshLeaseTTL/2)
-	owned, err := c.lease.RenewLease(renewCtx, refreshLeaseName, c.owner, refreshLeaseTTL)
-	cancelRenew()
-	if ctx.Err() != nil {
-		return "", ctx.Err()
-	}
-	if err != nil || !owned {
-		return "", errors.New("refresh lease lost before the credential write")
-	}
-	if committed, cerr := c.lease.CommitLease(ctx, refreshLeaseName, c.owner, generation); ctx.Err() != nil {
-		return "", ctx.Err()
-	} else if cerr != nil || !committed {
-		return "", errors.New("refresh lease lost before the credential write")
-	}
-	if err := c.applyTokens(cred, tok); err != nil {
+	leaseGen, ok, err := c.lease.LeaseGeneration(ctx, refreshLeaseName, c.owner)
+	if err != nil {
 		return "", err
 	}
-	// The write cannot observe the renewal loop: the secret-store API has
-	// no context, so a blocked write can outlive the lease and a loss
-	// cannot interrupt it. Re-verify ownership after the write; if it was
-	// lost, another process now owns the credential and this result must
-	// not be reported as success or cached, even though the write itself
-	// already ran.
-	if ctx.Err() != nil {
-		return "", ctx.Err()
+	if !ok {
+		return "", errors.New("refresh lease lost before the credential write")
 	}
-	if execCtx.Err() != nil {
-		c.clearToken()
-		return "", errors.New("refresh lease lost during the credential write")
-	}
-	if committed, cerr := c.lease.CommitLease(ctx, refreshLeaseName, c.owner, generation); ctx.Err() != nil {
+	if committed, cerr := c.lease.CommitLease(ctx, refreshLeaseName, c.owner, leaseGen); ctx.Err() != nil {
 		return "", ctx.Err()
 	} else if cerr != nil || !committed {
-		c.clearToken()
-		return "", errors.New("refresh lease lost during the credential write")
+		return "", errors.New("refresh lease lost before the credential write")
+	}
+	// The fenced store is the persistence fence: the slot write plus the
+	// atomic fence commit decide the outcome. A concurrent rotation that
+	// passed our generation makes the commit fail, the orphan slot is
+	// deleted, and the refresh fails instead of reporting a superseded
+	// success. A stale writer can therefore never make its value live,
+	// even if its secret-store write blocks past the lease TTL.
+	if err := c.applyTokens(ctx, fenced, tok); err != nil {
+		if ctx.Err() == nil {
+			c.clearToken()
+		}
+		return "", err
 	}
 	return tok.AccessToken, nil
 }

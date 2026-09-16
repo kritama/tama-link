@@ -64,7 +64,8 @@ func TestCompleteAuthorization(t *testing.T) {
 	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
 	secrets := newFakeSecrets()
 	clock := newTestClock(time.Unix(1_700_000_000, 0))
-	client := clientForServer(t, server, secrets, newFakeLease(), clock)
+	lease := newFakeLease()
+	client := clientForServer(t, server, secrets, lease, clock)
 	rec := &ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer}
 	md := serverMetadata(server.ts.URL)
 
@@ -114,10 +115,7 @@ func TestCompleteAuthorization(t *testing.T) {
 	if err != nil || tok != "at-1" {
 		t.Fatalf("Token = %q err=%v", tok, err)
 	}
-	credData, found, err := secrets.GetSecret(labelRefresh)
-	if err != nil || !found {
-		t.Fatalf("refresh credential not stored: %v", err)
-	}
+	credData := []byte(liveCredential(t, lease, secrets))
 	var cred refreshCredential
 	if err := json.Unmarshal(credData, &cred); err != nil {
 		t.Fatalf("decode credential: %v", err)

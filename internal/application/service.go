@@ -31,6 +31,13 @@ type Config struct {
 	// AdapterVersion identifies the adapter build recorded on accepted
 	// submissions. Required.
 	AdapterVersion string
+	// CredentialsReady reports whether the profile can authenticate,
+	// without performing a refresh or opening a connection. When set, a
+	// submit against a profile with no usable credential fails as
+	// authentication_required before durable acceptance, so the
+	// reauthorize-and-retry flow keeps the idempotency key. The zero
+	// value skips the check.
+	CredentialsReady func(ctx context.Context) (bool, error)
 	// Now supplies the clock. The zero value uses time.Now.
 	Now func() time.Time
 }
@@ -38,12 +45,13 @@ type Config struct {
 // Service is one profile's submit/await application service. It is safe for
 // concurrent use.
 type Service struct {
-	profile        *profile.Profile
-	store          *store.Store
-	connect        func(ctx context.Context) (*tama2026.Connection, error)
-	worker         *worker.Service
-	adapterVersion string
-	now            func() time.Time
+	profile          *profile.Profile
+	store            *store.Store
+	connect          func(ctx context.Context) (*tama2026.Connection, error)
+	worker           *worker.Service
+	adapterVersion   string
+	credentialsReady func(ctx context.Context) (bool, error)
+	now              func() time.Time
 }
 
 // New validates cfg and builds a Service.
@@ -68,12 +76,13 @@ func New(cfg Config) (*Service, error) {
 		now = time.Now
 	}
 	return &Service{
-		profile:        cfg.Profile,
-		store:          cfg.Store,
-		connect:        cfg.Connect,
-		worker:         cfg.Worker,
-		adapterVersion: cfg.AdapterVersion,
-		now:            now,
+		profile:          cfg.Profile,
+		store:            cfg.Store,
+		connect:          cfg.Connect,
+		worker:           cfg.Worker,
+		adapterVersion:   cfg.AdapterVersion,
+		credentialsReady: cfg.CredentialsReady,
+		now:              now,
 	}, nil
 }
 

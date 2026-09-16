@@ -221,6 +221,15 @@ func fixtureApp(t *testing.T, f *fakeTama) (*Service, *store.Store, *worker.Serv
 // the result bound below the fixture result size.
 func fixtureAppLimits(t *testing.T, f *fakeTama, limitsCfg limits.Limits) (*Service, *store.Store, *worker.Service) {
 	t.Helper()
+	cfg := fixtureConfigFor(t, f, limitsCfg)
+	return appFromConfig(t, cfg)
+}
+
+// fixtureConfigFor builds the fixture stack and returns its application
+// Config so callers can customize it (for example the credentials probe)
+// before building the Service. The store closes with the test.
+func fixtureConfigFor(t *testing.T, f *fakeTama, limitsCfg limits.Limits) Config {
+	t.Helper()
 	endpoint := f.ts.URL + "/mcp/app"
 	p := fixtureProfile(t, endpoint)
 
@@ -228,7 +237,6 @@ func fixtureAppLimits(t *testing.T, f *fakeTama, limitsCfg limits.Limits) (*Serv
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
-	t.Cleanup(func() { _ = st.Close() })
 
 	up, err := upstream.New(upstream.Config{
 		Endpoint:           endpoint,
@@ -260,18 +268,27 @@ func fixtureAppLimits(t *testing.T, f *fakeTama, limitsCfg limits.Limits) (*Serv
 	}
 	t.Cleanup(workerService.Stop)
 
-	svc, err := New(Config{
+	return Config{
 		Profile:        p,
 		Store:          st,
 		Connect:        connect,
 		Worker:         workerService,
 		AdapterVersion: "test-adapter",
-	})
+	}
+}
+
+// appFromConfig builds the Service from a caller-customized fixture Config,
+// starts the worker, and closes everything with the test.
+func appFromConfig(t *testing.T, cfg Config) (*Service, *store.Store, *worker.Service) {
+	t.Helper()
+	svc, err := New(cfg)
 	if err != nil {
 		t.Fatalf("application.New: %v", err)
 	}
-	_ = workerService.Start(context.Background())
-	return svc, st, workerService
+	t.Cleanup(func() { _ = cfg.Store.Close() })
+	t.Cleanup(cfg.Worker.Stop)
+	_ = cfg.Worker.Start(context.Background())
+	return svc, cfg.Store, cfg.Worker
 }
 
 // submitStatus sends one valid synchronous submit with the client context
