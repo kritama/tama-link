@@ -44,6 +44,14 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 		return "", fmt.Errorf("%w: no refresh credential", ErrNoCredentials)
 	}
 
+	// In-process serialization: the cross-process lease is shared by every
+	// refresh in this process (ClaimLease treats a lease already held by
+	// this owner as acquired), so concurrent in-process refreshes would
+	// otherwise rotate the same refresh grant at once. The mutex makes the
+	// whole claim-through-release section one-at-a-time per process.
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
 	claimed, err := c.claimRefreshLease(ctx)
 	if err != nil {
 		return "", err
@@ -83,13 +91,17 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 
 	// The exchange is a network call and the credential write follows it,
 	// so the lease is renewed on a third of its TTL for the whole critical
-	// section. Losing the lease cancels the exchange before any
+	// section, including the write. Losing the lease aborts before any
 	// replacement token is persisted: another process is now responsible
 	// for the credential, and a double rotation would invalidate its
 	// replacement.
 	execCtx, cancelExec := context.WithCancel(ctx)
 	renewed := make(chan struct{})
 	go c.renewLease(execCtx, cancelExec, renewed)
+	defer func() {
+		cancelExec()
+		<-renewed
+	}()
 	tok, err := c.postToken(execCtx, cred.TokenEndpoint, rec, form)
 	leaseLost := false
 	select {
@@ -99,8 +111,6 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 		leaseLost = ctx.Err() == nil
 	default:
 	}
-	cancelExec()
-	<-renewed
 	if err != nil {
 		if errors.Is(err, ErrGrantInvalid) {
 			c.clearToken()
@@ -109,6 +119,22 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 			return "", fmt.Errorf("refresh lease lost during the token exchange: %w", err)
 		}
 		return "", err
+	}
+	// Ownership is re-verified immediately before the write, and the
+	// renewal loop keeps running through it, so a blocked credential
+	// backend cannot outlast the lease without the loss cancelling this
+	// path. A lost verification aborts before SetSecret runs.
+	if leaseLost {
+		return "", errors.New("refresh lease lost before the credential write")
+	}
+	renewCtx, cancelRenew := context.WithTimeout(ctx, refreshLeaseTTL/2)
+	owned, err := c.lease.RenewLease(renewCtx, refreshLeaseName, c.owner, refreshLeaseTTL)
+	cancelRenew()
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if err != nil || !owned {
+		return "", errors.New("refresh lease lost before the credential write")
 	}
 	if err := c.applyTokens(cred, tok); err != nil {
 		return "", err

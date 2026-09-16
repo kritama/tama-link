@@ -287,3 +287,64 @@ func TestRefreshAbortsWhenLeaseLost(t *testing.T) {
 		t.Errorf("replacement credential persisted after lease loss: %s", data)
 	}
 }
+
+// TestRefreshSerializesInProcess proves one process never runs two refresh
+// transactions at once: concurrent Token callers share the refresh mutex,
+// so the token endpoint never sees two in-flight rotations from this
+// client, and both callers get a usable token.
+func TestRefreshSerializesInProcess(t *testing.T) {
+	server, client, _, _, clock := tokenFixture(t, "rt-1")
+	server.tokenDelay = 150 * time.Millisecond
+
+	ctx := context.Background()
+	results := make(chan string, 2)
+	for range 2 {
+		go func() {
+			tok, err := client.Token(ctx)
+			if err != nil {
+				results <- "error: " + err.Error()
+				return
+			}
+			results <- tok
+		}()
+	}
+	for range 2 {
+		got := <-results
+		if got != "at-1" {
+			t.Fatalf("Token = %q, want at-1", got)
+		}
+	}
+	server.tokenReqMu.Lock()
+	concur := server.tokenMaxConcur
+	calls := server.tokenCalls
+	server.tokenReqMu.Unlock()
+	if concur > 1 {
+		t.Errorf("token endpoint saw %d concurrent refreshes from one process, want at most 1", concur)
+	}
+	if calls != 2 {
+		t.Errorf("token requests = %d, want 2 (each caller refreshed once)", calls)
+	}
+	clock.set(clock.now.Add(time.Minute))
+}
+
+// TestRefreshVerifiesOwnershipBeforeCredentialWrite proves the pre-write
+// verification: when renewals report lost ownership, the refresh aborts
+// before SetSecret starts, and no replacement credential is persisted.
+func TestRefreshVerifiesOwnershipBeforeCredentialWrite(t *testing.T) {
+	server, client, secrets, lease, clock := tokenFixture(t, "rt-1")
+	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+	lease.loseAllRenews()
+
+	_, err := client.Token(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "before the credential write") {
+		t.Fatalf("err = %v, want pre-write ownership failure", err)
+	}
+	data, found, err := secrets.GetSecret(labelRefresh)
+	if err != nil || !found {
+		t.Fatalf("credential = %v", err)
+	}
+	if strings.Contains(string(data), "rt-2") {
+		t.Errorf("replacement credential persisted after losing ownership: %s", data)
+	}
+	clock.set(clock.now.Add(time.Minute))
+}

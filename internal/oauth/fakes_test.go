@@ -94,6 +94,15 @@ func (f *fakeLease) ClaimLease(_ context.Context, name, owner string, ttl time.D
 	return true, nil
 }
 
+// loseAllRenews makes every renewal report lost ownership, so the test can
+// prove a refresh aborts at the pre-write verification before any
+// credential write starts.
+func (f *fakeLease) loseAllRenews() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loseRenew = true
+}
+
 // renewLease makes the next renewal report lost ownership, so the test can
 // prove a refresh aborts when it loses the lease mid-exchange.
 func (f *fakeLease) loseOnRenew() {
@@ -183,16 +192,18 @@ func newStaticClient(t *testing.T, secrets *fakeSecrets, lease *fakeLease, clock
 // metadataServer serves protected-resource and authorization-server metadata
 // plus a token endpoint for one fixture pair.
 type metadataServer struct {
-	t          *testing.T
-	ts         *httptest.Server
-	prm        string
-	as         string
-	tokenBody  string
-	tokenDelay time.Duration
-	tokenReq   *http.Request
-	tokenRaw   []byte
-	tokenCalls int
-	tokenReqMu sync.Mutex
+	t              *testing.T
+	ts             *httptest.Server
+	prm            string
+	as             string
+	tokenBody      string
+	tokenDelay     time.Duration
+	tokenReq       *http.Request
+	tokenRaw       []byte
+	tokenCalls     int
+	tokenConcur    int
+	tokenMaxConcur int
+	tokenReqMu     sync.Mutex
 }
 
 func (s *metadataServer) start(t *testing.T) *metadataServer {
@@ -207,6 +218,20 @@ func (s *metadataServer) start(t *testing.T) *metadataServer {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, s.as)
 		case "/oauth/token":
+			// Track the maximum concurrent in-flight token requests so a
+			// test can prove one process never rotates a refresh grant
+			// twice at once.
+			s.tokenReqMu.Lock()
+			s.tokenConcur++
+			if s.tokenConcur > s.tokenMaxConcur {
+				s.tokenMaxConcur = s.tokenConcur
+			}
+			s.tokenReqMu.Unlock()
+			defer func() {
+				s.tokenReqMu.Lock()
+				s.tokenConcur--
+				s.tokenReqMu.Unlock()
+			}()
 			if s.tokenDelay > 0 {
 				select {
 				case <-time.After(s.tokenDelay):

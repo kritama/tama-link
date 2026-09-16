@@ -96,6 +96,10 @@ type Client struct {
 	token       string
 	tokenExpiry time.Time
 	hasToken    bool
+
+	// refreshMu serializes refresh transactions inside this process; the
+	// cross-process lease is shared by every in-process refresher.
+	refreshMu sync.Mutex
 }
 
 // New validates cfg and builds a Client.

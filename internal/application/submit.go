@@ -2,6 +2,8 @@ package application
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 
 	"github.com/kritama/tama-link/internal/adapter/tama2026"
@@ -23,9 +25,19 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 	if be := s.strategyGate(d); be != nil {
 		return contract.SubmitOutput{}, be
 	}
-	if in.ClientRequestID == "" {
-		return contract.SubmitOutput{}, failed(contract.CodeInvalidRequest,
-			"client_request_id is required so retries stay idempotent.")
+	clientRequestID := in.ClientRequestID
+	if clientRequestID == "" {
+		// The public contract makes client_request_id optional: when the
+		// client omits it, Tama Link generates one before the first
+		// upstream mutation. A generated key is fresh on every call, so
+		// each omission is a new submission rather than an idempotent
+		// retry.
+		var b [12]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return contract.SubmitOutput{}, failed(contract.CodeInternal, "%v", err)
+		}
+		clientRequestID = "crid_" + hex.EncodeToString(b[:])
+		in.ClientRequestID = clientRequestID
 	}
 	clientSchema := d.ClientSchema
 	if len(clientSchema) == 0 {
@@ -50,7 +62,7 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 	}
 	sub, err := s.store.CreateSubmission(ctx, store.NewSubmission{
 		ID:               id,
-		ClientRequestID:  in.ClientRequestID,
+		ClientRequestID:  clientRequestID,
 		Tool:             d.Name,
 		Strategy:         string(d.Strategy),
 		DescriptorDigest: d.Digest,

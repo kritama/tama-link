@@ -186,7 +186,11 @@ Requirements:
   declarative profile bindings and validates the complete upstream arguments
   against the pinned upstream contract.
 - `client_request_id` is an opaque idempotency key scoped to the profile. When
-  omitted, Tama Link generates one before the first upstream mutation.
+  omitted, Tama Link generates one before durable acceptance, bindings, and
+  the first upstream mutation; a generated key is fresh on every call, so each
+  omission is a new submission. Operations whose reviewed bindings map the
+  key to an upstream identity (for example the App `message` projection)
+  document that a generated identifier is a fresh identity per call.
 - `client_context` carries client-owned correlation values that an operation
   binding may require but ordinary MCP does not provide automatically. It is
   not passed upstream unless a reviewed profile binding maps a field.
@@ -694,8 +698,11 @@ validated issuer, because the authorization code and any client secret are
 sent there. The same origin policy re-validates the stored token endpoint
 before every refresh. A refresh holds its cross-process lease for the whole
 critical section: the lease is renewed on a third of its TTL while the token
-exchange runs and the replacement credential is written, and a lost lease
-aborts the exchange before any replacement token is persisted.
+exchange runs and the replacement credential is written, ownership is
+re-verified immediately before the credential write, and a lost lease aborts
+before any replacement token is persisted. Refresh transactions are also
+serialized inside one process: the shared owner would otherwise let two
+in-process refreshes rotate the same refresh grant at once.
 
 The local worker executes at most a bounded number of submissions
 concurrently; queued work beyond the bound waits for a free slot. The bound
@@ -952,7 +959,10 @@ The first complete implementation is not done until automated tests prove:
 9. Upstream failure, cancellation, and expiry produce terminal failures.
 10. Client cancellation stops a wait without cancelling upstream work.
 11. A process restart recovers accepted non-terminal submissions through the
-    same owner-bound task ID without a protocol session.
+    same owner-bound task ID without a protocol session. Startup recovery
+    lists the durable backlog and offers it to the bounded worker pool, then
+    returns immediately: a large backlog executes in the background and must
+    not delay the downstream MCP server accepting clients.
 12. Progress cursors deduplicate ordered events.
 13. Requested MCP progress notifications are rate limited and correlated.
 14. Credentials and plaintext sensitive inputs do not appear in SQLite

@@ -279,3 +279,76 @@ func TestInFlightExecutionsAreBounded(t *testing.T) {
 		time.Sleep(20 * time.Millisecond)
 	}
 }
+
+// TestStartRecoversWithoutBlockingServing pins the startup contract: Start
+// lists the durable backlog and offers it to the bounded pool, then returns
+// immediately — even while every execution slot is held by an upstream
+// call — so a large backlog cannot keep the MCP server from accepting
+// clients.
+func TestStartRecoversWithoutBlockingServing(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	keys := newMemoryKeys()
+	st := openStore(t, path, keys)
+	t.Cleanup(func() { _ = st.Close() })
+
+	// The executor holds every execution; with two runnable rows and a
+	// pool of two, the whole pool is blocked behind the gate.
+	exec := &gatedExecutor{started: make(chan struct{}, 2), release: make(chan struct{}), finish: make(chan struct{}, finishConcurrency)}
+	svc, err := worker.NewService(st, exec, worker.Config{
+		Owner:         "worker-start",
+		LeaseTTL:      30 * time.Second,
+		SweepInterval: time.Hour,
+		MaxInFlight:   2,
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	t.Cleanup(svc.Stop)
+
+	createReplayable(t, st, "sub-start-1")
+	createReplayable(t, st, "sub-start-2")
+
+	// Start must return while the pool is blocked behind the gate.
+	started := make(chan error, 1)
+	go func() { started <- svc.Start(context.Background()) }()
+	select {
+	case err := <-started:
+		if err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Start blocked on the execution pool; recovery must not delay serving")
+	}
+
+	// The backlog is in flight behind the gate: both rows were offered and
+	// are executing. Release and drain.
+	deadline := time.Now().Add(10 * time.Second)
+	for exec.activeCount() < 2 {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d executions started, want both backlog rows in flight", exec.activeCount())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	close(exec.release)
+	deadline = time.Now().Add(30 * time.Second)
+	for {
+		done := true
+		for _, id := range []string{"sub-start-1", "sub-start-2"} {
+			sub, err := st.GetSubmission(context.Background(), id)
+			if err != nil {
+				t.Fatalf("GetSubmission: %v", err)
+			}
+			if string(sub.Status) != "completed" {
+				done = false
+				break
+			}
+		}
+		if done {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("backlog did not drain after the gate released")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

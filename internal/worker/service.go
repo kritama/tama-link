@@ -70,10 +70,16 @@ func NewService(state State, executor Executor, cfg Config) (*Service, error) {
 	return s, nil
 }
 
-// Start recovers pending replayable submissions after a restart or crash.
-// Live leases are skipped: their owning process remains responsible.
+// Start recovers pending replayable submissions after a restart or crash
+// without delaying serve: it lists the durable runnable set (one store
+// read) and offers each ID to the bounded pool, where execution happens
+// asynchronously in the background. Live leases are skipped: their owning
+// process remains responsible. Anything not yet accepted by the pool is
+// redelivered by the recurring sweep, so no work waits inline for an
+// upstream call before the MCP server starts accepting clients.
 func (s *Service) Start(ctx context.Context) error {
-	return s.runner.Recover(ctx)
+	s.sweepRunnable(ctx)
+	return nil
 }
 
 // Dispatch asks the service to execute one submission when a worker is free.

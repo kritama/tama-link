@@ -57,11 +57,6 @@ func TestSubmitRejectedCases(t *testing.T) {
 			want: contract.CodeOperationNotAllowed,
 		},
 		{
-			name: "missing client request id",
-			in:   contract.SubmitInput{Tool: "status", Arguments: json.RawMessage(`{}`)},
-			want: contract.CodeInvalidRequest,
-		},
-		{
 			name: "arguments fail client schema",
 			in: contract.SubmitInput{
 				Tool: "status", ClientRequestID: "r-2",
@@ -152,6 +147,59 @@ func TestSubmitRejectionsLeaveNoTrace(t *testing.T) {
 	// a clean acceptance.
 	id := submitStatus(t, svc, "clean-1")
 	awaitTerminal(t, svc, id)
+}
+
+// TestSubmitGeneratesClientRequestID pins the public contract: the key is
+// optional, Tama Link generates one before durable acceptance, and each
+// omission is a fresh submission rather than an idempotent retry.
+func TestSubmitGeneratesClientRequestID(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, _, _ := fixtureApp(t, f)
+
+	first, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:          "status",
+		ClientContext: &contract.ClientContext{ThreadID: "thread-1"},
+		Arguments:     json.RawMessage(`{"detail":"a"}`),
+	})
+	if appErr != nil {
+		t.Fatalf("omit: %s", appErr.Message)
+	}
+	if first.ClientRequestID == "" || len(first.ClientRequestID) < 10 {
+		t.Fatalf("generated client_request_id = %q, want a non-empty key", first.ClientRequestID)
+	}
+
+	// A second omission must not collide with the first generated key:
+	// each omission is a new submission.
+	second, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:          "status",
+		ClientContext: &contract.ClientContext{ThreadID: "thread-2"},
+		Arguments:     json.RawMessage(`{"detail":"b"}`),
+	})
+	if appErr != nil {
+		t.Fatalf("second omission: %s", appErr.Message)
+	}
+	if second.SubmissionID == first.SubmissionID {
+		t.Fatalf("two omissions produced one submission %s; generated keys must be fresh", first.SubmissionID)
+	}
+	if second.ClientRequestID == first.ClientRequestID {
+		t.Fatalf("two omissions produced one key %s; generated keys must be unique", first.ClientRequestID)
+	}
+
+	// An explicit key still idempotizes on the original submission.
+	run, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: first.ClientRequestID,
+		ClientContext:   &contract.ClientContext{ThreadID: "thread-1"},
+		Arguments:       json.RawMessage(`{"detail":"a"}`),
+	})
+	if appErr != nil {
+		t.Fatalf("explicit retry: %s", appErr.Message)
+	}
+	if run.SubmissionID != first.SubmissionID {
+		t.Fatalf("explicit retry returned %s, want %s", run.SubmissionID, first.SubmissionID)
+	}
 }
 
 func TestSubmitIdempotency(t *testing.T) {

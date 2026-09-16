@@ -165,12 +165,10 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 		return nil, nil, fmt.Errorf("configure application: %w", err)
 	}
 
-	// Startup recovery re-runs pending replayable submissions whose leases
-	// have expired. Failures surface per-submission on await; the serve
-	// command still starts so already-accepted work stays inspectable.
-	if err := workerService.Start(ctx); err != nil {
-		fmt.Fprintf(os.Stderr, "tama-link: startup recovery incomplete: %v\n", err)
-	}
+	// Startup recovery offers every pending replayable submission to the
+	// bounded worker pool and returns immediately: a large backlog runs in
+	// the background and must not delay the MCP server accepting clients.
+	_ = workerService.Start(ctx)
 
 	cleanup := func() {
 		workerService.Stop()

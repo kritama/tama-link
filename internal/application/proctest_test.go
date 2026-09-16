@@ -101,6 +101,10 @@ func workerSingleWinnerScenario() int {
 	if dbPath == "" || keyPath == "" || runsPath == "" {
 		return 2
 	}
+	subID := os.Getenv("APP_PROCTEST_SUB")
+	if subID == "" {
+		subID = "sub-single-winner"
+	}
 	st, err := store.Open(context.Background(), dbPath, appFileKeys{path: keyPath}, store.Config{Limits: limits.Default()})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "scenario open: %v\n", err)
@@ -115,11 +119,25 @@ func workerSingleWinnerScenario() int {
 		return 3
 	}
 	defer svc.Stop()
-	if err := svc.Start(context.Background()); err != nil {
-		// The lease loser skips its submission and exits cleanly; any other
-		// failure is a scenario failure.
-		fmt.Fprintf(os.Stderr, "scenario recover: %v\n", err)
-		return 4
+	_ = svc.Start(context.Background())
+	// Both processes offered the one submission to their worker pools; the
+	// durable lease decides the single winner. Wait for the completion
+	// wave to drain before closing the store.
+	deadline := time.Now().Add(30 * time.Second)
+	for {
+		s, err := st.GetSubmission(context.Background(), subID)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "scenario status: %v\n", err)
+			return 4
+		}
+		if s.Status == contract.StatusCompleted || s.Status == contract.StatusFailed {
+			break
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintf(os.Stderr, "scenario: submission never reached a terminal state\n")
+			return 4
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
 	_ = st.Close()
 	return 0
@@ -149,11 +167,21 @@ func restartReplayCrashScenario() int {
 		return 3
 	}
 	defer svc.Stop()
-	if err := svc.Start(context.Background()); err != nil {
-		fmt.Fprintf(os.Stderr, "scenario recover: %v\n", err)
-		return 4
+	_ = svc.Start(context.Background())
+	// The pool executes the submitted work asynchronously; wait for the
+	// crash executor to reach its record-and-exit point so the process
+	// dies inside the upstream call, lease still held.
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		if _, err := os.Stat(runsPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintf(os.Stderr, "scenario: execution never recorded\n")
+			return 4
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
-	time.Sleep(time.Second)
 	_ = st.Close()
 	return 0
 }
@@ -218,7 +246,7 @@ func TestRestartReplayReexecutesAfterLeaseExpiry(t *testing.T) {
 
 	// Phase 2: a new process recovers and completes the submission.
 	replay := exec.Command(exe, scenarioArgPrefix+"worker-single-winner")
-	replay.Env = env
+	replay.Env = append(env, "APP_PROCTEST_SUB=sub-restart-replay")
 	replayOut, replayErr := replay.CombinedOutput()
 	if replayErr != nil {
 		t.Fatalf("replay process failed (exit %v):\n%s", replayErr, replayOut)
