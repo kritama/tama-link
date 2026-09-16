@@ -168,6 +168,18 @@ observed callback, and resent verbatim in the token exchange; the
 authorization-code grant requires the two values to be equal, so any mismatch
 is rejected before a token request is sent.
 
+Client registration is revalidated against the auth-method secret
+requirement on load, and the RFC 7591 `client_secret_expires_at` is
+persisted and enforced: a record that lacks the secret its method requires,
+or whose secret has expired, is absent for readiness and refresh, and the
+next login re-registers. A replacement registration issues a new client ID,
+so the orphaned credential from the previous client and the new record are
+committed under one refresh-lease epoch, and a completion that started from
+the previous record re-reads the stored record before the exchange and again
+before the fenced commit: it either commits before the replacement (the
+grant is then retired) or aborts, never pairing the new client with a grant
+issued under the old one.
+
 ### D6. Terminal results are captured immediately and owned locally
 
 TamaMCP includes the complete state-specific payload, including a terminal

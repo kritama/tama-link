@@ -70,6 +70,26 @@ func recordMissingSecret(rec *ClientRecord) bool {
 		rec.ClientSecret == ""
 }
 
+// currentRecord re-reads the stored client registration and requires it to
+// still be the record the login flow started from, with a usable secret.
+// A secret can expire, or the registration be replaced, while the user
+// completes browser consent; an in-memory record outlives neither, so an
+// exchange or commit against it must fail instead of authenticating a
+// superseded identity.
+func (c *Client) currentRecord(rec *ClientRecord) error {
+	stored, found, err := c.RegisteredClient()
+	if err != nil {
+		return err
+	}
+	if !found {
+		return fmt.Errorf("%w: the stored client registration is no longer usable", ErrNoCredentials)
+	}
+	if stored.ClientID != rec.ClientID || stored.ClientSecret != rec.ClientSecret || stored.Issuer != rec.Issuer {
+		return fmt.Errorf("%w: the client registration was replaced during the login", ErrNoCredentials)
+	}
+	return nil
+}
+
 // Register returns the stored registration when it still binds the same
 // issuer, otherwise performs dynamic client registration and persists the
 // result.
@@ -140,14 +160,31 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	if recordMissingSecret(rec) {
 		return nil, fmt.Errorf("registration returned no client secret for %s", rec.AuthMethod)
 	}
-	// A replacement registration issues a new client: any refresh
-	// credential still stored belongs to the previous client ID and can
-	// never refresh under the new one. It is retired before the new record
-	// is stored, so readiness never pairs the new registration with the
-	// orphaned credential. The normal first-login path stores no
-	// credential yet and is a no-op.
-	if err := c.retireOrphanedCredential(ctx); err != nil {
+	// The replacement is one credential-mutation protocol under the
+	// refresh lease: a replacement registration issues a new client ID, so
+	// any refresh credential still stored belongs to the previous client
+	// and can never refresh under the new one. Retiring it and committing
+	// the new record under the same claimed epoch orders the replacement
+	// against every concurrent completion and refresh: a login started
+	// from the previous record either commits its grant before the
+	// replacement (the grant is then retired as orphaned) or aborts
+	// against the superseded record — never pairs the new client with a
+	// grant issued under the old one. The normal first-login path stores
+	// no credential yet and the retirement is a no-op.
+	leaseGeneration, claimed, err := c.claimRefreshLease(ctx)
+	if err != nil {
 		return nil, err
+	}
+	if !claimed {
+		return nil, fmt.Errorf("%w: the credential is being mutated; retry registration", ErrLeaseContention)
+	}
+	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
+	if existing, err := c.loadFenced(ctx); err != nil {
+		return nil, err
+	} else if existing != nil {
+		if err := c.invalidateCredential(ctx, leaseGeneration); err != nil {
+			return nil, err
+		}
 	}
 	if err := c.storeClient(rec); err != nil {
 		return nil, err

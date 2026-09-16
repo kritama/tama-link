@@ -59,6 +59,82 @@ func TestAuthorizationRequest(t *testing.T) {
 	}
 }
 
+// TestCompleteAuthorizationRejectsSupersededRegistration pins the
+// replacement protocol: a login started from the previous record must not
+// commit its grant after the registration was replaced, or the new client
+// would be paired with a grant issued under the old one. The post-exchange
+// re-read under the lease rejects it.
+func TestCompleteAuthorizationRejectsSupersededRegistration(t *testing.T) {
+	server := (&metadataServer{}).start(t)
+	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
+	secrets := newFakeSecrets()
+	client := clientForServer(t, server, secrets, newFakeLease(), newTestClock(time.Unix(1_700_000_000, 0)))
+	rec := &ClientRecord{ClientID: "cid-old", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer}
+	if err := client.storeClient(rec); err != nil {
+		t.Fatalf("storeClient: %v", err)
+	}
+	md := serverMetadata(server.ts.URL)
+	redirect := "http://127.0.0.1:51234/callback"
+	authReq, err := client.NewAuthorizationRequest(md, rec, redirect)
+	if err != nil {
+		t.Fatalf("NewAuthorizationRequest: %v", err)
+	}
+
+	// The registration is replaced while the user completes consent.
+	replaced := *rec
+	replaced.ClientID = "cid-new"
+	replaced.ClientSecret = "shh-new"
+	if err := client.storeClient(&replaced); err != nil {
+		t.Fatalf("storeClient replacement: %v", err)
+	}
+
+	if err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "code-1", redirect); err == nil {
+		t.Fatal("CompleteAuthorization accepted a superseded client record")
+	}
+	// The grant issued under the old client was never committed.
+	if _, found, _ := secrets.GetSecret(labelRefresh); found {
+		t.Fatal("the grant from the superseded registration was committed")
+	}
+}
+
+// TestCompleteAuthorizationRejectsExpiredSecret pins the pre-exchange
+// revalidation: a secret that expires while the user completes consent
+// authenticates no exchange, and the single-use code survives for a fresh
+// attempt.
+func TestCompleteAuthorizationRejectsExpiredSecret(t *testing.T) {
+	server := (&metadataServer{}).start(t)
+	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
+	secrets := newFakeSecrets()
+	clock := newTestClock(time.Unix(1_700_000_000, 0))
+	client := clientForServer(t, server, secrets, newFakeLease(), clock)
+	rec := &ClientRecord{
+		ClientID:        "cid-1",
+		ClientSecret:    "shh",
+		AuthMethod:      "client_secret_basic",
+		Issuer:          client.issuer,
+		SecretExpiresAt: 1_700_000_000 + 3600,
+	}
+	if err := client.storeClient(rec); err != nil {
+		t.Fatalf("storeClient: %v", err)
+	}
+	md := serverMetadata(server.ts.URL)
+	redirect := "http://127.0.0.1:51234/callback"
+	authReq, err := client.NewAuthorizationRequest(md, rec, redirect)
+	if err != nil {
+		t.Fatalf("NewAuthorizationRequest: %v", err)
+	}
+
+	// The secret expires while the user completes consent.
+	clock.set(time.Unix(1_700_000_000+3601, 0))
+	if err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "code-1", redirect); err == nil {
+		t.Fatal("CompleteAuthorization exchanged with an expired client secret")
+	}
+	// The single-use code was not consumed.
+	if got := tokenCallCount(t, server); got != 0 {
+		t.Fatalf("token endpoint calls = %d, want 0: the code must survive for a fresh attempt", got)
+	}
+}
+
 func TestCompleteAuthorization(t *testing.T) {
 	server := (&metadataServer{}).start(t)
 	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
@@ -67,6 +143,9 @@ func TestCompleteAuthorization(t *testing.T) {
 	lease := newFakeLease()
 	client := clientForServer(t, server, secrets, lease, clock)
 	rec := &ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer}
+	if err := client.storeClient(rec); err != nil {
+		t.Fatalf("storeClient: %v", err)
+	}
 	md := serverMetadata(server.ts.URL)
 
 	// The listener port is selected before the authorization URL exists; the
@@ -134,6 +213,9 @@ func TestCompleteAuthorizationRejections(t *testing.T) {
 	clock := newTestClock(time.Now())
 	client := clientForServer(t, server, secrets, newFakeLease(), clock)
 	rec := &ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer}
+	if err := client.storeClient(rec); err != nil {
+		t.Fatalf("storeClient: %v", err)
+	}
 	md := serverMetadata(server.ts.URL)
 	requestURI := "http://127.0.0.1:51234/callback"
 	authReq, err := client.NewAuthorizationRequest(md, rec, requestURI)

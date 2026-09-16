@@ -195,30 +195,6 @@ func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64
 	return nil
 }
 
-// retireOrphanedCredential removes a durable refresh credential left over
-// from a previous client registration. A replacement registration issues
-// a new client ID: every stored refresh grant is bound to the old client
-// and can never refresh under the new one, so readiness must not pair
-// them. The standard invalidation sequence runs under a freshly claimed
-// refresh lease. When no credential is stored — the normal first-login
-// path — this is a no-op.
-func (c *Client) retireOrphanedCredential(ctx context.Context) error {
-	if existing, err := c.loadFenced(ctx); err != nil {
-		return err
-	} else if existing == nil {
-		return nil
-	}
-	leaseGeneration, claimed, err := c.claimRefreshLease(ctx)
-	if err != nil {
-		return err
-	}
-	if !claimed {
-		return fmt.Errorf("%w: the winning process is refreshing the credential", ErrLeaseContention)
-	}
-	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
-	return c.invalidateCredential(ctx, leaseGeneration)
-}
-
 // leasedExchangeAndPersist renews the claimed refresh lease on a third of
 // its TTL across one token exchange AND the credential persistence that
 // follows it: stopping the renewal between them would let a slow

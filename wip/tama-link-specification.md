@@ -1001,10 +1001,14 @@ unusable record instead of the profile looping on it. The RFC 7591
 expired secret makes the record absent for readiness and refresh, so the
 next login re-registers before an exchange can fail on an `invalid_client`
 authentication. Because a replacement registration issues a new client ID,
-any refresh credential still stored from the previous client is retired
-before the new record is committed: readiness never pairs the new
-registration with an orphaned grant, and the normal first-login path —
-which stores no credential yet — is unaffected.
+any refresh credential still stored from the previous client is retired and
+the new record committed under one refresh-lease epoch: a login that
+started from the previous record revalidates the stored registration before
+consuming the single-use authorization code and again before committing its
+grant, so it either commits before the replacement — its grant is then
+retired as orphaned — or aborts, and the new client is never paired with a
+grant issued under the old one. The normal first-login path, which stores no
+credential yet, is unaffected.
 The client auth method is selected from the set the authorization server
 advertises — the field is a set of supported methods, not a single choice:
 the first method this client supports, in the server's advertised order,

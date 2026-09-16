@@ -119,11 +119,29 @@ func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *C
 	// clobbered.
 	_, err = c.leasedExchangeAndPersist(ctx, leaseGeneration,
 		func(ectx context.Context) (*tokenResponse, error) {
+			// Revalidate the stored record before consuming the
+			// single-use code: the secret can expire, or the
+			// registration be replaced, while the user completes
+			// consent, and an expired or superseded record
+			// authenticates no exchange. Failing here keeps the
+			// code for a fresh attempt.
+			if err := c.currentRecord(rec); err != nil {
+				return nil, err
+			}
 			return c.postToken(ectx, md.AS.TokenEndpoint, rec, form)
 		},
 		func(pctx context.Context, tok *tokenResponse) error {
 			if tok.RefreshToken == "" {
 				return fmt.Errorf("%w: authorization code exchange returned no refresh token", ErrNoCredentials)
+			}
+			// The code is already consumed: re-read the record
+			// under the lease and require the replacement to
+			// have committed nowhere in between, so this grant
+			// can never be paired with a different client. A
+			// replacement that commits after this check retires
+			// the newly committed grant as orphaned.
+			if err := c.currentRecord(rec); err != nil {
+				return err
 			}
 			cred := &refreshCredential{
 				RefreshToken:  tok.RefreshToken,
