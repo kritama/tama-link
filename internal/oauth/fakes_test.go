@@ -12,10 +12,12 @@ import (
 	"time"
 )
 
-// fakeSecrets is an in-memory SecretStore for tests.
+// fakeSecrets is an in-memory SecretStore for tests. setDelay blocks
+// SetSecret so a test can hold the credential write open past a lease TTL.
 type fakeSecrets struct {
-	mu    sync.Mutex
-	items map[string][]byte
+	mu       sync.Mutex
+	items    map[string][]byte
+	setDelay time.Duration
 }
 
 func newFakeSecrets() *fakeSecrets {
@@ -35,6 +37,9 @@ func (f *fakeSecrets) GetSecret(label string) ([]byte, bool, error) {
 }
 
 func (f *fakeSecrets) SetSecret(label string, data []byte) error {
+	if f.setDelay > 0 {
+		time.Sleep(f.setDelay)
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := make([]byte, len(data))
@@ -61,6 +66,7 @@ type fakeLease struct {
 	released  int
 	renewals  int
 	loseRenew bool
+	loseAfter int
 }
 
 func newFakeLease() *fakeLease { return &fakeLease{} }
@@ -94,6 +100,15 @@ func (f *fakeLease) ClaimLease(_ context.Context, name, owner string, ttl time.D
 	return true, nil
 }
 
+// loseAfterRenewals makes renewals after the nth one report lost ownership,
+// so a test can lose the lease while a delayed credential write is in
+// flight.
+func (f *fakeLease) loseAfterRenewals(n int) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loseAfter = n
+}
+
 // loseAllRenews makes every renewal report lost ownership, so the test can
 // prove a refresh aborts at the pre-write verification before any
 // credential write starts.
@@ -119,6 +134,10 @@ func (f *fakeLease) RenewLease(_ context.Context, name, owner string, ttl time.D
 	}
 	f.renewals++
 	if f.loseRenew {
+		f.holder = ""
+		return false, nil
+	}
+	if f.loseAfter > 0 && f.renewals >= f.loseAfter {
 		f.holder = ""
 		return false, nil
 	}

@@ -155,7 +155,7 @@ func runScenario(scenario string) int {
 			DescriptorDigest: "sha256:abc",
 			Arguments:        []byte(`{"message":"hi"}`),
 		}
-		created, err := s.CreateSubmission(ctx, sub)
+		created, _, err := s.CreateSubmission(ctx, sub)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "create: %v\n", err)
 			return 1
@@ -255,7 +255,7 @@ func runScenario(scenario string) int {
 	case "die":
 		// Create a submission and exit without closing the store, so the
 		// WAL file is left for the next opener to recover.
-		if _, err := s.CreateSubmission(ctx, store.NewSubmission{
+		if _, _, err := s.CreateSubmission(ctx, store.NewSubmission{
 			ID: "sub-wal", ClientRequestID: "req-wal", Tool: "message",
 			Strategy: "upstream_task", DescriptorDigest: "sha256:abc",
 			Arguments: []byte(`{"message":"hi"}`),
@@ -269,7 +269,7 @@ func runScenario(scenario string) int {
 		// Drive one submission to a completed result and leave it durable so a
 		// later GC sweep must find it fresh (within retention) and keep it.
 		subID := "sub-race"
-		if _, err := s.CreateSubmission(ctx, store.NewSubmission{
+		if _, _, err := s.CreateSubmission(ctx, store.NewSubmission{
 			ID: subID, ClientRequestID: "req-race", Tool: "message",
 			Strategy: "upstream_task", DescriptorDigest: "sha256:abc",
 			Arguments: []byte(`{"message":"hi"}`),
@@ -456,7 +456,7 @@ func TestProctestBusyTimeout(t *testing.T) {
 func TestProctestWriteAfterReadWaitsForLock(t *testing.T) {
 	st := newScenarioState(t)
 	s := proctestOpen(t, st.db, st.key)
-	created, err := s.CreateSubmission(context.Background(), store.NewSubmission{
+	created, _, err := s.CreateSubmission(context.Background(), store.NewSubmission{
 		ID:               "sub-write-after-read",
 		ClientRequestID:  "war-1",
 		Tool:             "message",

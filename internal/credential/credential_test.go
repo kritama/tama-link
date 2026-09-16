@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -19,10 +20,11 @@ var _ store.KeyProvider = (*Keyring)(nil)
 // fakeKeyring is an in-memory keyring.Keyring for tests. It can be configured
 // to fail Get or Set to exercise the fail-closed paths.
 type fakeKeyring struct {
-	mu      sync.Mutex
-	items   map[string]keyring.Item
-	failGet bool
-	failSet bool
+	mu             sync.Mutex
+	items          map[string]keyring.Item
+	failGet        bool
+	failSet        bool
+	pendingRemoves int
 }
 
 func newFakeKeyring() *fakeKeyring {
@@ -57,6 +59,9 @@ func (f *fakeKeyring) Set(item keyring.Item) error {
 }
 
 func (f *fakeKeyring) Remove(key string) error {
+	f.mu.Lock()
+	f.pendingRemoves++
+	f.mu.Unlock()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.items, key)
@@ -229,3 +234,59 @@ func TestProbeSucceedsAndCleansUp(t *testing.T) {
 		t.Fatalf("probe left %d entries behind", count)
 	}
 }
+
+// TestProbeKeysAreUniquePerInvocation proves concurrent same-profile
+// starts cannot interfere with each other's availability probes: every
+// probe uses its own unguessable key, and a probe that sees another
+// probe's Remove between its Set and Get still succeeds on its own key.
+func TestProbeKeysAreUniquePerInvocation(t *testing.T) {
+	seen := make(chan string, 8)
+	backend := newFakeKeyring()
+	racy := &spyKeyring{inner: backend, seen: seen}
+
+	errs := make(chan error, 4)
+	for range 4 {
+		go func() { errs <- probeBackend("demo", racy) }()
+	}
+	// All four probes completed, so exactly their 12 Set/Get/Remove sends
+	// are done. Every probe used a distinct per-invocation key.
+	setKeys := map[string]bool{}
+	for range 12 {
+		select {
+		case k := <-seen:
+			if !strings.HasPrefix(k, "demo/__probe_") {
+				t.Fatalf("probe key %q is not per-invocation", k)
+			}
+			setKeys[k] = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for recorded probe keys")
+		}
+	}
+	if len(setKeys) != 4 {
+		t.Fatalf("probes used %d distinct keys, want 4 (one per invocation)", len(setKeys))
+	}
+}
+
+// spyKeyring records every key its inner keyring handles so a test can
+// assert probe keys are per-invocation.
+type spyKeyring struct {
+	inner keyring.Keyring
+	seen  chan string
+}
+
+func (s *spyKeyring) Set(item keyring.Item) error {
+	s.seen <- item.Key
+	return s.inner.Set(item)
+}
+
+func (s *spyKeyring) Get(key string) (keyring.Item, error) {
+	s.seen <- key
+	return s.inner.Get(key)
+}
+
+func (s *spyKeyring) GetMetadata(key string) (keyring.Metadata, error) {
+	return s.inner.GetMetadata(key)
+}
+
+func (s *spyKeyring) Remove(key string) error { s.seen <- key; return s.inner.Remove(key) }
+func (s *spyKeyring) Keys() ([]string, error) { return s.inner.Keys() }

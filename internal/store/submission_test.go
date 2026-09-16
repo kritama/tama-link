@@ -22,7 +22,7 @@ func TestCreateAndGetRoundTrip(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	created, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1"))
+	created, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1"))
 	if err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
@@ -55,11 +55,11 @@ func TestCreateIdempotentHit(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	first, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1"))
+	first, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1"))
 	if err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
-	retry, err := s.CreateSubmission(ctx, testSubmission("sub-2", "req-1"))
+	retry, _, err := s.CreateSubmission(ctx, testSubmission("sub-2", "req-1"))
 	if err != nil {
 		t.Fatalf("idempotent retry: %v", err)
 	}
@@ -77,11 +77,11 @@ func TestCreateExactRetryReusesSubmission(t *testing.T) {
 	s, _ := openTestStore(t, newMemKeys(), newClock())
 	ctx := context.Background()
 	input := testSubmission("sub-1", "req-1")
-	first, err := s.CreateSubmission(ctx, input)
+	first, _, err := s.CreateSubmission(ctx, input)
 	if err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
-	retry, err := s.CreateSubmission(ctx, input)
+	retry, _, err := s.CreateSubmission(ctx, input)
 	if err != nil {
 		t.Fatalf("exact idempotent retry: %v", err)
 	}
@@ -126,7 +126,7 @@ func TestCreateRetrySurvivesLoweredArgumentLimits(t *testing.T) {
 			}
 			input := testSubmission("sub-1", "req-1")
 			input.Arguments = test.arguments
-			created, err := initial.CreateSubmission(ctx, input)
+			created, _, err := initial.CreateSubmission(ctx, input)
 			if err != nil {
 				t.Fatalf("CreateSubmission: %v", err)
 			}
@@ -144,7 +144,7 @@ func TestCreateRetrySurvivesLoweredArgumentLimits(t *testing.T) {
 
 			retry := input
 			retry.ID = "sub-2"
-			got, err := reopened.CreateSubmission(ctx, retry)
+			got, _, err := reopened.CreateSubmission(ctx, retry)
 			if err != nil {
 				t.Fatalf("retry after lowering limits: %v", err)
 			}
@@ -154,14 +154,14 @@ func TestCreateRetrySurvivesLoweredArgumentLimits(t *testing.T) {
 			conflict := input
 			conflict.ID = "sub-conflict"
 			conflict.Tool = "other"
-			if _, err := reopened.CreateSubmission(ctx, conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
+			if _, _, err := reopened.CreateSubmission(ctx, conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
 				t.Fatalf("conflicting retry = %v, want ErrIdempotencyConflict", err)
 			}
 
 			fresh := input
 			fresh.ID = "sub-3"
 			fresh.ClientRequestID = "req-2"
-			if _, err := reopened.CreateSubmission(ctx, fresh); err == nil {
+			if _, _, err := reopened.CreateSubmission(ctx, fresh); err == nil {
 				t.Fatal("new submission exceeding lowered limits was accepted")
 			}
 		})
@@ -175,7 +175,7 @@ func TestCreateCanonicalizesArgumentsBeforeIdempotency(t *testing.T) {
 	ctx := context.Background()
 	first := testSubmission("sub-1", "req-1")
 	first.Arguments = []byte(`{ "z": 9007199254740993, "nested": {"b": 2, "a": 1} }`)
-	created, err := s.CreateSubmission(ctx, first)
+	created, _, err := s.CreateSubmission(ctx, first)
 	if err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
@@ -186,7 +186,7 @@ func TestCreateCanonicalizesArgumentsBeforeIdempotency(t *testing.T) {
 
 	retry := testSubmission("sub-2", "req-1")
 	retry.Arguments = []byte("{\n\t\"nested\": {\"a\":1, \"b\":2}, \"z\":9007199254740993\n}")
-	got, err := s.CreateSubmission(ctx, retry)
+	got, _, err := s.CreateSubmission(ctx, retry)
 	if err != nil {
 		t.Fatalf("equivalent idempotent retry: %v", err)
 	}
@@ -202,12 +202,12 @@ func TestCreateIdempotentConflict(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	conflict := testSubmission("sub-2", "req-1")
 	conflict.Arguments = []byte(`{"message":"changed"}`)
-	if _, err := s.CreateSubmission(ctx, conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
+	if _, _, err := s.CreateSubmission(ctx, conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
 		t.Fatalf("conflicting retry = %v, want ErrIdempotencyConflict", err)
 	}
 }
@@ -217,12 +217,12 @@ func TestCreateIdempotencyIncludesOperationIdentity(t *testing.T) {
 
 	s, _ := openTestStore(t, newMemKeys(), newClock())
 	ctx := context.Background()
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	conflict := testSubmission("sub-2", "req-1")
 	conflict.Tool = "review"
-	if _, err := s.CreateSubmission(ctx, conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
+	if _, _, err := s.CreateSubmission(ctx, conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
 		t.Fatalf("different tool retry = %v, want ErrIdempotencyConflict", err)
 	}
 }
@@ -232,14 +232,14 @@ func TestCreateIdempotencyIgnoresRuntimeVersions(t *testing.T) {
 
 	s, _ := openTestStore(t, newMemKeys(), newClock())
 	ctx := context.Background()
-	first, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1"))
+	first, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1"))
 	if err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	retry := testSubmission("sub-2", "req-1")
 	retry.ProtocolVersion = "2026-07-28"
 	retry.AdapterVersion = "tama014/2"
-	got, err := s.CreateSubmission(ctx, retry)
+	got, _, err := s.CreateSubmission(ctx, retry)
 	if err != nil {
 		t.Fatalf("retry after runtime version change: %v", err)
 	}
@@ -259,36 +259,36 @@ func TestCreateValidatesInput(t *testing.T) {
 	ctx := context.Background()
 
 	noID := testSubmission("", "req-1")
-	if _, err := s.CreateSubmission(ctx, noID); err == nil {
+	if _, _, err := s.CreateSubmission(ctx, noID); err == nil {
 		t.Fatal("missing submission id accepted, want error")
 	}
 
 	noClient := testSubmission("sub-1", "")
-	if _, err := s.CreateSubmission(ctx, noClient); err == nil {
+	if _, _, err := s.CreateSubmission(ctx, noClient); err == nil {
 		t.Fatal("missing client request id accepted, want error")
 	}
 
 	noTool := testSubmission("sub-1", "req-1")
 	noTool.Tool = ""
-	if _, err := s.CreateSubmission(ctx, noTool); err == nil {
+	if _, _, err := s.CreateSubmission(ctx, noTool); err == nil {
 		t.Fatal("missing tool accepted, want error")
 	}
 
 	invalidJSON := testSubmission("sub-1", "req-1")
 	invalidJSON.Arguments = []byte(`{"message":`)
-	if _, err := s.CreateSubmission(ctx, invalidJSON); err == nil {
+	if _, _, err := s.CreateSubmission(ctx, invalidJSON); err == nil {
 		t.Fatal("invalid JSON arguments accepted, want error")
 	}
 
 	duplicateKey := testSubmission("sub-duplicate", "req-duplicate")
 	duplicateKey.Arguments = []byte(`{"message":"first","message":"second"}`)
-	if _, err := s.CreateSubmission(ctx, duplicateKey); err == nil {
+	if _, _, err := s.CreateSubmission(ctx, duplicateKey); err == nil {
 		t.Fatal("duplicate argument key accepted, want error")
 	}
 
 	excessiveDepth := testSubmission("sub-excessive-depth", "req-excessive-depth")
 	excessiveDepth.Arguments = []byte(strings.Repeat("[", 1_000) + "0" + strings.Repeat("]", 1_000))
-	if _, err := s.CreateSubmission(ctx, excessiveDepth); err == nil || !strings.Contains(err.Error(), "arguments depth") {
+	if _, _, err := s.CreateSubmission(ctx, excessiveDepth); err == nil || !strings.Contains(err.Error(), "arguments depth") {
 		t.Fatalf("excessively nested arguments = %v, want bounded depth error", err)
 	}
 }
@@ -308,12 +308,12 @@ func TestCreateEnforcesArgumentBounds(t *testing.T) {
 
 	tooLarge := testSubmission("sub-large", "req-large")
 	tooLarge.Arguments = []byte(`{"message":"this is too large"}`)
-	if _, err := s.CreateSubmission(context.Background(), tooLarge); err == nil {
+	if _, _, err := s.CreateSubmission(context.Background(), tooLarge); err == nil {
 		t.Fatal("oversized arguments accepted")
 	}
 	tooDeep := testSubmission("sub-deep", "req-deep")
 	tooDeep.Arguments = []byte(`{"a":{"b":{"c":1}}}`)
-	if _, err := s.CreateSubmission(context.Background(), tooDeep); err == nil {
+	if _, _, err := s.CreateSubmission(context.Background(), tooDeep); err == nil {
 		t.Fatal("overly deep arguments accepted")
 	}
 }
@@ -335,7 +335,7 @@ func TestTransitionLifecycle(t *testing.T) {
 	s, _ := openTestStore(t, newMemKeys(), clk)
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 
@@ -371,7 +371,7 @@ func TestReplaceRunningTaskIDRequiresLiveLease(t *testing.T) {
 
 	s, _ := openTestStore(t, newMemKeys(), newClock())
 	ctx := context.Background()
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	if _, err := s.Transition(ctx, "sub-1", contract.StatusQueued, store.TransitionDetail{}); err != nil {
@@ -403,7 +403,7 @@ func TestTransitionRejectsIllegalMoves(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 
@@ -433,7 +433,7 @@ func TestTerminalStatesAreAbsorbing(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	for _, state := range []submission.State{
@@ -464,7 +464,7 @@ func TestTransitionStoresTerminalError(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	for _, state := range []submission.State{
@@ -506,7 +506,7 @@ func TestConcurrentTransitionHasSingleWinner(t *testing.T) {
 		t.Fatalf("Open second: %v", err)
 	}
 	t.Cleanup(func() { _ = second.Close() })
-	if _, err := first.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := first.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 

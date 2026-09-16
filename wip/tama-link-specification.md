@@ -198,7 +198,9 @@ Requirements:
   `client_context.thread_id`, omission is `invalid_request`. Tama Link must not
   substitute a profile-global or process-global conversation identity.
 - Repeating the same `client_request_id` with equivalent canonical input must
-  return the original submission.
+  return the original submission. A replay appends no progress events and
+  re-offers nothing to the worker: an already advanced row keeps a monotonic
+  event sequence.
 - Lowering a profile limit must not make an already accepted idempotent request
   unrecoverable. Tama Link canonicalizes and reconciles an existing request
   within implementation hard ceilings before applying current profile limits;
@@ -443,7 +445,8 @@ back to plaintext. Logout never removes the state key. Version 1 performs no
 automatic state-key rotation, and headless environments are supported only with
 an explicitly available secure credential backend. Backend availability is a
 bounded startup probe: a complete set/read/remove cycle on one disposable
-entry must finish within a short fixed window, or Tama Link fails fast with a
+entry with a unique unguessable per-invocation key must finish within a short
+fixed window, or Tama Link fails fast with a
 clear unavailable error. The window is fixed in the binary and cannot be
 extended at runtime. A backend that accepts a connection but blocks on user
 interaction for writes (for example a headless Secret Service) is
@@ -699,10 +702,15 @@ sent there. The same origin policy re-validates the stored token endpoint
 before every refresh. A refresh holds its cross-process lease for the whole
 critical section: the lease is renewed on a third of its TTL while the token
 exchange runs and the replacement credential is written, ownership is
-re-verified immediately before the credential write, and a lost lease aborts
-before any replacement token is persisted. Refresh transactions are also
-serialized inside one process: the shared owner would otherwise let two
-in-process refreshes rotate the same refresh grant at once.
+re-verified immediately before and after the credential write (a blocked
+write can outlive the lease and cannot observe the renewal loop, so a loss
+during the write must fail the refresh after it completes instead of
+reporting success), and a lost lease aborts before any replacement token is
+persisted. Refresh transactions are also serialized inside one process: the
+shared owner would otherwise let two in-process refreshes rotate the same
+refresh grant at once. The refresh lead time is capped to a quarter of the
+issued token lifetime so a short token keeps a positive validity window
+instead of refreshing on every request.
 
 The local worker executes at most a bounded number of submissions
 concurrently; queued work beyond the bound waits for a free slot. The bound

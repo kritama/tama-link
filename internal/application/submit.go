@@ -60,7 +60,7 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 	if err != nil {
 		return contract.SubmitOutput{}, failed(contract.CodeInternal, "%v", err)
 	}
-	sub, err := s.store.CreateSubmission(ctx, store.NewSubmission{
+	sub, created, err := s.store.CreateSubmission(ctx, store.NewSubmission{
 		ID:               id,
 		ClientRequestID:  clientRequestID,
 		Tool:             d.Name,
@@ -77,12 +77,18 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 		}
 		return contract.SubmitOutput{}, s.storeError(err)
 	}
-	// The submission is durable; a lost progress event is not fatal because
-	// the await path re-derives progress from the stored state.
-	_ = s.appendAcceptedEvent(ctx, sub)
-	// The strategy gate above leaves only local_replayable reachable, so
-	// every durably accepted submission is dispatched to the leased worker.
-	s.worker.Dispatch(sub.ID)
+	if created {
+		// The submission is durable; a lost progress event is not fatal
+		// because the await path re-derives progress from the stored state.
+		_ = s.appendAcceptedEvent(ctx, sub)
+		// The strategy gate above leaves only local_replayable reachable,
+		// so every durably accepted submission is dispatched to the leased
+		// worker. A replay of an existing row keeps its original event
+		// stream and dispatch: appending an accepted event after the row
+		// advanced would corrupt the progress sequence, and re-offering an
+		// already running work is at best noise.
+		s.worker.Dispatch(sub.ID)
+	}
 	return contract.SubmitOutput{
 		SubmissionID:    sub.ID,
 		Status:          sub.Status,

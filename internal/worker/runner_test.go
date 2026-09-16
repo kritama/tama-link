@@ -160,7 +160,7 @@ func openStoreWithClock(t *testing.T, path string, keys *memoryKeys, clock *work
 
 func createReplayable(t *testing.T, s *store.Store, id string) {
 	t.Helper()
-	_, err := s.CreateSubmission(context.Background(), store.NewSubmission{
+	_, _, err := s.CreateSubmission(context.Background(), store.NewSubmission{
 		ID: id, ClientRequestID: "request-" + id, Tool: "recall",
 		Strategy: string(catalog.StrategyLocalReplayable), DescriptorDigest: "sha256:test",
 		Arguments: []byte(`{"query":"memory"}`), ProtocolVersion: "2025-11-25", AdapterVersion: "tama014/1",

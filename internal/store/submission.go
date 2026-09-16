@@ -66,17 +66,19 @@ type NewSubmission struct {
 // CreateSubmission inserts one accepted submission together with its
 // idempotency index entry in a single transaction. A retry with the same
 // client_request_id and the same canonical arguments returns the existing
-// submission; a different argument hash is a conflict.
-func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submission, error) {
+// submission with created=false; a different argument hash is a conflict.
+// Callers use created to distinguish a fresh acceptance (which still needs
+// its acceptance event and dispatch) from a replay of an existing row.
+func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submission, bool, error) {
 	if sub.ID == "" || sub.ClientRequestID == "" || sub.Tool == "" {
-		return nil, errors.New("submission id, client request id, and tool are required")
+		return nil, false, errors.New("submission id, client request id, and tool are required")
 	}
 	// Canonicalize within the implementation ceiling before applying the
 	// current profile limits. Existing idempotency records remain recoverable
 	// when a profile later lowers its acceptance limits.
 	arguments, err := canonicalArguments(sub.Arguments, limits.HardCeiling())
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	sub.Arguments = arguments
 	argsHash := hashInput(sub)
@@ -84,7 +86,7 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 	now := s.now().UnixMilli()
 	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("begin idempotent insert: %w", err)
+		return nil, false, fmt.Errorf("begin idempotent insert: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -97,21 +99,21 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 		VALUES (?, ?, ?, ?)
 		ON CONFLICT(client_request_id) DO NOTHING`, sub.ClientRequestID, argsHash, sub.ID, now)
 	if err != nil {
-		return nil, fmt.Errorf("insert idempotency index: %w", err)
+		return nil, false, fmt.Errorf("insert idempotency index: %w", err)
 	}
 	affected, err := res.RowsAffected()
 	if err != nil {
-		return nil, fmt.Errorf("insert idempotency index: %w", err)
+		return nil, false, fmt.Errorf("insert idempotency index: %w", err)
 	}
 	if affected == 0 {
 		return s.reconcileIdempotentSubmission(ctx, tx, sub.ClientRequestID, argsHash)
 	}
 	if err := validateCanonicalArguments(arguments, s.limits); err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	encryptedArgs, err := s.cipher.seal(arguments, sub.ID, "arguments")
 	if err != nil {
-		return nil, fmt.Errorf("seal arguments: %w", err)
+		return nil, false, fmt.Errorf("seal arguments: %w", err)
 	}
 
 	insert := `
@@ -134,10 +136,10 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 		acceptedLimits.TombstoneRetention/time.Millisecond,
 		now, now,
 	); err != nil {
-		return nil, fmt.Errorf("insert submission: %w", err)
+		return nil, false, fmt.Errorf("insert submission: %w", err)
 	}
 	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit submission: %w", err)
+		return nil, false, fmt.Errorf("commit submission: %w", err)
 	}
 
 	created := &Submission{
@@ -155,14 +157,14 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 		CreatedAt:        time.UnixMilli(now).UTC(),
 		UpdatedAt:        time.UnixMilli(now).UTC(),
 	}
-	return created, nil
+	return created, true, nil
 }
 
 func (s *Store) reconcileIdempotentSubmission(
 	ctx context.Context,
 	tx *writeTx,
 	clientRequestID, argsHash string,
-) (*Submission, error) {
+) (*Submission, bool, error) {
 	// End this transaction before reading through the pool. A concurrent
 	// winner may still be committing the row referenced by the index.
 	_ = tx.Rollback()
@@ -171,13 +173,14 @@ func (s *Store) reconcileIdempotentSubmission(
 		"SELECT submission_id, args_hash FROM idempotency WHERE client_request_id = ?",
 		clientRequestID,
 	).Scan(&existingID, &existingHash); err != nil {
-		return nil, fmt.Errorf("read idempotency index: %w", err)
+		return nil, false, fmt.Errorf("read idempotency index: %w", err)
 	}
 	if existingHash != argsHash {
-		return nil, fmt.Errorf("%w: client_request_id %q was used with different arguments",
+		return nil, false, fmt.Errorf("%w: client_request_id %q was used with different arguments",
 			ErrIdempotencyConflict, clientRequestID)
 	}
-	return s.GetSubmission(ctx, existingID)
+	existing, err := s.GetSubmission(ctx, existingID)
+	return existing, false, err
 }
 
 // hashInput hashes a length-delimited, versioned execution identity. Including

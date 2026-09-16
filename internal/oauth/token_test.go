@@ -348,3 +348,67 @@ func TestRefreshVerifiesOwnershipBeforeCredentialWrite(t *testing.T) {
 	}
 	clock.set(clock.now.Add(time.Minute))
 }
+
+// TestRefreshDetectsLeaseLossDuringCredentialWrite proves the post-write
+// re-verification: when the renewal loop loses the lease while a delayed
+// credential write is in flight (the write cannot observe the cancellation
+// because the secret-store API has no context), the refresh must not report
+// success and must not keep the token cached.
+func TestRefreshDetectsLeaseLossDuringCredentialWrite(t *testing.T) {
+	server, client, secrets, lease, clock := tokenFixture(t, "rt-1")
+	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+	prev := refreshLeaseTTL
+	refreshLeaseTTL = 100 * time.Millisecond
+	defer func() { refreshLeaseTTL = prev }()
+	// The write outlasts the lease; a renewal during the write loses
+	// ownership. Renewal order: pre-write verification (#1), then the
+	// loop's renewals during the 150 ms write; the third loses.
+	lease.loseAfterRenewals(3)
+	secrets.setDelay = 150 * time.Millisecond
+
+	_, err := client.Token(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "during the credential write") {
+		t.Fatalf("err = %v, want lease loss during the credential write", err)
+	}
+	if _, ok := client.Expiry(); ok {
+		t.Fatal("the superseded token stayed cached after a lost lease")
+	}
+	clock.set(clock.now.Add(time.Minute))
+}
+
+// TestTokenSkewScalesForShortLivedTokens proves a 60 s token keeps a
+// positive validity window: within half its lifetime the second request is
+// served from cache instead of rotating the grant again.
+func TestTokenSkewScalesForShortLivedTokens(t *testing.T) {
+	server, client, _, _, clock := tokenFixture(t, "rt-1")
+	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":60,"refresh_token":"rt-1"}`
+
+	tok1, err := client.Token(context.Background())
+	if err != nil || tok1 != "at-1" {
+		t.Fatalf("Token = %q err=%v", tok1, err)
+	}
+	// 30 s in: past the fixed 60 s skew's window only if the skew were
+	// not scaled, well inside the scaled one (15 s).
+	clock.set(clock.now.Add(30 * time.Second))
+	tok2, err := client.Token(context.Background())
+	if err != nil || tok2 != "at-1" {
+		t.Fatalf("cached Token = %q err=%v", tok2, err)
+	}
+	server.tokenReqMu.Lock()
+	calls := server.tokenCalls
+	server.tokenReqMu.Unlock()
+	if calls != 1 {
+		t.Errorf("token requests = %d, want 1 (short-lived token must stay valid past the fixed skew)", calls)
+	}
+	// Near expiry the token must still refresh rather than expire in use.
+	clock.set(clock.now.Add(36 * time.Second))
+	if _, err := client.Token(context.Background()); err != nil {
+		t.Fatalf("Token near expiry: %v", err)
+	}
+	server.tokenReqMu.Lock()
+	calls = server.tokenCalls
+	server.tokenReqMu.Unlock()
+	if calls != 2 {
+		t.Errorf("token requests = %d, want 2 (refresh near expiry)", calls)
+	}
+}

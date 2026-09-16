@@ -75,7 +75,7 @@ func TestExpiredWorkerCannotCaptureTerminalResult(t *testing.T) {
 	keys, clk := newMemKeys(), newClock()
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	for _, state := range []contract.Status{contract.StatusQueued, contract.StatusRunning} {

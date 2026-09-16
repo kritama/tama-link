@@ -139,6 +139,29 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 	if err := c.applyTokens(cred, tok); err != nil {
 		return "", err
 	}
+	// The write cannot observe the renewal loop: the secret-store API has
+	// no context, so a blocked write can outlive the lease and a loss
+	// cannot interrupt it. Re-verify ownership after the write; if it was
+	// lost, another process now owns the credential and this result must
+	// not be reported as success or cached, even though the write itself
+	// already ran.
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if execCtx.Err() != nil {
+		c.clearToken()
+		return "", errors.New("refresh lease lost during the credential write")
+	}
+	renewCtx, cancelRenew = context.WithTimeout(ctx, refreshLeaseTTL/2)
+	owned, err = c.lease.RenewLease(renewCtx, refreshLeaseName, c.owner, refreshLeaseTTL)
+	cancelRenew()
+	if ctx.Err() != nil {
+		return "", ctx.Err()
+	}
+	if err != nil || !owned {
+		c.clearToken()
+		return "", errors.New("refresh lease lost during the credential write")
+	}
 	return tok.AccessToken, nil
 }
 

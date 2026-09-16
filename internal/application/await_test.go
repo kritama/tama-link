@@ -181,7 +181,7 @@ func TestSubmitStaleDescriptorDigestFailsContractMismatch(t *testing.T) {
 	// digest: the store takes the digest verbatim at creation, which is
 	// exactly what a reconciled profile would have recorded before the
 	// change.
-	sub, err := st.CreateSubmission(context.Background(), store.NewSubmission{
+	sub, _, err := st.CreateSubmission(context.Background(), store.NewSubmission{
 		ID:               "sub-stale-digest",
 		ClientRequestID:  "stale-digest",
 		Tool:             "status",

@@ -6,6 +6,8 @@
 package credential
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"runtime"
@@ -78,10 +80,17 @@ func New(profile string) (*Keyring, error) {
 // connection while still being unable to complete a write, so connect
 // success alone is not availability.
 func probeBackend(profile string, kr keyring.Keyring) error {
+	// The probe key is unique per invocation: two Tama Link processes for
+	// the same profile can start concurrently, and a shared probe key lets
+	// one process delete the entry the other is still reading, reporting a
+	// healthy keyring as unavailable.
+	key, err := probeKey(profile)
+	if err != nil {
+		return err
+	}
 	type result struct{ err error }
 	done := make(chan result, 1)
 	go func() {
-		key := profile + "/__probe__"
 		err := kr.Set(keyring.Item{
 			Key:         key,
 			Data:        []byte{1},
@@ -101,6 +110,16 @@ func probeBackend(profile string, kr keyring.Keyring) error {
 	case <-time.After(probeTimeout):
 		return fmt.Errorf("credential backend did not complete an availability probe within %s; a keyring unlock prompt is not a supported serve-startup path", probeTimeout)
 	}
+}
+
+// probeKey returns one unguessable per-invocation probe key inside the
+// profile namespace.
+func probeKey(profile string) (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate probe key: %w", err)
+	}
+	return fmt.Sprintf("%s/__probe_%s", profile, hex.EncodeToString(b[:])), nil
 }
 
 // NewWithBackend namespaces an already-open backend under namespace. The

@@ -31,7 +31,7 @@ func TestAppendEventsRoundTrip(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	clk.Advance(time.Minute)
@@ -66,7 +66,7 @@ func TestAppendEventsEnforcesSequence(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	if _, err := s.AppendEvents(ctx, "sub-1", []contract.Event{testEvent("sub-1", 1)}); err != nil {
@@ -99,7 +99,7 @@ func TestAppendEventsRejectsForeignSubmission(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	if _, err := s.AppendEvents(ctx, "sub-1", []contract.Event{testEvent("sub-2", 1)}); err == nil {
@@ -121,7 +121,7 @@ func TestAppendEventsHonoursRetention(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	events := make([]contract.Event, 0, 5)
@@ -155,7 +155,7 @@ func TestAppendEventsCountsStoredArrayOverhead(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	if _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 
@@ -177,7 +177,7 @@ func TestAppendEventsKeepsSequenceAfterTrimming(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
-	if _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	if _, err := s.AppendEvents(context.Background(), "sub-1", []contract.Event{
@@ -201,7 +201,7 @@ func TestAppendEventsRejectsOversizedAndTerminalEvents(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	oversized := testEvent("sub-1", 1)
@@ -229,7 +229,7 @@ func TestCompleteRoundTrip(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	for _, state := range []submission.State{
@@ -274,7 +274,7 @@ func TestCompleteRequiresRunningState(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	result := contract.Result{Content: []contract.ContentBlock{[]byte(`{"type":"text","text":"early"}`)}}
@@ -298,7 +298,7 @@ func TestCompleteEnforcesSizeBound(t *testing.T) {
 	t.Cleanup(func() { _ = s.Close() })
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	for _, state := range []submission.State{

@@ -1,6 +1,8 @@
 package application
 
 import (
+	"time"
+
 	"context"
 	"encoding/json"
 	"testing"
@@ -262,5 +264,75 @@ func TestSubmitAppliesBindings(t *testing.T) {
 	}
 	if call.Params.Arguments.ClientMeta.RequestID != "bind-1" {
 		t.Fatalf("binding not applied: %+v", call.Params.Arguments.ClientMeta)
+	}
+}
+
+// TestSubmitIdempotentReplayDoesNotAppendEvents pins the replay contract:
+// an exact client_request_id retry returns the original submission without
+// appending another accepted event or re-offering the row to the worker,
+// so an advanced row keeps a monotonic progress sequence.
+func TestSubmitIdempotentReplayDoesNotAppendEvents(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, st, _ := fixtureApp(t, f)
+
+	first := submitStatus(t, svc, "replay-1")
+
+	// Let the first submission complete so its row has advanced far past
+	// accepted; a replay that appended an accepted event would produce a
+	// sequence that descends after the terminal events.
+	deadline := time.Now().Add(20 * time.Second)
+	for {
+		sub, err := st.GetSubmission(context.Background(), first)
+		if err != nil {
+			t.Fatalf("GetSubmission: %v", err)
+		}
+		if string(sub.Status) == "completed" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("submission did not complete: %s", sub.Status)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	out, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "replay-1",
+		ClientContext:   &contract.ClientContext{ThreadID: "thread-1"},
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	})
+	if appErr != nil {
+		t.Fatalf("replay: %s", appErr.Message)
+	}
+	if out.SubmissionID != first {
+		t.Fatalf("replay returned %s, want %s", out.SubmissionID, first)
+	}
+
+	// The event stream must be unchanged by the replay: it ends in the
+	// terminal completed event with strictly increasing sequences.
+	// A spurious accepted append would appear as a trailing accepted
+	// event after the terminal one.
+	sub, err := st.GetSubmission(context.Background(), first)
+	if err != nil {
+		t.Fatalf("GetSubmission: %v", err)
+	}
+	// Replaying again must still return the same row with the same status;
+	// the sequence must not have grown.
+	if _, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "replay-1",
+		ClientContext:   &contract.ClientContext{ThreadID: "thread-1"},
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	}); appErr != nil {
+		t.Fatalf("second replay: %s", appErr.Message)
+	}
+	again, err := st.GetSubmission(context.Background(), first)
+	if err != nil {
+		t.Fatalf("GetSubmission: %v", err)
+	}
+	if again.Sequence != sub.Sequence {
+		t.Fatalf("replay advanced the sequence from %d to %d; replays must not append", sub.Sequence, again.Sequence)
 	}
 }

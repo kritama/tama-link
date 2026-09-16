@@ -96,6 +96,9 @@ type Client struct {
 	token       string
 	tokenExpiry time.Time
 	hasToken    bool
+	// skew is the refresh lead time for the held token, capped to its
+	// lifetime; applyTokens sets it before the token becomes visible.
+	skew time.Duration
 
 	// refreshMu serializes refresh transactions inside this process; the
 	// cross-process lease is shared by every in-process refresher.

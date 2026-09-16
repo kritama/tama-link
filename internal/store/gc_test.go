@@ -16,7 +16,7 @@ func TestGCSweepsPayloadThenTombstone(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	for _, state := range []submission.State{contract.StatusQueued, contract.StatusRunning} {
@@ -63,7 +63,7 @@ func TestGCSweepsPayloadThenTombstone(t *testing.T) {
 	if _, err := s.GetSubmission(ctx, "sub-1"); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("tombstone lookup = %v, want not found", err)
 	}
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-2", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-2", "req-1")); err != nil {
 		t.Fatalf("reused client_request_id after tombstone: %v", err)
 	}
 }
@@ -75,7 +75,7 @@ func TestGCNeverTouchesNonTerminalSubmissions(t *testing.T) {
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
 
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 
@@ -102,7 +102,7 @@ func TestGCClearsPayloadFromAlreadyExpiredSubmission(t *testing.T) {
 	keys, clk := newMemKeys(), newClock()
 	s, _ := openTestStore(t, keys, clk)
 	ctx := context.Background()
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	if _, err := s.Transition(ctx, "sub-1", contract.StatusQueued, store.TransitionDetail{TaskID: "task-1"}); err != nil {

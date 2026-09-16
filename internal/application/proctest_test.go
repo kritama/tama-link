@@ -201,7 +201,7 @@ func TestRestartReplayReexecutesAfterLeaseExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	_, err = st.CreateSubmission(context.Background(), store.NewSubmission{
+	_, _, err = st.CreateSubmission(context.Background(), store.NewSubmission{
 		ID:               "sub-restart-replay",
 		ClientRequestID:  "rr-1",
 		Tool:             "status",
@@ -292,7 +292,7 @@ func TestWorkerSingleWinnerAcrossProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
-	sub, err := st.CreateSubmission(context.Background(), store.NewSubmission{
+	sub, _, err := st.CreateSubmission(context.Background(), store.NewSubmission{
 		ID:               "sub-single-winner",
 		ClientRequestID:  "cw-1",
 		Tool:             "status",

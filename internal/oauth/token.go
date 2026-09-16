@@ -67,6 +67,14 @@ func (c *Client) applyTokens(cred *refreshCredential, tok *tokenResponse) error 
 	defer c.mu.Unlock()
 	c.token = tok.AccessToken
 	c.tokenExpiry = c.clock().Add(time.Duration(expiresIn) * time.Second)
+	// The skew is capped at a quarter of the issued lifetime so a short
+	// token (for example 60 s) keeps a positive validity window instead
+	// of refreshing on every request and rotating the grant away.
+	if lifetime := time.Duration(expiresIn) * time.Second; refreshSkew > lifetime/4 {
+		c.skew = lifetime / 4
+	} else {
+		c.skew = refreshSkew
+	}
 	c.hasToken = true
 	return nil
 }
@@ -77,7 +85,7 @@ func (c *Client) applyTokens(cred *refreshCredential, tok *tokenResponse) error 
 // method never opens a browser.
 func (c *Client) Token(ctx context.Context) (string, error) {
 	c.mu.Lock()
-	valid := c.hasToken && c.tokenExpiry.After(c.clock().Add(refreshSkew))
+	valid := c.hasToken && c.tokenExpiry.After(c.clock().Add(c.skew))
 	if valid {
 		defer c.mu.Unlock()
 		return c.token, nil

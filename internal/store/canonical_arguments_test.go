@@ -14,7 +14,7 @@ func TestEmptyArrayArgumentsRemainDistinctFromNull(t *testing.T) {
 	s, _ := openTestStore(t, newMemKeys(), newClock())
 	input := testSubmission("sub-1", "req-1")
 	input.Arguments = []byte(`{"items":[]}`)
-	created, err := s.CreateSubmission(context.Background(), input)
+	created, _, err := s.CreateSubmission(context.Background(), input)
 	if err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
@@ -24,7 +24,7 @@ func TestEmptyArrayArgumentsRemainDistinctFromNull(t *testing.T) {
 
 	conflict := testSubmission("sub-2", "req-1")
 	conflict.Arguments = []byte(`{"items":null}`)
-	if _, err := s.CreateSubmission(context.Background(), conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
+	if _, _, err := s.CreateSubmission(context.Background(), conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
 		t.Fatalf("null retry = %v, want ErrIdempotencyConflict", err)
 	}
 }
