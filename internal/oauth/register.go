@@ -24,6 +24,17 @@ type ClientRecord struct {
 	AuthMethod   string    `json:"token_endpoint_auth_method"`
 	Issuer       string    `json:"issuer"`
 	RegisteredAt time.Time `json:"registered_at"`
+	// SecretExpiresAt is the RFC 7591 client_secret_expires_at: a Unix
+	// second after which the secret is invalid, or zero when the secret
+	// does not expire.
+	SecretExpiresAt int64 `json:"client_secret_expires_at,omitempty"`
+}
+
+// secretExpired reports whether the record's client secret has passed its
+// RFC 7591 expiry. An expired secret authenticates no exchange, so the
+// record must not count as a usable registration.
+func (c *Client) secretExpired(rec *ClientRecord) bool {
+	return rec.SecretExpiresAt > 0 && c.clock().Unix() >= rec.SecretExpiresAt
 }
 
 // RegisteredClient returns the stored client registration, or found=false.
@@ -46,7 +57,7 @@ func (c *Client) RegisteredClient() (*ClientRecord, bool, error) {
 	if rec.ClientID == "" || rec.Issuer == "" || rec.AuthMethod == "" {
 		return nil, false, fmt.Errorf("stored client record is incomplete")
 	}
-	if recordMissingSecret(&rec) {
+	if recordMissingSecret(&rec) || c.secretExpired(&rec) {
 		return nil, false, nil
 	}
 	return &rec, true, nil
@@ -104,6 +115,8 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	var created struct {
 		ClientID     string `json:"client_id"`
 		ClientSecret string `json:"client_secret"`
+		// Zero means the secret does not expire (RFC 7591).
+		SecretExpiresAt int64 `json:"client_secret_expires_at"`
 	}
 	if err := json.Unmarshal(payload, &created); err != nil {
 		return nil, fmt.Errorf("decode registration: json")
@@ -112,11 +125,12 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 		return nil, fmt.Errorf("registration returned no client id")
 	}
 	rec := &ClientRecord{
-		ClientID:     created.ClientID,
-		ClientSecret: created.ClientSecret,
-		AuthMethod:   md.AS.TokenEndpointAuthMethod(),
-		Issuer:       md.AS.Issuer,
-		RegisteredAt: c.clock().UTC(),
+		ClientID:        created.ClientID,
+		ClientSecret:    created.ClientSecret,
+		AuthMethod:      md.AS.TokenEndpointAuthMethod(),
+		Issuer:          md.AS.Issuer,
+		RegisteredAt:    c.clock().UTC(),
+		SecretExpiresAt: created.SecretExpiresAt,
 	}
 	// A client-secret auth method without a secret would be persisted as a
 	// permanently unusable registration: readiness would accept submits
@@ -125,6 +139,15 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	// records on load, so a legacy record self-heals on the next login.
 	if recordMissingSecret(rec) {
 		return nil, fmt.Errorf("registration returned no client secret for %s", rec.AuthMethod)
+	}
+	// A replacement registration issues a new client: any refresh
+	// credential still stored belongs to the previous client ID and can
+	// never refresh under the new one. It is retired before the new record
+	// is stored, so readiness never pairs the new registration with the
+	// orphaned credential. The normal first-login path stores no
+	// credential yet and is a no-op.
+	if err := c.retireOrphanedCredential(ctx); err != nil {
+		return nil, err
 	}
 	if err := c.storeClient(rec); err != nil {
 		return nil, err

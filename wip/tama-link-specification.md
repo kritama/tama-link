@@ -993,6 +993,18 @@ foreign token to a stored endpoint. A registration response must supply the
 client secret the selected auth method requires: a client-secret
 registration without a secret fails the registration instead of being
 persisted as a permanently unusable record that readiness keeps accepting.
+The stored registration is revalidated against the same requirement on
+load, so a legacy record persisted without the secret is treated as absent:
+readiness fails as not-ready and the next login's registration replaces the
+unusable record instead of the profile looping on it. The RFC 7591
+`client_secret_expires_at` is persisted with the registration, and an
+expired secret makes the record absent for readiness and refresh, so the
+next login re-registers before an exchange can fail on an `invalid_client`
+authentication. Because a replacement registration issues a new client ID,
+any refresh credential still stored from the previous client is retired
+before the new record is committed: readiness never pairs the new
+registration with an orphaned grant, and the normal first-login path —
+which stores no credential yet — is unaffected.
 The client auth method is selected from the set the authorization server
 advertises — the field is a set of supported methods, not a single choice:
 the first method this client supports, in the server's advertised order,

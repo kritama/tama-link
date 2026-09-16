@@ -158,6 +158,103 @@ func TestRegisteredClientTreatsLegacySecretlessRecordAsAbsent(t *testing.T) {
 	}
 }
 
+// TestRegisterRetiresOrphanedCredential pins the repair path: a
+// replacement registration issues a new client ID, so a refresh
+// credential still stored from the previous client can never refresh
+// under it. It is retired before the new record is stored, so readiness
+// never pairs the new registration with the orphaned grant.
+func TestRegisterRetiresOrphanedCredential(t *testing.T) {
+	secrets := newFakeSecrets()
+	lease := newFakeLease()
+	client := newStaticClient(t, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
+
+	// A legacy secretless record and a refresh credential from the
+	// previous client.
+	legacy := ClientRecord{ClientID: "cid-old", AuthMethod: "client_secret_basic", Issuer: testIssuer, RegisteredAt: time.Now().UTC()}
+	legacyData, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy record: %v", err)
+	}
+	if err := secrets.SetSecret(labelClient, legacyData); err != nil {
+		t.Fatalf("store legacy record: %v", err)
+	}
+	cred := refreshCredential{RefreshToken: "rt-old", TokenEndpoint: testIssuer + "/token", Issuer: testIssuer, Updated: time.Now().UTC()}
+	credData, err := json.Marshal(cred)
+	if err != nil {
+		t.Fatalf("marshal credential: %v", err)
+	}
+	if err := secrets.SetSecret(labelRefresh, credData); err != nil {
+		t.Fatalf("store credential: %v", err)
+	}
+
+	var calls int32
+	ts := registerServer(t, `{"client_id":"cid-new","client_secret":"shh"}`, http.StatusCreated, &calls)
+	rec, err := client.Register(context.Background(), regMetadata(ts, testIssuer))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if rec.ClientID != "cid-new" {
+		t.Fatalf("Register = %+v, want the fresh registration", rec)
+	}
+
+	// The orphaned grant is gone and readiness does not pair the new
+	// client with it.
+	if _, found, _ := secrets.GetSecret(labelRefresh); found {
+		t.Fatal("the orphaned refresh credential survived the re-registration")
+	}
+	if ok, err := client.HasCredentials(context.Background()); err != nil || ok {
+		t.Fatalf("HasCredentials after re-registration = %v %v, want not ready without an error", ok, err)
+	}
+}
+
+// TestRegisteredClientHonorsSecretExpiry pins the RFC 7591
+// client_secret_expires_at: an expiring registration stops being a usable
+// client at its expiry, and the DCR response's field is persisted.
+func TestRegisteredClientHonorsSecretExpiry(t *testing.T) {
+	secrets := newFakeSecrets()
+	clock := newTestClock(time.Unix(1_700_000_000, 0))
+	client := newStaticClient(t, secrets, newFakeLease(), clock)
+
+	rec := ClientRecord{
+		ClientID:        "cid-1",
+		ClientSecret:    "shh",
+		AuthMethod:      "client_secret_basic",
+		Issuer:          testIssuer,
+		RegisteredAt:    time.Unix(1_700_000_000, 0).UTC(),
+		SecretExpiresAt: 1_700_000_000 + 3600,
+	}
+	data, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal record: %v", err)
+	}
+	if err := secrets.SetSecret(labelClient, data); err != nil {
+		t.Fatalf("store record: %v", err)
+	}
+
+	if _, found, err := client.RegisteredClient(); err != nil || !found {
+		t.Fatalf("unexpired RegisteredClient = found:%v err:%v, want present", found, err)
+	}
+
+	clock.set(time.Unix(1_700_000_000+3601, 0))
+	if _, found, err := client.RegisteredClient(); err != nil || found {
+		t.Fatalf("expired RegisteredClient = found:%v err:%v, want absent without an error", found, err)
+	}
+	if ok, err := client.HasCredentials(context.Background()); err != nil || ok {
+		t.Fatalf("HasCredentials with an expired secret = %v %v, want not ready", ok, err)
+	}
+
+	// The DCR response's expiration is decoded and persisted.
+	var calls int32
+	ts := registerServer(t, `{"client_id":"cid-2","client_secret":"shh","client_secret_expires_at":1800000000}`, http.StatusCreated, &calls)
+	fresh, err := client.Register(context.Background(), regMetadata(ts, testIssuer))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if fresh.SecretExpiresAt != 1800000000 {
+		t.Fatalf("persisted client_secret_expires_at = %d, want 1800000000", fresh.SecretExpiresAt)
+	}
+}
+
 func TestRegisterFailures(t *testing.T) {
 	cases := []struct {
 		name   string
