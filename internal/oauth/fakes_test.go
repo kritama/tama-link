@@ -330,25 +330,38 @@ func (f *fakeLease) CommitCredentialFence(_ context.Context, commit store.Creden
 	return true, nil
 }
 
-func (f *fakeLease) ClearCredentialFence(_ context.Context, leaseName, leaseOwner string, leaseGeneration int64) (bool, error) {
+func (f *fakeLease) ClearCredentialFence(_ context.Context, leaseName, leaseOwner string, leaseGeneration int64, retiredSlot string) (bool, error) {
 	if leaseName != refreshLeaseName {
 		return false, fmt.Errorf("unexpected lease name %q", leaseName)
 	}
 	if f.fence == nil {
 		// An absent fence is successfully cleared.
+		f.retire(retiredSlot)
 		return true, nil
 	}
 	if f.leaseGen() != leaseGeneration {
 		return false, nil
 	}
-	return f.fence.clearIfOwned(leaseOwner), nil
+	if !f.fence.clearIfOwned(leaseOwner) {
+		return false, nil
+	}
+	// The retired slot is atomically enqueued with the clear, mirroring
+	// the production transaction.
+	f.retire(retiredSlot)
+	return true, nil
 }
 
 // leaseGen reports the caller's captured ownership epoch. The fake's
 // per-process generation is always zero, matching the captured value.
 func (f *fakeLease) leaseGen() int64 { return 0 }
 
+// retire records one slot for retirement retry; the empty slot is a no-op,
+// matching the store, where a clear or commit with nothing to retire
+// enqueues nothing.
 func (f *fakeLease) retire(slot string) {
+	if slot == "" {
+		return
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.retired == nil {

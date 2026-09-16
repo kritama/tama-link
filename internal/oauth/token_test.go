@@ -303,6 +303,62 @@ func TestHasCredentialsSeesFencedCredentialOnly(t *testing.T) {
 	}
 }
 
+// TestHasCredentialsRequiresUsablePair pins that the readiness probe
+// agrees with refreshLocked: a credential refresh could not use — a
+// missing client record, or a record no longer bound to the active
+// profile issuer — reports not ready without an error, so submit keeps
+// the idempotency key free for the reauthorized retry instead of
+// accepting work that can only fail with a terminal
+// authentication_required.
+func TestHasCredentialsRequiresUsablePair(t *testing.T) {
+	_, client, secrets, _, _ := tokenFixture(t, "rt-1")
+	ctx := context.Background()
+	if ok, err := client.HasCredentials(ctx); err != nil || !ok {
+		t.Fatalf("complete pair = %v %v, want ready", ok, err)
+	}
+
+	// A partial legacy logout that removed only the client record leaves a
+	// refresh credential refreshLocked cannot use.
+	if err := secrets.DeleteSecret(labelClient); err != nil {
+		t.Fatalf("delete client record: %v", err)
+	}
+	if ok, err := client.HasCredentials(ctx); err != nil || ok {
+		t.Fatalf("missing client record = %v %v, want not ready without an error", ok, err)
+	}
+
+	// A profile issuer change leaves a stored record refreshLocked refuses
+	// to replay.
+	if err := secrets.SetSecret(labelClient, mustJSON(t, ClientRecord{
+		ClientID: "cid-1", AuthMethod: "none", Issuer: "https://foreign.example/oauth",
+	})); err != nil {
+		t.Fatalf("set client record: %v", err)
+	}
+	if ok, err := client.HasCredentials(ctx); err != nil || ok {
+		t.Fatalf("foreign client record = %v %v, want not ready without an error", ok, err)
+	}
+}
+
+// TestApplyTokensCapsHugeExpiry pins that a provider-reported expires_in
+// beyond the largest representable duration is capped before the duration
+// conversion instead of wrapping negative: the committed token stays valid
+// instead of being immediately expired and rotated on every request.
+func TestApplyTokensCapsHugeExpiry(t *testing.T) {
+	server, client, _, _, clock := tokenFixture(t, "rt-1")
+	server.tokenBody = `{"access_token":"at-huge","token_type":"Bearer","expires_in":9999999999999999,"refresh_token":"rt-huge"}`
+
+	tok, err := client.Token(context.Background())
+	if err != nil || tok != "at-huge" {
+		t.Fatalf("Token = %q err=%v", tok, err)
+	}
+	expiry, ok := client.Expiry()
+	if !ok {
+		t.Fatal("no expiry recorded")
+	}
+	if !expiry.After(clock.now) {
+		t.Fatalf("expiry %v is not in the future; the duration conversion wrapped", expiry)
+	}
+}
+
 func TestRefreshCancellation(t *testing.T) {
 	_, client, _, lease, _ := tokenFixture(t, "rt-1")
 	lease.holdOther()

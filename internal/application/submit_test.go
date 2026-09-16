@@ -382,6 +382,47 @@ func TestSubmitReplaysBeforeCredentialCheck(t *testing.T) {
 	}
 }
 
+// TestSubmitReplaysWhenToolReconciledAway pins recovery of a lost submit
+// response when profile reconciliation removed its tool after acceptance:
+// the retry reconciles the durable submission before any current catalog
+// state applies, and a genuinely new request for the removed tool still
+// fails closed.
+func TestSubmitReplaysWhenToolReconciledAway(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	cfg := fixtureConfigFor(t, f, limits.Default())
+	svc, _, _ := appFromConfig(t, cfg)
+
+	first := submitStatus(t, svc, "recon-1")
+
+	// Profile reconciliation removes the tool after acceptance.
+	cfg.Profile.Operations = nil
+
+	out, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "recon-1",
+		ClientContext:   &contract.ClientContext{ThreadID: "thread-1"},
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	})
+	if appErr != nil {
+		t.Fatalf("replay of a reconciled-away tool: %s", appErr.Message)
+	}
+	if out.SubmissionID != first {
+		t.Fatalf("replay returned %s, want %s", out.SubmissionID, first)
+	}
+
+	// A genuinely new request for the removed tool still fails closed.
+	if _, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "recon-2",
+		ClientContext:   &contract.ClientContext{ThreadID: "thread-1"},
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	}); appErr == nil || appErr.Code != contract.CodeOperationNotAllowed {
+		t.Fatalf("new submission = %+v, want operation_not_allowed", appErr)
+	}
+}
+
 // TestSubmitProbesCredentialsBeforeAccepting pins the authenticate-first
 // contract: a profile with no usable credential fails submit as
 // authentication_required before durable acceptance, and the idempotency

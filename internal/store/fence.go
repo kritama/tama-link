@@ -127,16 +127,22 @@ func (s *Store) CommitCredentialFence(ctx context.Context, commit CredentialFenc
 
 // ClearCredentialFence removes the credential fence row when, and only
 // when, leaseOwner still holds leaseName unexpired in the lease ownership
-// epoch leaseGeneration. Logout pairs it with deleting the committed slot
-// and the legacy labels; binding the clear to the epoch means a logout
-// whose lease was lost mid-cleanup can never wipe a newer fence installed
-// by the process that took over. An absent fence row is successfully
-// cleared — a repeated logout or a legacy-only profile has nothing to
-// clear — so only a lost epoch reports cleared=false.
+// epoch leaseGeneration, and when retiredSlot is non-empty, enqueues it
+// for retirement retry in the same transaction, so a pointer that is
+// cleared always leaves a durable reference to the slot it pointed at:
+// a crash or a later deletion failure can never strand the slot. Logout
+// passes an empty slot (it deletes the committed slot while the fence
+// still references it); the invalid-grant cleanup passes the fenced slot.
+// Binding the clear to the epoch means a cleanup whose lease was lost
+// mid-flight can never wipe a newer fence installed by the process that
+// took over. An absent fence row is successfully cleared — a repeated
+// logout or a legacy-only profile has nothing to clear — so only a lost
+// epoch reports cleared=false.
 func (s *Store) ClearCredentialFence(
 	ctx context.Context,
 	leaseName, leaseOwner string,
 	leaseGeneration int64,
+	retiredSlot string,
 ) (bool, error) {
 	if err := validateLease(leaseName, leaseOwner, time.Minute); err != nil {
 		return false, err
@@ -160,6 +166,14 @@ func (s *Store) ClearCredentialFence(
 	if _, err := tx.ExecContext(ctx,
 		"DELETE FROM credential_fence WHERE name = ?", credentialFenceName); err != nil {
 		return false, fmt.Errorf("%w: clear credential fence: %w", ErrStateUnavailable, err)
+	}
+	if retiredSlot != "" {
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO credential_fence (name, generation, slot) VALUES (?, 0, ?)
+			ON CONFLICT(name) DO UPDATE SET slot = excluded.slot`,
+			retiredCredentialSlotName(retiredSlot), retiredSlot); err != nil {
+			return false, fmt.Errorf("%w: record retired credential slot: %w", ErrStateUnavailable, err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return false, fmt.Errorf("%w: clear credential fence: %w", ErrStateUnavailable, err)

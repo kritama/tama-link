@@ -203,13 +203,16 @@ Requirements:
   correlation values bindings may map — never live profile state or bound
   upstream output, so a retry after a profile reconciliation reconciles to
   the original submission instead of reporting a conflict. Reconciliation
-  runs before argument validation and binding application, in addition to
-  before the readiness and strategy checks below. A replay appends no
+  runs before the catalog membership check, argument validation, and binding
+  application, in addition to before the readiness and strategy checks
+  below. A replay appends no
   progress events and re-offers nothing to the worker: an already advanced
   row keeps a monotonic event sequence.
-- Reconciliation of an existing idempotency record precedes the readiness and
-  strategy checks: recovery of an already accepted request must not depend on
-  current credentials or a later profile policy change. The authenticate-first
+- Reconciliation of an existing idempotency record precedes the catalog,
+  readiness, and strategy checks: recovery of an already accepted request
+  must not depend on the current catalog, credentials, or a later profile
+  policy change, so a retry after reconciliation removed its tool still
+  returns the original submission. The authenticate-first
   verification and the strategy gate below apply only to genuinely new
   acceptance.
 - Lowering a profile limit must not make an already accepted idempotent request
@@ -220,11 +223,13 @@ Requirements:
 - Success means Tama Link durably accepted responsibility for the operation in
   its local store, not that Tama accepted or completed it.
 - Tama Link verifies that the profile can authenticate before durable
-  acceptance, without a refresh or an upstream connection: a profile with no
-  usable credential fails `submit` as `authentication_required`, and the
-  idempotency key stays free, so the reauthorize-and-retry flow replays as a
-  genuinely new acceptance instead of returning a permanently failed
-  submission.
+  acceptance, without a refresh or an upstream connection. A usable
+  credential is the complete pair a refresh would find: a registered client
+  and a refresh credential, both bound to the active profile issuer with an
+  issuer-bound token endpoint. A profile without that complete pair fails
+  `submit` as `authentication_required`, and the idempotency key stays free,
+  so the reauthorize-and-retry flow replays as a genuinely new acceptance
+  instead of returning a permanently failed submission.
 - The response must not block until graph completion.
 
 For the initial App `message` projection, the profile may bind
@@ -910,13 +915,18 @@ rejected before any token request is sent.
 
 Tama Link coordinates refresh through a profile-scoped cross-process lease,
 re-reads the credential after acquiring it, and safely stores a replacement
-refresh token when the provider returns one. `invalid_grant` maps to
+refresh token when the provider returns one. The reported `expires_in` is
+bounded before its duration conversion, so a pathological value can never
+wrap negative and commit a credential that is already expired.
+`invalid_grant` maps to
 `authentication_required` without an automatic retry loop, and the durable
 refresh credential is invalidated under the held, renewed lease: the fence
-pointer is cleared — honoring a lost epoch and treating an absent fence as
-already cleared — before the fenced slot is deleted, so a slow backend
-deletion can never leave the fence pointing at a missing slot, and a slot
-whose deletion fails is recorded durably for cleanup retry. With the
+pointer and the fenced slot's retirement record are committed in one
+transaction — honoring a lost epoch and treating an absent fence as already
+cleared — before the slot is deleted, so a crash or a failed deletion can
+never leave the slot with no durable reference; a failed deletion keeps its
+record for the next refresh or logout, and the record is removed only after
+the deletion succeeds. With the
 credential invalidated, readiness rejects new
 work as `authentication_required` instead of accepting submissions that
 can only fail on the same known-invalid grant. An upstream

@@ -4,8 +4,15 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"time"
 )
+
+// maxTokenExpirySeconds is the largest provider-reported expires_in this
+// client converts to a duration: the seconds representable by time.Duration.
+// Larger values would wrap negative on the nanosecond multiplication and
+// commit a credential that is immediately expired.
+const maxTokenExpirySeconds = int64(math.MaxInt64) / int64(time.Second)
 
 // refreshCredential is the persisted refresh grant material. It names the
 // token endpoint and issuer it was issued from so refresh never needs
@@ -39,21 +46,39 @@ func (c *Client) loadRefresh() (*refreshCredential, bool, error) {
 
 // HasCredentials reports whether the profile can authenticate without
 // performing a refresh: a cached token that is not already inside its
-// refresh skew, or a live refresh credential behind the credential fence.
-// It is the submit path's cheap probe for deciding whether accepting work
-// the profile cannot authenticate would only burn the idempotency key on a
-// terminal authentication_required. No network I/O. The probe resolves the
-// same fenced slot Token loads, so a credential stored by any process —
-// legacy label or committed fence — counts.
+// refresh skew, or the complete usable client/refresh pair a refresh
+// would find. It is the submit path's cheap probe for deciding whether
+// accepting work the profile cannot authenticate would only burn the
+// idempotency key on a terminal authentication_required. No network I/O.
+// The probe resolves the same fenced slot Token loads, so a credential
+// stored by any process — legacy label or committed fence — counts. It
+// applies the same issuer and endpoint bindings refreshLocked enforces:
+// a credential refresh could not use — a missing client record, or a
+// record or credential no longer bound to the active profile issuer or
+// its token endpoint — is not ready, so submit keeps the idempotency key
+// free for the reauthorized retry instead of accepting a doomed row.
 func (c *Client) HasCredentials(ctx context.Context) (bool, error) {
 	if _, ok := c.validToken(); ok {
 		return true, nil
+	}
+	rec, found, err := c.RegisteredClient()
+	if err != nil {
+		return false, err
 	}
 	fenced, err := c.loadFenced(ctx)
 	if err != nil {
 		return false, err
 	}
-	return fenced != nil, nil
+	if !found || fenced == nil {
+		return false, nil
+	}
+	if rec.Issuer != c.issuer || fenced.credential.Issuer != c.issuer {
+		return false, nil
+	}
+	if err := checkIssuerBoundEndpoint(fenced.credential.TokenEndpoint, fenced.credential.Issuer); err != nil {
+		return false, nil
+	}
+	return true, nil
 }
 
 // applyTokens records a successful token exchange: the in-memory access
@@ -74,14 +99,21 @@ func (c *Client) applyTokens(ctx context.Context, fenced *fencedCredential, tok 
 	if expiresIn <= 0 {
 		expiresIn = 300
 	}
+	// A provider-reported lifetime beyond the largest value time.Duration
+	// can represent would wrap negative on the nanosecond conversion and
+	// commit a credential already expired; cap it before converting.
+	if expiresIn > maxTokenExpirySeconds {
+		expiresIn = maxTokenExpirySeconds
+	}
+	lifetime := time.Duration(expiresIn) * time.Second
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.token = tok.AccessToken
-	c.tokenExpiry = c.clock().Add(time.Duration(expiresIn) * time.Second)
+	c.tokenExpiry = c.clock().Add(lifetime)
 	// The skew is capped at a quarter of the issued lifetime so a short
 	// token (for example 60 s) keeps a positive validity window instead
 	// of refreshing on every request and rotating the grant away.
-	if lifetime := time.Duration(expiresIn) * time.Second; refreshSkew > lifetime/4 {
+	if refreshSkew > lifetime/4 {
 		c.skew = lifetime / 4
 	} else {
 		c.skew = refreshSkew
@@ -188,7 +220,7 @@ func (c *Client) Logout(ctx context.Context) error {
 			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
 	}
-	cleared, err := c.lease.ClearCredentialFence(execCtx, refreshLeaseName, c.owner, leaseGeneration)
+	cleared, err := c.lease.ClearCredentialFence(execCtx, refreshLeaseName, c.owner, leaseGeneration, "")
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}

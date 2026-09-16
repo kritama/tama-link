@@ -70,11 +70,14 @@ type Leaser interface {
 	CommitCredentialFence(ctx context.Context, commit store.CredentialFenceCommit) (bool, error)
 	// ClearCredentialFence removes the credential fence when, and only
 	// when, leaseOwner still holds leaseName unexpired in the lease
-	// ownership epoch leaseGeneration. An absent fence is successfully
-	// cleared. It reports cleared=false for a lost epoch, so a logout
-	// whose lease was lost mid-cleanup can never wipe a newer fence
-	// installed by the process that took over.
-	ClearCredentialFence(ctx context.Context, leaseName, leaseOwner string, leaseGeneration int64) (bool, error)
+	// ownership epoch leaseGeneration, and when retiredSlot is non-empty,
+	// enqueues it for retirement retry in the same transaction, so a
+	// pointer that is cleared always leaves a durable reference to the
+	// slot it pointed at. An absent fence is successfully cleared. It
+	// reports cleared=false for a lost epoch, so a logout whose lease was
+	// lost mid-cleanup can never wipe a newer fence installed by the
+	// process that took over.
+	ClearCredentialFence(ctx context.Context, leaseName, leaseOwner string, leaseGeneration int64, retiredSlot string) (bool, error)
 	// RetiredCredentialSlots lists the credential slots recorded for
 	// retirement retry.
 	RetiredCredentialSlots(ctx context.Context) ([]string, error)

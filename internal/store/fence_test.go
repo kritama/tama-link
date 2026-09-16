@@ -158,13 +158,13 @@ func TestClearCredentialFence(t *testing.T) {
 	if ok, err := s.ClaimLease(ctx, "oauth/refresh", "owner-a", time.Minute); err != nil || !ok {
 		t.Fatalf("claim = %v %v", ok, err)
 	}
-	if cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1); err != nil || !cleared {
+	if cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1, ""); err != nil || !cleared {
 		t.Fatalf("absent-fence clear = %v %v, want cleared", cleared, err)
 	}
 	if ok, err := fenceCommit(ctx, s, 1, "slot-1", "", "owner-a", 1); err != nil || !ok {
 		t.Fatalf("commit = %v %v", ok, err)
 	}
-	if cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1); err != nil || !cleared {
+	if cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1, ""); err != nil || !cleared {
 		t.Fatalf("ClearCredentialFence = %v %v, want cleared", cleared, err)
 	}
 	if _, _, found, err := s.ReadCredentialFence(ctx); err != nil || found {
@@ -186,11 +186,60 @@ func TestClearCredentialFence(t *testing.T) {
 	if ok, err := s.ClaimLease(ctx, "oauth/refresh", "owner-b", time.Minute); err != nil || !ok {
 		t.Fatalf("owner-b claim = %v %v", ok, err)
 	}
-	cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1)
+	cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1, "")
 	if err != nil || cleared {
 		t.Fatalf("stale-epoch clear = %v %v, want refused", cleared, err)
 	}
 	if _, slot, found, err := s.ReadCredentialFence(ctx); err != nil || !found || slot != "slot-2" {
 		t.Fatalf("fence after refused clear = %s found:%v err:%v", slot, found, err)
+	}
+	pending, err := s.RetiredCredentialSlots(ctx)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("retirement backlog after refused clear = %v err=%v, want empty", pending, err)
+	}
+}
+
+// TestClearCredentialFenceRetiresSlotAtomically pins that the fence clear
+// and the retired-slot enqueue are one transaction: a cleared pointer
+// always leaves a durable reference to the slot it pointed at, so a crash
+// or a later deletion failure can never strand the slot, and a refused
+// clear enqueues nothing.
+func TestClearCredentialFenceRetiresSlotAtomically(t *testing.T) {
+	keys, clk := newMemKeys(), newClock()
+	s, _ := openTestStore(t, keys, clk)
+	ctx := context.Background()
+
+	if ok, err := s.ClaimLease(ctx, "oauth/refresh", "owner-a", time.Minute); err != nil || !ok {
+		t.Fatalf("claim = %v %v", ok, err)
+	}
+	if ok, err := fenceCommit(ctx, s, 1, "slot-1", "", "owner-a", 1); err != nil || !ok {
+		t.Fatalf("commit = %v %v", ok, err)
+	}
+	if cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1, "slot-1"); err != nil || !cleared {
+		t.Fatalf("clear with retired slot = %v %v, want cleared", cleared, err)
+	}
+	if _, _, found, err := s.ReadCredentialFence(ctx); err != nil || found {
+		t.Fatalf("fence after clear = found:%v err:%v, want none", found, err)
+	}
+	pending, err := s.RetiredCredentialSlots(ctx)
+	if err != nil || len(pending) != 1 || pending[0] != "slot-1" {
+		t.Fatalf("retirement backlog = %v err=%v, want [slot-1]", pending, err)
+	}
+
+	// A refused (stale-epoch) clear with a slot enqueues nothing: the
+	// fence it would have pointed at is still live under the new owner.
+	clk.Advance(2 * time.Minute)
+	if ok, err := s.ClaimLease(ctx, "oauth/refresh", "owner-b", time.Minute); err != nil || !ok {
+		t.Fatalf("owner-b claim = %v %v", ok, err)
+	}
+	if ok, err := fenceCommit(ctx, s, 1, "slot-2", "", "owner-b", 2); err != nil || !ok {
+		t.Fatalf("owner-b commit = %v %v", ok, err)
+	}
+	if cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1, "slot-2"); err != nil || cleared {
+		t.Fatalf("stale-epoch clear with retired slot = %v %v, want refused", cleared, err)
+	}
+	pending, err = s.RetiredCredentialSlots(ctx)
+	if err != nil || len(pending) != 1 || pending[0] != "slot-1" {
+		t.Fatalf("retirement backlog after refused clear = %v err=%v, want [slot-1] unchanged", pending, err)
 	}
 }

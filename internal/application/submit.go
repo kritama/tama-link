@@ -18,11 +18,6 @@ import (
 // its execution path. Success means Tama Link durably accepted
 // responsibility; it does not mean Tama accepted or completed the work.
 func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract.SubmitOutput, *contract.Error) {
-	d, ok := s.profile.Catalog().Find(in.Tool)
-	if !ok {
-		return contract.SubmitOutput{}, failed(contract.CodeOperationNotAllowed,
-			"Operation %q is not approved by the selected profile.", in.Tool)
-	}
 	clientRequestID := in.ClientRequestID
 	if clientRequestID == "" {
 		// The public contract makes client_request_id optional: when the
@@ -39,20 +34,23 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 	}
 
 	// Reconcile an existing idempotency record from the client-visible
-	// request BEFORE any current-profile state applies: schema validation,
-	// bindings, credential readiness, and the strategy gate are acceptance
-	// checks for genuinely new work and must not block recovery of an
-	// already accepted request, even when the profile was reconciled or
-	// credentials were removed since acceptance. The lookup is read-only,
-	// so a miss leaves the key free for a genuinely new acceptance below.
-	// A generated key is fresh on every call and skips the lookup.
+	// request BEFORE any current-profile state applies: catalog
+	// membership, schema validation, bindings, credential readiness, and
+	// the strategy gate are acceptance checks for genuinely new work and
+	// must not block recovery of an already accepted request, even when
+	// the profile was reconciled away from its tool or credentials were
+	// removed since acceptance. A retry that reconciles accepts no new
+	// work, so current catalog state is irrelevant to it. The lookup is
+	// read-only, so a miss leaves the key free for a genuinely new
+	// acceptance below. A generated key is fresh on every call and skips
+	// the lookup.
 	identity, err := requestIdentity(in)
 	if err != nil {
 		return contract.SubmitOutput{}, failed(contract.CodeInvalidRequest,
 			"Arguments must be a valid JSON document.")
 	}
 	if clientRequestID != "" {
-		sub, found, err := s.store.ReconcileIdempotentSubmission(ctx, clientRequestID, d.Name, identity)
+		sub, found, err := s.store.ReconcileIdempotentSubmission(ctx, clientRequestID, in.Tool, identity)
 		if err != nil {
 			if errors.Is(err, store.ErrIdempotencyConflict) {
 				return contract.SubmitOutput{}, failed(contract.CodeIdempotencyConflict,
@@ -63,6 +61,12 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 		if found {
 			return submitOutput(sub), nil
 		}
+	}
+
+	d, ok := s.profile.Catalog().Find(in.Tool)
+	if !ok {
+		return contract.SubmitOutput{}, failed(contract.CodeOperationNotAllowed,
+			"Operation %q is not approved by the selected profile.", in.Tool)
 	}
 
 	clientSchema := d.ClientSchema
