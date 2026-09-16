@@ -1007,8 +1007,13 @@ started from the previous record revalidates the stored registration before
 consuming the single-use authorization code and again before committing its
 grant, so it either commits before the replacement — its grant is then
 retired as orphaned — or aborts, and the new client is never paired with a
-grant issued under the old one. The normal first-login path, which stores no
-credential yet, is unaffected.
+grant issued under the old one. The registration mutation also holds the
+local lock that orders completions, refreshes, and logouts (a same-owner
+claim never advances the epoch, so the lease alone cannot order in-process
+mutations), renews the epoch across the whole mutation, and rejects the
+final record write if the epoch is lost, so a stale record can never be
+written over a registration or grant another process committed. The
+normal first-login path, which stores no credential yet, is unaffected.
 The client auth method is selected from the set the authorization server
 advertises — the field is a set of supported methods, not a single choice:
 the first method this client supports, in the server's advertised order,

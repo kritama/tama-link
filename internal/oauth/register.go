@@ -160,17 +160,23 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	if recordMissingSecret(rec) {
 		return nil, fmt.Errorf("registration returned no client secret for %s", rec.AuthMethod)
 	}
-	// The replacement is one credential-mutation protocol under the
-	// refresh lease: a replacement registration issues a new client ID, so
-	// any refresh credential still stored belongs to the previous client
-	// and can never refresh under the new one. Retiring it and committing
-	// the new record under the same claimed epoch orders the replacement
-	// against every concurrent completion and refresh: a login started
-	// from the previous record either commits its grant before the
-	// replacement (the grant is then retired as orphaned) or aborts
-	// against the superseded record — never pairs the new client with a
-	// grant issued under the old one. The normal first-login path stores
-	// no credential yet and the retirement is a no-op.
+	// The replacement is one credential-mutation protocol. The local
+	// lock orders it against this process's own completion, refresh, and
+	// logout — a same-owner claim succeeds without advancing the epoch,
+	// so the lease alone cannot order them — and the cross-process lease
+	// orders it against every other process. A replacement registration
+	// issues a new client ID, so any refresh credential still stored
+	// belongs to the previous client and can never refresh under the new
+	// one: retiring it and committing the new record under the same
+	// claimed epoch means a login started from the previous record either
+	// commits its grant before the replacement (the grant is then retired
+	// as orphaned) or aborts against the superseded record — never pairs
+	// the new client with a grant issued under the old one. The normal
+	// first-login path stores no credential yet and the retirement is a
+	// no-op.
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
 	leaseGeneration, claimed, err := c.claimRefreshLease(ctx)
 	if err != nil {
 		return nil, err
@@ -179,12 +185,35 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 		return nil, fmt.Errorf("%w: the credential is being mutated; retry registration", ErrLeaseContention)
 	}
 	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
-	if existing, err := c.loadFenced(ctx); err != nil {
+
+	// Renew ownership across the whole mutation: the final record write
+	// takes no context, so a secure backend that blocks beyond the lease
+	// TTL would hand the epoch to another process, whose registration
+	// and grant this stale record could then overwrite. The renewal loop
+	// is what keeps the epoch alive through that write.
+	execCtx, cancelExec := context.WithCancel(ctx)
+	renewed := make(chan struct{})
+	go c.renewLease(execCtx, cancelExec, renewed)
+	defer func() {
+		cancelExec()
+		<-renewed
+	}()
+
+	if existing, err := c.loadFenced(execCtx); err != nil {
 		return nil, err
 	} else if existing != nil {
-		if err := c.invalidateCredential(ctx, leaseGeneration); err != nil {
+		if err := c.invalidateCredential(execCtx, leaseGeneration); err != nil {
 			return nil, err
 		}
+	}
+	// Reject a lost epoch before the final write: if the lease is no
+	// longer held at this generation, another process has already
+	// registered and may have committed a matching grant, and this
+	// stale record would pair it with the wrong client.
+	if generation, ok, err := c.lease.LeaseGeneration(execCtx, refreshLeaseName, c.owner); err != nil {
+		return nil, err
+	} else if !ok || generation != leaseGeneration {
+		return nil, fmt.Errorf("%w: the refresh lease was lost before storing the client record", ErrLeaseContention)
 	}
 	if err := c.storeClient(rec); err != nil {
 		return nil, err

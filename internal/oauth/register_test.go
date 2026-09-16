@@ -158,6 +158,135 @@ func TestRegisteredClientTreatsLegacySecretlessRecordAsAbsent(t *testing.T) {
 	}
 }
 
+// TestRegisterRejectsLostLeaseBeforeStoringRecord pins the epoch gate
+// on the final write: if the refresh lease is taken over after the claim
+// but before the client record is stored, another process has already
+// registered and may have committed a matching grant. The stale record
+// must not be written over it.
+func TestRegisterRejectsLostLeaseBeforeStoringRecord(t *testing.T) {
+	secrets := newFakeSecrets()
+	lease := newFakeLease()
+	// A foreign process takes over the lease immediately after this
+	// claim wins.
+	lease.onClaim = func() { lease.holdOther() }
+	client := newStaticClient(t, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
+
+	var calls int32
+	ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
+	if _, err := client.Register(context.Background(), regMetadata(ts, testIssuer)); err == nil {
+		t.Fatal("Register succeeded after losing the refresh lease")
+	}
+	if _, found, _ := secrets.GetSecret(labelClient); found {
+		t.Fatal("the stale client record was stored over the winning process's")
+	}
+}
+
+// TestRegisterSerializesWithCompletion pins the local lock on the
+// registration mutation: a same-owner claim succeeds without advancing
+// the epoch, so without refreshMu the lease alone cannot order Register
+// against this process's own completion, and the second registration
+// could store its record before the first client's completion commits
+// its grant — pairing the new client with the old one's grant.
+func TestRegisterSerializesWithCompletion(t *testing.T) {
+	server := (&metadataServer{}).start(t)
+	server.tokenDelay = 300 * time.Millisecond
+	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
+	secrets := newFakeSecrets()
+	lease := newFakeLease()
+	client := clientForServer(t, server, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
+
+	// B: a first-time registration whose DCR is slow, started while no
+	// record is stored yet, so its reuse check passes and its mutation
+	// lands while A is exchanging its code.
+	var bCalls int32
+	regB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&bCalls, 1)
+		time.Sleep(100 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write([]byte(`{"client_id":"cid-b","client_secret":"shb"}`))
+	}))
+	t.Cleanup(regB.Close)
+
+	regDone := make(chan *ClientRecord, 1)
+	go func() {
+		fresh, regErr := client.Register(context.Background(), regMetadata(regB, client.issuer))
+		if regErr != nil {
+			t.Errorf("Register (B): %v", regErr)
+			regDone <- nil
+			return
+		}
+		regDone <- fresh
+	}()
+	deadline := time.Now().Add(5 * time.Second)
+	for atomic.LoadInt32(&bCalls) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("B's registration never reached the endpoint")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// A: the other first-time registration, which wins the record
+	// store before B's slow DCR returns.
+	var aCalls int32
+	regA := registerServer(t, `{"client_id":"cid-a","client_secret":"sha"}`, http.StatusCreated, &aCalls)
+	recA, err := client.Register(context.Background(), regMetadata(regA, client.issuer))
+	if err != nil {
+		t.Fatalf("Register (A): %v", err)
+	}
+	if recA.ClientID != "cid-a" {
+		t.Fatalf("Register (A) = %+v, want cid-a", recA)
+	}
+	md := serverMetadata(server.ts.URL)
+	redirect := "http://127.0.0.1:51234/callback"
+	authReq, err := client.NewAuthorizationRequest(md, recA, redirect)
+	if err != nil {
+		t.Fatalf("NewAuthorizationRequest: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- client.CompleteAuthorization(context.Background(), md, recA, authReq, "code-1", redirect)
+	}()
+	// Wait until the exchange is in flight at the token endpoint: the
+	// completion holds the local lock from here until it commits.
+	for {
+		server.tokenReqMu.Lock()
+		inFlight := server.tokenConcur > 0
+		server.tokenReqMu.Unlock()
+		if inFlight {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the authorization exchange never reached the token endpoint")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// B's DCR has returned and its mutation section is next: it must
+	// wait behind A's completion, so the stored record is still A's
+	// while the exchange is in flight.
+	time.Sleep(150 * time.Millisecond)
+	if stored, found, _ := client.RegisteredClient(); !found || stored.ClientID != "cid-a" {
+		t.Fatalf("stored record while A exchanges = %+v found:%v, want cid-a: B stored before A's completion finished", stored, found)
+	}
+	if err := <-done; err != nil {
+		t.Fatalf("CompleteAuthorization: %v", err)
+	}
+	if recB := <-regDone; recB == nil || recB.ClientID != "cid-b" {
+		t.Fatalf("Register (B) = %+v, want the fresh record", recB)
+	}
+
+	// B observed the committed grant and retired it as orphaned: the
+	// new client is not paired with a grant issued under the old one.
+	if _, found, _ := secrets.GetSecret(labelRefresh); found {
+		t.Fatal("A's grant survived B's re-registration")
+	}
+	if stored, found, _ := client.RegisteredClient(); !found || stored.ClientID != "cid-b" {
+		t.Fatalf("stored record = %+v found:%v, want B's registration", stored, found)
+	}
+}
+
 // TestRegisterRetiresOrphanedCredential pins the repair path: a
 // replacement registration issues a new client ID, so a refresh
 // credential still stored from the previous client can never refresh

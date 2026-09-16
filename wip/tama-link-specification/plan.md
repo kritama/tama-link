@@ -178,7 +178,11 @@ committed under one refresh-lease epoch, and a completion that started from
 the previous record re-reads the stored record before the exchange and again
 before the fenced commit: it either commits before the replacement (the
 grant is then retired) or aborts, never pairing the new client with a grant
-issued under the old one.
+issued under the old one. The registration mutation holds the local lock
+that orders completions, refreshes, and logouts — a same-owner lease claim
+never advances the epoch, so the lease alone cannot order in-process
+mutations — renews the epoch across the whole mutation, and rejects the
+final record write if the epoch is lost.
 
 ### D6. Terminal results are captured immediately and owned locally
 
