@@ -288,7 +288,12 @@ func (f *fakeLease) ClaimLease(_ context.Context, name, owner string, ttl time.D
 	return true, nil
 }
 
-func (f *fakeLease) LeaseGeneration(_ context.Context, name, owner string) (int64, bool, error) {
+func (f *fakeLease) LeaseGeneration(ctx context.Context, name, owner string) (int64, bool, error) {
+	// The production SQLite read observes the context; a canceled caller
+	// surfaces as an error rather than a lookup result.
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if name != refreshLeaseName {

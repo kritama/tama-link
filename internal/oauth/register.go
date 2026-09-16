@@ -226,8 +226,11 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	// registration. The credential backend cannot fence the write
 	// itself, so the commit is checked optimistically: the stale record
 	// is removed again, so the replacement can never be read as a ready
-	// pair, and the winner's flow re-registers on its next login.
-	if generation, ok, err := c.lease.LeaseGeneration(ctx, refreshLeaseName, c.owner); err != nil {
+	// pair, and the winner's flow re-registers on its next login. The
+	// check runs on a context that outlives the caller: a caller
+	// cancellation during the write must not short-circuit it, or the
+	// lost-ownership cleanup would be skipped.
+	if generation, ok, err := c.lease.LeaseGeneration(context.WithoutCancel(ctx), refreshLeaseName, c.owner); err != nil {
 		return nil, err
 	} else if !ok || generation != leaseGeneration {
 		lost := fmt.Errorf("%w: the refresh lease was lost during the client record write", ErrLeaseContention)

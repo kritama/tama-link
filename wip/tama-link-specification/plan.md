@@ -183,9 +183,11 @@ that orders completions, refreshes, and logouts — a same-owner lease claim
 never advances the epoch, so the lease alone cannot order in-process
 mutations — renews the epoch across the whole mutation, outliving caller
 cancellation because the final record write takes no context and cannot
-be aborted, and checks the epoch on both sides of that write: before it,
-and after it, where a lost epoch removes the stale record the write may
-have stored, so the replacement can never be read as a ready pair.
+be aborted, and checks the epoch on both sides of that write: before it, and after
+it on a context that outlives the caller's, where a lost epoch removes
+the stale record the write may have stored, so a cancellation mid-write
+cannot skip the cleanup and the replacement can never be read as a ready
+pair.
 
 ### D6. Terminal results are captured immediately and owned locally
 

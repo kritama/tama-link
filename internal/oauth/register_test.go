@@ -222,6 +222,39 @@ func TestRegisterRemovesStaleRecordAfterLostEpochDuringWrite(t *testing.T) {
 	}
 }
 
+// TestRegisterRemovesStaleRecordAfterCanceledCallerAndTakeover pins the
+// cancellation-independent post-write check: the caller cancels and a
+// foreign process takes over the lease while the record write is in
+// flight. The production epoch read observes the caller context, so a
+// check on the caller context would return context.Canceled and skip the
+// stale-record cleanup; the check must run on the cancellation-
+// independent context so the cleanup still happens.
+func TestRegisterRemovesStaleRecordAfterCanceledCallerAndTakeover(t *testing.T) {
+	secrets := newFakeSecrets()
+	secrets.setDelay = 50 * time.Millisecond
+	lease := newFakeLease()
+	client := newStaticClient(t, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
+
+	var calls int32
+	ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
+	ctx, cancel := context.WithCancel(context.Background())
+	// Both the caller cancellation and the foreign takeover land while
+	// the record write is in flight.
+	secrets.setHook = func(label string) {
+		if label == labelClient {
+			cancel()
+			lease.holdOther()
+		}
+	}
+
+	if _, err := client.Register(ctx, regMetadata(ts, testIssuer)); !errors.Is(err, ErrLeaseContention) {
+		t.Fatalf("Register = %v, want ErrLeaseContention for the lost epoch", err)
+	}
+	if _, found, _ := secrets.GetSecret(labelClient); found {
+		t.Fatal("the stale record survived the canceled caller and the lost epoch")
+	}
+}
+
 // TestRegisterRejectsLostLeaseBeforeStoringRecord pins the epoch gate
 // on the final write: if the refresh lease is taken over after the claim
 // but before the client record is stored, another process has already

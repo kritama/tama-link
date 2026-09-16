@@ -1018,7 +1018,9 @@ optimistically on both sides of that write: the epoch is verified before
 it, and if it is lost while the uninterruptible write is in flight, the
 stale record the write may have stored over the winner's registration is
 removed again — the credential backend cannot fence the write itself —
-so a stale registration can never be read as a ready pair and the
+and the post-write check itself runs on a context that outlives the
+caller's, so a cancellation mid-write cannot skip the lost-ownership
+cleanup: a stale registration can never be read as a ready pair, and the
 winner's flow re-registers on its next login. The normal
 first-login path, which stores no credential yet, is unaffected.
 The client auth method is selected from the set the authorization server
