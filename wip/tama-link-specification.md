@@ -222,7 +222,11 @@ Requirements:
   readiness, and strategy checks: recovery of an already accepted request
   must not depend on the current catalog, credentials, or a later profile
   policy change, so a retry after reconciliation removed its tool still
-  returns the original submission. The authenticate-first
+  returns the original submission. The client-facing submit surface must
+  not restrict the tool name to the current catalog for this: an exact
+  retry whose tool the profile later removed still reaches the
+  application, and the application enforces the catalog only for
+  genuinely new work. The authenticate-first
   verification and the strategy gate below apply only to genuinely new
   acceptance.
 - Lowering a profile limit must not make an already accepted idempotent request

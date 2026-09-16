@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"sort"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -55,8 +54,8 @@ func New(p *profile.Profile, buildVersion string, app App) *mcp.Server {
 	instance.AddTool(&mcp.Tool{
 		Name:        contract.ToolSubmit,
 		Description: composeSubmitDescription(ops),
-		InputSchema: submitInputSchema(ops.Names()),
-	}, submitHandler(ops.Names(), submitOp))
+		InputSchema: submitInputSchema(),
+	}, submitHandler(submitOp))
 
 	instance.AddTool(&mcp.Tool{
 		Name:        contract.ToolAwait,
@@ -135,18 +134,19 @@ func composeSubmitDescription(ops catalog.Catalog) string {
 	return submitBaseDescription + "\n\n" + signatures
 }
 
-// submitInputSchema constrains tool to the approved operation names.
-func submitInputSchema(names []string) map[string]any {
-	sorted := append([]string(nil), names...)
-	sort.Strings(sorted)
-
+// submitInputSchema describes the stable submit fields. The tool name is
+// deliberately not constrained to the current catalog: an exact retry of
+// an accepted request must reach the application, where idempotency
+// reconciliation runs before the catalog check, and the catalog check
+// enforces the profile only for genuinely new work. The approved
+// operations stay advertised in the tool description.
+func submitInputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"tool": map[string]any{
 				"type":        "string",
-				"enum":        sorted,
-				"description": "upstream Tama tool name allowed by the selected profile",
+				"description": "upstream Tama tool name submitted against the selected profile",
 			},
 			"arguments": map[string]any{
 				"type":        "object",

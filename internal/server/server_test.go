@@ -87,8 +87,8 @@ func TestSubmitPreservesJSONNumbersAcrossMCPBoundary(t *testing.T) {
 	}
 	server := mcp.NewServer(&mcp.Implementation{Name: "test", Version: "test"}, nil)
 	server.AddTool(
-		&mcp.Tool{Name: contract.ToolSubmit, InputSchema: submitInputSchema([]string{"message"})},
-		submitHandler([]string{"message"}, operation),
+		&mcp.Tool{Name: contract.ToolSubmit, InputSchema: submitInputSchema()},
+		submitHandler(operation),
 	)
 	client := connectServer(t, server)
 
@@ -154,18 +154,49 @@ func TestServerProjectsProfileCatalog(t *testing.T) {
 	}
 	properties, _ := schema["properties"].(map[string]any)
 	toolProp, _ := properties["tool"].(map[string]any)
-	enum, _ := toolProp["enum"].([]any)
-	names := make([]string, 0, len(enum))
-	for _, item := range enum {
-		names = append(names, item.(string))
+	if toolProp == nil || toolProp["type"] != "string" {
+		t.Fatalf("submit input schema missing the tool property: %v", properties)
 	}
-	if !slices.Equal(names, []string{"message"}) {
-		t.Fatalf("tool enum = %v, want [message]", names)
+	if _, hasEnum := toolProp["enum"]; hasEnum {
+		t.Fatalf("submit input schema constrains tool with an enum; retries of reconciled-away tools must reach the application: %v", toolProp)
 	}
 
 	if !strings.Contains(submitTool.Description, "message") ||
 		!strings.Contains(submitTool.Description, "Send one message to Tama.") {
 		t.Fatalf("submit description missing operation signature: %q", submitTool.Description)
+	}
+}
+
+// TestServerRoutesRemovedToolRetriesToApp pins the transport's role in
+// idempotency recovery: the profile catalog constrains genuinely new work
+// at the application, not the transport, so an exact retry whose tool the
+// profile later removed still reaches the application, where idempotency
+// reconciliation recovers the durable submission before the catalog check
+// can fail it.
+func TestServerRoutesRemovedToolRetriesToApp(t *testing.T) {
+	t.Parallel()
+
+	app := &fakeApp{}
+	clientSession := connectServer(t, New(testProfile(), "test", app))
+
+	// "removed" is not in the pinned catalog. The transport must not
+	// reject it: the retry carries an accepted request's idempotency key.
+	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{
+		Name: contract.ToolSubmit,
+		Arguments: map[string]any{
+			"tool":              "removed",
+			"client_request_id": "retry-1",
+			"arguments":         map[string]any{},
+		},
+	})
+	if err != nil {
+		t.Fatalf("CallTool for a removed-tool retry: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("transport rejected the removed-tool retry: %v", result.StructuredContent)
+	}
+	if app.lastTool != "removed" {
+		t.Fatalf("application saw tool %q, want the removed tool routed to it", app.lastTool)
 	}
 }
 
@@ -213,9 +244,13 @@ func decodeStructured(t *testing.T, content any, out any) {
 type fakeApp struct {
 	submitErr *contract.Error
 	awaitErr  *contract.Error
+	// lastTool records the tool of the last submitted request, so a test
+	// can prove which requests the transport routed to the application.
+	lastTool string
 }
 
 func (f *fakeApp) Submit(_ context.Context, in contract.SubmitInput) (contract.SubmitOutput, *contract.Error) {
+	f.lastTool = in.Tool
 	if f.submitErr != nil {
 		return contract.SubmitOutput{}, f.submitErr
 	}

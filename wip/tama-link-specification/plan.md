@@ -43,7 +43,8 @@ Phase 1 is complete. The durable-domain implementation now includes:
   namespaces, effective-limit resolution, and canonical whole-profile digest
   enforcement whenever a profile raises a default limit;
 - `internal/server`: profile-driven MCP server wiring the catalog projection,
-  instructions, and the bounded submit `tool` enum;
+  instructions, and the unconstrained submit `tool` field (retries of
+  reconciled-away tools must reach the application);
 - `internal/store`: encrypted SQLite state (D2/D3/D4) with complete-input
   idempotency, compare-and-set transitions, bounded progress, atomic terminal
   capture, lease-guarded worker writes, payload-free D12 GC, and exact schema
@@ -213,9 +214,12 @@ expected strategy. The adapter verifies the Tasks capability through
 `server/discover` and enforces the `tools/call` `resultType`; it must not
 interpret absent legacy task metadata as `forbidden`.
 
-The legacy downstream `submit` schema advertises the allowed operation names as
-an enum and emits bounded deterministic operation signatures in its
-description. Runtime validation against the selected client-visible and
+The legacy downstream `submit` schema does not constrain the tool name to
+the current catalog: an exact retry whose tool the profile later removed
+must reach the application, where idempotency reconciliation precedes the
+catalog check that enforces the profile for genuinely new work. Bounded
+deterministic operation signatures in the description advertise the approved
+operations. Runtime validation against the selected client-visible and
 upstream schemas is authoritative. Rich tagged-union schema projection is a
 later negotiated optimization, not a correctness dependency.
 

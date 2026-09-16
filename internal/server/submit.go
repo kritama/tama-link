@@ -16,22 +16,16 @@ type submitOperation func(
 	contract.SubmitInput,
 ) (*mcp.CallToolResult, any, error)
 
-func submitHandler(allowed []string, operation submitOperation) mcp.ToolHandler {
-	allowedTools := make(map[string]bool, len(allowed))
-	for _, name := range allowed {
-		allowedTools[name] = true
-	}
-
+// submitHandler decodes and translates the request and routes it to the
+// application. The handler deliberately does not enforce the profile
+// catalog: an exact retry of an accepted request must reach the
+// application, where idempotency reconciliation runs before the catalog
+// check, and the application enforces the catalog for genuinely new work.
+func submitHandler(operation submitOperation) mcp.ToolHandler {
 	return func(ctx context.Context, request *mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		input, err := contract.DecodeSubmitInput(request.Params.Arguments)
 		if err != nil {
 			return contractErrorResult(contract.CodeInvalidRequest, err.Error())
-		}
-		if !allowedTools[input.Tool] {
-			return contractErrorResult(
-				contract.CodeOperationNotAllowed,
-				fmt.Sprintf("operation %q is not allowed by the selected profile", input.Tool),
-			)
 		}
 
 		result, output, err := operation(ctx, request, input)
