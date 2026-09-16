@@ -130,7 +130,7 @@ func validateAS(as *AuthorizationServer, issuer string) error {
 	if err := checkEndpoint(as.AuthorizationEndpoint); err != nil {
 		return fmt.Errorf("authorization endpoint: %w", err)
 	}
-	if err := checkEndpoint(as.TokenEndpoint); err != nil {
+	if err := checkIssuerBoundEndpoint(as.TokenEndpoint, issuer); err != nil {
 		return fmt.Errorf("token endpoint: %w", err)
 	}
 	if as.RegistrationEndpoint == "" {

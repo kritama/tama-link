@@ -20,13 +20,14 @@ const (
 	// refreshLeaseName is the profile-scoped cross-process refresh lease.
 	refreshLeaseName = "oauth/refresh"
 
-	// refreshLeaseTTL bounds one refresh transaction.
-	refreshLeaseTTL = 30 * time.Second
-
 	// refreshSkew refreshes a little before the recorded expiry so a
 	// request is never issued with an expired token.
 	refreshSkew = 60 * time.Second
 )
+
+// refreshLeaseTTL bounds one refresh transaction; the lease is renewed on
+// a third of it while the token exchange and the credential write run.
+var refreshLeaseTTL = 30 * time.Second
 
 // SecretStore persists profile-scoped OAuth secrets in the secure credential
 // backend. Labels are opaque non-secret identifiers.
@@ -43,6 +44,7 @@ type SecretStore interface {
 // profile state store satisfies this interface.
 type Leaser interface {
 	ClaimLease(ctx context.Context, name, owner string, ttl time.Duration) (bool, error)
+	RenewLease(ctx context.Context, name, owner string, ttl time.Duration) (bool, error)
 	ReleaseLease(ctx context.Context, name, owner string) error
 }
 

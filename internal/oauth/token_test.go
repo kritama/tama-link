@@ -238,3 +238,52 @@ func mustJSON(t *testing.T, v any) []byte {
 	}
 	return data
 }
+
+// TestRefreshRenewsLeaseDuringSlowExchange pins the lease contract: the
+// refresh lease is renewed while the token exchange runs, so an exchange
+// that outlasts the TTL keeps its ownership instead of leaking it.
+func TestRefreshRenewsLeaseDuringSlowExchange(t *testing.T) {
+	server, client, _, lease, clock := tokenFixture(t, "rt-1")
+	server.tokenDelay = 400 * time.Millisecond
+	prev := refreshLeaseTTL
+	refreshLeaseTTL = 100 * time.Millisecond
+	defer func() { refreshLeaseTTL = prev }()
+
+	if _, err := client.Token(context.Background()); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	if lease.renewals == 0 {
+		t.Fatal("the slow exchange never renewed the refresh lease")
+	}
+	clock.set(clock.now.Add(time.Minute))
+}
+
+// TestRefreshAbortsWhenLeaseLost pins the loss path: a renewal that loses
+// ownership cancels the exchange before any replacement credential is
+// persisted.
+func TestRefreshAbortsWhenLeaseLost(t *testing.T) {
+	server, client, secrets, lease, _ := tokenFixture(t, "rt-1")
+	server.tokenDelay = 400 * time.Millisecond
+	prev := refreshLeaseTTL
+	refreshLeaseTTL = 100 * time.Millisecond
+	defer func() { refreshLeaseTTL = prev }()
+	lease.loseOnRenew()
+
+	start := time.Now()
+	_, err := client.Token(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "refresh lease lost") {
+		t.Fatalf("err = %v, want lease loss", err)
+	}
+	if elapsed := time.Since(start); elapsed >= 400*time.Millisecond {
+		t.Errorf("exchange ran %s after the lease was lost, want abort", elapsed)
+	}
+	data, found, err := secrets.GetSecret(labelRefresh)
+	if err != nil || !found {
+		t.Fatalf("credential = %v", err)
+	}
+	// The replacement token from the aborted exchange must not be
+	// persisted: another process now owns the credential.
+	if strings.Contains(string(data), "rt-2") || !strings.Contains(string(data), "rt-1") {
+		t.Errorf("replacement credential persisted after lease loss: %s", data)
+	}
+}

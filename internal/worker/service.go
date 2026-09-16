@@ -16,16 +16,24 @@ const queueDepth = 256
 // rediscovered from the durable store when the in-memory queue was saturated.
 const defaultSweepInterval = 5 * time.Second
 
+// defaultMaxInFlight bounds how many submissions this process executes at
+// once. The prompt queue bounds queued work; this bound protects the store
+// writer and the upstream connection pool when a sweep or burst starts many
+// executions at once.
+const defaultMaxInFlight = 8
+
 // Service owns the leased local execution pipeline for one profile: startup
 // recovery of pending replayable submissions, a dispatch loop for new ones,
 // and a recurring durable sweep that re-derives runnable work from the
 // store. It owns every goroutine it starts: Stop cancels the loop and
-// in-flight work and waits for shutdown. A submission is never executed
-// concurrently twice in one process, and the durable lease keeps that true
-// across processes.
+// in-flight work and waits for shutdown. At most Config.MaxInFlight
+// submissions execute concurrently; the rest wait for a slot. A submission
+// is never executed concurrently twice in one process, and the durable
+// lease keeps that true across processes.
 type Service struct {
 	runner        *Runner
 	queue         chan string
+	slots         chan struct{}
 	sweep         time.Duration
 	inFlight      sync.Map // submission ID -> struct{}
 	dispatchDrops atomic.Int64
@@ -45,10 +53,15 @@ func NewService(state State, executor Executor, cfg Config) (*Service, error) {
 	if sweep < time.Millisecond {
 		sweep = defaultSweepInterval
 	}
+	maxInFlight := cfg.MaxInFlight
+	if maxInFlight <= 0 {
+		maxInFlight = defaultMaxInFlight
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
 		runner: runner,
 		queue:  make(chan string, queueDepth),
+		slots:  make(chan struct{}, maxInFlight),
 		sweep:  sweep,
 		cancel: cancel,
 		done:   make(chan struct{}),
@@ -131,14 +144,32 @@ func (s *Service) loop(ctx context.Context) {
 				continue
 			}
 			if _, loaded := s.inFlight.LoadOrStore(id, struct{}{}); loaded {
-				// Already running: the lease would reject a duplicate
-				// anyway, and skipping avoids the claim round trip.
+				// Already running. (Parked slot-waiters do not hold the
+				// mark, so they can be offered again by the sweep; the
+				// duplicate is absorbed at claim time.)
 				continue
 			}
 			s.wg.Add(1)
 			go func() {
 				defer s.wg.Done()
-				defer func() { s.inFlight.Delete(id) }()
+				// The slot is taken before any lease claim or store write,
+				// so a full pool parks goroutines (which cost little) while
+				// the number of live SQLite transactions and upstream calls
+				// stays bounded. While parked the ID is not in-flight: a
+				// sweep may deliver it again, and the duplicate is absorbed
+				// when this goroutine later starts (the claim rejects the
+				// already-leased run, or the first writer wins the
+				// transition). Without the release, a full pool would hold
+				// queued-but-parked IDs against the sweep and starve IDs
+				// dropped on a saturated queue.
+				defer s.inFlight.Delete(id)
+				select {
+				case s.slots <- struct{}{}:
+					defer func() { <-s.slots }()
+				case <-ctx.Done():
+					return
+				}
+				s.inFlight.Store(id, struct{}{})
 				_ = s.runner.Run(ctx, id)
 			}()
 		case <-ticker.C:

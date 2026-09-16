@@ -154,6 +154,18 @@ func TestDiscoverValidation(t *testing.T) {
 			},
 			wantErr: "registration endpoint",
 		},
+		{
+			name: "token endpoint on an unrelated origin",
+			prm:  serverPRM,
+			as: func(s string) string {
+				// A different host is an unrelated origin even for a
+				// subdomain of the same registrable name; the code and any
+				// client secret must never leave the issuer's origin.
+				return strings.Replace(serverAS(s), fmt.Sprintf(`"token_endpoint": %q`, s+"/oauth/token"),
+					fmt.Sprintf(`"token_endpoint": %q`, "https://oauth.unrelated.example/token"), 1)
+			},
+			wantErr: "token endpoint origin does not match",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

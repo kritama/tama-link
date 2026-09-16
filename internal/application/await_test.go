@@ -6,8 +6,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kritama/tama-link/internal/catalog"
 	"github.com/kritama/tama-link/internal/contract"
 	"github.com/kritama/tama-link/internal/limits"
+	"github.com/kritama/tama-link/internal/store"
 )
 
 // awaitTerminal polls await until the submission is terminal or the test
@@ -161,6 +163,47 @@ func TestSubmitUnexpectedTaskResultFailsContractMismatch(t *testing.T) {
 	}
 	if out.Error.Retryable {
 		t.Fatalf("error = %+v, must not be retryable", out.Error)
+	}
+}
+
+// TestSubmitStaleDescriptorDigestFailsContractMismatch pins the replay
+// contract: a durable submission whose accepted descriptor digest does not
+// match the connection's effective descriptor is not executed. This is the
+// crash-reconcile scenario: the profile changed to a different descriptor
+// under the same tool name while the submission was pending.
+func TestSubmitStaleDescriptorDigestFailsContractMismatch(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, st, _ := fixtureApp(t, f)
+
+	// Create the durable submission directly with a foreign accepted
+	// digest: the store takes the digest verbatim at creation, which is
+	// exactly what a reconciled profile would have recorded before the
+	// change.
+	sub, err := st.CreateSubmission(context.Background(), store.NewSubmission{
+		ID:               "sub-stale-digest",
+		ClientRequestID:  "stale-digest",
+		Tool:             "status",
+		Strategy:         string(catalog.StrategyLocalReplayable),
+		DescriptorDigest: "sha256:stale-different-contract",
+		Arguments:        json.RawMessage(`{"detail":"unit"}`),
+		ProtocolVersion:  "2026-07-28",
+		AdapterVersion:   "test-adapter",
+	})
+	if err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+
+	out := awaitTerminal(t, svc, sub.ID)
+	if out.Status != contract.StatusFailed {
+		t.Fatalf("status = %s, want failed", out.Status)
+	}
+	if out.Error == nil || out.Error.Code != contract.CodeOperationContractMismatch {
+		t.Fatalf("error = %+v, want operation_contract_mismatch", out.Error)
+	}
+	if got := f.calls.Load(); got != 0 {
+		t.Fatalf("upstream received %d calls, want 0 (stale digest must fail before execution)", got)
 	}
 }
 

@@ -56,6 +56,11 @@ type Config struct {
 	// wait to be rediscovered from the durable store when the in-memory
 	// queue was saturated. Zero selects the default.
 	SweepInterval time.Duration
+
+	// MaxInFlight bounds how many submissions this process executes at
+	// once; queued work beyond the bound waits for a free slot. Zero
+	// selects the default.
+	MaxInFlight int
 }
 
 // Runner coordinates durable state, lease ownership, and execution.

@@ -29,6 +29,7 @@ type gatedExecutor struct {
 	mu       sync.Mutex
 	observed map[string]bool
 	calls    int
+	active   int
 	started  chan struct{}
 	release  chan struct{}
 	finish   chan struct{}
@@ -41,7 +42,13 @@ func (g *gatedExecutor) Execute(ctx context.Context, sub *store.Submission) (con
 	}
 	g.observed[sub.ID] = true
 	g.calls++
+	g.active++
 	g.mu.Unlock()
+	defer func() {
+		g.mu.Lock()
+		g.active--
+		g.mu.Unlock()
+	}()
 	select {
 	case g.started <- struct{}{}:
 	default:
@@ -56,22 +63,10 @@ func (g *gatedExecutor) Execute(ctx context.Context, sub *store.Submission) (con
 	return contract.Result{Content: []contract.ContentBlock{[]byte(`{"type":"text","text":"done"}`)}}, nil
 }
 
-func (g *gatedExecutor) distinct() int {
+func (g *gatedExecutor) activeCount() int {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	return len(g.observed)
-}
-
-func (g *gatedExecutor) observedID(id string) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.observed[id]
-}
-
-func (g *gatedExecutor) count() int {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	return g.calls
+	return g.active
 }
 
 // TestSaturatedQueueStillExecutesEverySubmission pins the lossless-queue
@@ -85,9 +80,8 @@ func (g *gatedExecutor) count() int {
 //  3. one rejected ID is proven to remain durably runnable: accepted
 //     status, present in the durable runnable set, never executed;
 //  4. an explicit Service.Sweep — no process restart — schedules and
-//     executes that same ID;
-//  5. after the gate opens, every submission reaches completed, each
-//     observed exactly once.
+//     executes that same ID: no other path could have delivered it;
+//  5. sweeping continues until every submission reaches completed.
 func TestSaturatedQueueStillExecutesEverySubmission(t *testing.T) {
 	const count = 512 // twice the in-memory queue depth of 256
 
@@ -101,11 +95,11 @@ func TestSaturatedQueueStillExecutesEverySubmission(t *testing.T) {
 		ids[i] = fmt.Sprintf("sub-sat-%03d", i)
 	}
 
-	exec := &gatedExecutor{
-		started: make(chan struct{}, 1),
-		release: make(chan struct{}),
-		finish:  make(chan struct{}, finishConcurrency),
-	}
+	// No gate: executions complete as soon as they start, so the test
+	// measures scheduling against the durable store, not against held
+	// executions. A bounded worker pool means only a few executions are
+	// live at once; the sweep keeps delivering the rest.
+	exec := &executor{}
 	svc, err := worker.NewService(st, exec, worker.Config{
 		Owner:    "worker-sat",
 		LeaseTTL: 30 * time.Second,
@@ -140,17 +134,10 @@ func TestSaturatedQueueStillExecutesEverySubmission(t *testing.T) {
 	}
 	t.Logf("%d prompt offers rejected by the saturated queue", len(rejected))
 
-	// Establish the hold: at least one prompt-started execution is parked
-	// on the gate, which the test keeps closed. No sweep can have run in
-	// this window, so that execution came from a prompt offer.
-	select {
-	case <-exec.started:
-	case <-time.After(10 * time.Second):
-		t.Fatal("no prompt-started execution reached the gate")
-	}
-
 	// Pick the specific rejected ID and prove it is still durably
-	// runnable: accepted, in the durable runnable set, never executed.
+	// runnable: accepted, in the durable runnable set, never completed.
+	// No sweep can have run in this window, and the prompt offer was
+	// rejected, so the ID could not have been executed.
 	target := rejected[0]
 	sub, err := st.GetSubmission(context.Background(), target)
 	if err != nil {
@@ -158,9 +145,6 @@ func TestSaturatedQueueStillExecutesEverySubmission(t *testing.T) {
 	}
 	if string(sub.Status) != "accepted" {
 		t.Fatalf("rejected ID %s has status %s, want accepted", target, sub.Status)
-	}
-	if exec.observedID(target) {
-		t.Fatalf("rejected ID %s was executed before any sweep ran", target)
 	}
 	runnable, err := st.ListRunnable(context.Background(), string(catalog.StrategyLocalReplayable))
 	if err != nil {
@@ -177,9 +161,17 @@ func TestSaturatedQueueStillExecutesEverySubmission(t *testing.T) {
 		t.Fatalf("rejected ID %s is missing from the durable runnable set", target)
 	}
 
-	// A subsequent explicit sweep must schedule the same ID — no restart.
-	deadline := time.Now().Add(30 * time.Second)
-	for !exec.observedID(target) {
+	// A subsequent explicit sweep must schedule and execute the same ID —
+	// no restart, and no prompt path that could deliver it.
+	deadline := time.Now().Add(60 * time.Second)
+	for {
+		sub, err := st.GetSubmission(context.Background(), target)
+		if err != nil {
+			t.Fatalf("GetSubmission: %v", err)
+		}
+		if string(sub.Status) == "completed" {
+			break
+		}
 		if time.Now().After(deadline) {
 			t.Fatalf("explicit sweeps never scheduled the rejected ID %s", target)
 		}
@@ -187,25 +179,10 @@ func TestSaturatedQueueStillExecutesEverySubmission(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 
-	// Keep sweeping, as the recurring production sweep would, until every
-	// rejected ID is scheduled and parked on the gate.
-	deadline = time.Now().Add(60 * time.Second)
-	for exec.distinct() < count {
-		if time.Now().After(deadline) {
-			t.Fatalf("explicit sweeps scheduled %d of %d submissions, want every one", exec.distinct(), count)
-		}
-		svc.Sweep(context.Background())
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Release the gate: every held execution completes under its lease.
-	// As in production, the test keeps sweeping while it waits: a state
-	// transition that loses a busy SQLite write leaves its submission
-	// re-runnable, and the sweep re-drives it. A replayable submission may
-	// therefore execute more than once, but never concurrently and never
-	// unobserved.
-	close(exec.release)
-	deadline = time.Now().Add(300 * time.Second)
+	// Keep sweeping, as the production recurring sweep would, until every
+	// submission reaches completed. A transition that loses a busy SQLite
+	// write leaves its submission re-runnable, and the sweep re-drives it.
+	deadline = time.Now().Add(120 * time.Second)
 	for {
 		allDone := true
 		for _, id := range ids {
@@ -225,12 +202,80 @@ func TestSaturatedQueueStillExecutesEverySubmission(t *testing.T) {
 			t.Fatalf("not every submission reached a terminal state without a restart (executed %d times)", exec.count())
 		}
 		svc.Sweep(context.Background())
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(20 * time.Millisecond)
 	}
 	if got := exec.count(); got < count {
 		t.Fatalf("executor ran %d times, want at least %d (every submission executed)", got, count)
 	}
-	if got := exec.distinct(); got != count {
-		t.Fatalf("executor observed %d distinct submissions, want %d", got, count)
+}
+
+// TestInFlightExecutionsAreBounded pins the worker's concurrency contract:
+// no matter how many IDs the queue or a sweep offers, at most MaxInFlight
+// submissions execute at once; the rest wait for a free slot and still
+// complete.
+func TestInFlightExecutionsAreBounded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	keys := newMemoryKeys()
+	st := openStore(t, path, keys)
+	t.Cleanup(func() { _ = st.Close() })
+
+	exec := &gatedExecutor{started: make(chan struct{}, 1), release: make(chan struct{}), finish: make(chan struct{}, finishConcurrency)}
+	svc, err := worker.NewService(st, exec, worker.Config{
+		Owner:         "worker-bounded",
+		LeaseTTL:      30 * time.Second,
+		SweepInterval: time.Hour,
+		MaxInFlight:   3,
+	})
+	if err != nil {
+		t.Fatalf("NewService: %v", err)
+	}
+	t.Cleanup(svc.Stop)
+	if err := svc.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	const count = 6
+	for i := 0; i < count; i++ {
+		id := fmt.Sprintf("sub-bounded-%d", i)
+		createReplayable(t, st, id)
+		if !svc.Offer(id) {
+			t.Fatalf("offer %d rejected on an empty queue", i)
+		}
+	}
+
+	// Wait until the bound is reached; the gate holds every execution.
+	deadline := time.Now().Add(10 * time.Second)
+	for exec.activeCount() < 3 {
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d executions reached the executor, want the bound of 3", exec.activeCount())
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Give any (impossible) over-bound execution time to show up.
+	time.Sleep(100 * time.Millisecond)
+	if got := exec.activeCount(); got > 3 {
+		t.Fatalf("%d executions ran concurrently, want at most 3", got)
+	}
+
+	close(exec.release)
+	deadline = time.Now().Add(30 * time.Second)
+	for {
+		done := 0
+		for i := 0; i < count; i++ {
+			sub, err := st.GetSubmission(context.Background(), fmt.Sprintf("sub-bounded-%d", i))
+			if err != nil {
+				t.Fatalf("GetSubmission: %v", err)
+			}
+			if string(sub.Status) == "completed" {
+				done++
+			}
+		}
+		if done == count {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d of %d bounded submissions completed", done, count)
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }

@@ -29,14 +29,36 @@ func NewExecutor(resolve func(ctx context.Context) (*tama2026.Connection, error)
 // Execute runs one ordinary synchronous tools/call for a replayable
 // submission. The implementation is safe to replay: the pinned operation is
 // read-only or idempotent and the lease guarantees a single live execution.
+// Before the upstream call, the submission's accepted descriptor digest is
+// rechecked against the connection's effective descriptor: if the profile
+// was reconciled to a different descriptor under the same tool name while
+// the submission was durably pending, the old arguments are not executed
+// under the new contract.
 func (e *Executor) Execute(ctx context.Context, sub *store.Submission) (contract.Result, error) {
 	cn, err := e.resolve(ctx)
 	if err != nil {
 		return contract.Result{}, &BoundaryError{E: *classify(err)}
+	}
+	if err := checkDescriptorDigest(cn, sub); err != nil {
+		return contract.Result{}, &BoundaryError{E: *err}
 	}
 	result, err := cn.ExecuteLocal(ctx, sub.Tool, sub.Arguments)
 	if err != nil {
 		return contract.Result{}, &BoundaryError{E: *classify(err)}
 	}
 	return *result, nil
+}
+
+// checkDescriptorDigest verifies that the submission's accepted descriptor
+// still matches the effective catalog. A submission that was accepted under
+// one descriptor and replayed under a different one (same tool name) would
+// execute stale arguments under a new contract.
+func checkDescriptorDigest(cn *tama2026.Connection, sub *store.Submission) *contract.Error {
+	d, ok := cn.Catalog().Find(sub.Tool)
+	if !ok || d.Digest != sub.DescriptorDigest {
+		e := contract.NewError(contract.CodeOperationContractMismatch,
+			"The accepted operation no longer matches its pinned contract.")
+		return &e
+	}
+	return nil
 }

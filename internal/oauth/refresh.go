@@ -72,7 +72,7 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 	if rec.Issuer != cred.Issuer {
 		return "", fmt.Errorf("%w: client registration and refresh credential bind different issuers", ErrNoCredentials)
 	}
-	if err := checkStoredTokenEndpoint(cred.TokenEndpoint, cred.Issuer); err != nil {
+	if err := checkIssuerBoundEndpoint(cred.TokenEndpoint, cred.Issuer); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrNoCredentials, err)
 	}
 
@@ -80,10 +80,33 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", cred.RefreshToken)
 	form.Set("resource", c.endpoint)
-	tok, err := c.postToken(ctx, cred.TokenEndpoint, rec, form)
+
+	// The exchange is a network call and the credential write follows it,
+	// so the lease is renewed on a third of its TTL for the whole critical
+	// section. Losing the lease cancels the exchange before any
+	// replacement token is persisted: another process is now responsible
+	// for the credential, and a double rotation would invalidate its
+	// replacement.
+	execCtx, cancelExec := context.WithCancel(ctx)
+	renewed := make(chan struct{})
+	go c.renewLease(execCtx, cancelExec, renewed)
+	tok, err := c.postToken(execCtx, cred.TokenEndpoint, rec, form)
+	leaseLost := false
+	select {
+	case <-execCtx.Done():
+		// The renewal loop only cancels execCtx when the lease was lost; a
+		// plain caller cancellation leaves the exchange error intact.
+		leaseLost = ctx.Err() == nil
+	default:
+	}
+	cancelExec()
+	<-renewed
 	if err != nil {
 		if errors.Is(err, ErrGrantInvalid) {
 			c.clearToken()
+		}
+		if leaseLost {
+			return "", fmt.Errorf("refresh lease lost during the token exchange: %w", err)
 		}
 		return "", err
 	}
@@ -93,19 +116,54 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 	return tok.AccessToken, nil
 }
 
-// checkStoredTokenEndpoint validates the persisted token endpoint against
-// the issuer-bound metadata policy: a secure absolute URL on the same
-// origin as the issuer it claims.
-func checkStoredTokenEndpoint(endpoint, issuer string) error {
+// renewLease renews the refresh lease every third of its TTL until the
+// caller's context is cancelled. A renewal that fails or reports lost
+// ownership cancels the exchange context so the caller aborts before
+// persisting a replacement credential.
+func (c *Client) renewLease(ctx context.Context, cancel context.CancelFunc, done chan<- struct{}) {
+	defer close(done)
+	interval := refreshLeaseTTL / 3
+	if interval <= 0 {
+		interval = refreshLeaseTTL
+	}
+	timer := time.NewTimer(interval)
+	defer timer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-timer.C:
+			renewCtx, cancelRenew := context.WithTimeout(ctx, interval)
+			owned, err := c.lease.RenewLease(renewCtx, refreshLeaseName, c.owner, refreshLeaseTTL)
+			cancelRenew()
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil || !owned {
+				cancel()
+				return
+			}
+			timer.Reset(interval)
+		}
+	}
+}
+
+// checkIssuerBoundEndpoint validates one token endpoint against the
+// issuer-bound policy: a secure absolute URL on the same origin as the
+// issuer it claims. The authorization code and any client secret are sent
+// to this endpoint, so an unrelated origin is rejected both when fresh
+// metadata is validated at discovery and when a stored credential is
+// checked before refresh.
+func checkIssuerBoundEndpoint(endpoint, issuer string) error {
 	u, err := url.Parse(endpoint)
 	if err != nil || u.Host == "" {
-		return fmt.Errorf("stored token endpoint is not an absolute URL")
+		return fmt.Errorf("token endpoint is not an absolute URL")
 	}
 	if err := checkSecureURL(u); err != nil {
-		return fmt.Errorf("stored token endpoint: %w", err)
+		return err
 	}
 	if endpointOrigin(endpoint) != endpointOrigin(issuer) {
-		return fmt.Errorf("stored token endpoint origin does not match its issuer")
+		return fmt.Errorf("token endpoint origin does not match the issuer")
 	}
 	return nil
 }

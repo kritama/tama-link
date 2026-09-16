@@ -54,11 +54,13 @@ func (f *fakeSecrets) DeleteSecret(label string) error {
 // holding the lease; onClaim runs just before a claim succeeds, letting a
 // test write a replacement credential while the claimant waits.
 type fakeLease struct {
-	mu       sync.Mutex
-	holder   string
-	onClaim  func()
-	claims   int
-	released int
+	mu        sync.Mutex
+	holder    string
+	onClaim   func()
+	claims    int
+	released  int
+	renewals  int
+	loseRenew bool
 }
 
 func newFakeLease() *fakeLease { return &fakeLease{} }
@@ -90,6 +92,31 @@ func (f *fakeLease) ClaimLease(_ context.Context, name, owner string, ttl time.D
 	defer f.mu.Unlock()
 	f.holder = owner
 	return true, nil
+}
+
+// renewLease makes the next renewal report lost ownership, so the test can
+// prove a refresh aborts when it loses the lease mid-exchange.
+func (f *fakeLease) loseOnRenew() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loseRenew = true
+}
+
+func (f *fakeLease) RenewLease(_ context.Context, name, owner string, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if name != refreshLeaseName || ttl <= 0 {
+		return false, fmt.Errorf("unexpected lease name %q ttl %s", name, ttl)
+	}
+	f.renewals++
+	if f.loseRenew {
+		f.holder = ""
+		return false, nil
+	}
+	if f.holder == owner {
+		return true, nil
+	}
+	return false, nil
 }
 
 func (f *fakeLease) ReleaseLease(_ context.Context, name, owner string) error {
@@ -161,6 +188,7 @@ type metadataServer struct {
 	prm        string
 	as         string
 	tokenBody  string
+	tokenDelay time.Duration
 	tokenReq   *http.Request
 	tokenRaw   []byte
 	tokenCalls int
@@ -179,6 +207,13 @@ func (s *metadataServer) start(t *testing.T) *metadataServer {
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprint(w, s.as)
 		case "/oauth/token":
+			if s.tokenDelay > 0 {
+				select {
+				case <-time.After(s.tokenDelay):
+				case <-r.Context().Done():
+					return
+				}
+			}
 			raw, err := io.ReadAll(r.Body)
 			if err != nil {
 				t.Fatalf("read token body: %v", err)

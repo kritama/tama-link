@@ -688,6 +688,25 @@ At discovery time Tama Link records and validates:
 Unsupported combinations fail closed with `protocol_mismatch`. Tama Link must
 not guess task support from a product name or user agent.
 
+The authorization-server metadata is validated before any token request:
+the token endpoint must be a secure absolute URL on the same origin as the
+validated issuer, because the authorization code and any client secret are
+sent there. The same origin policy re-validates the stored token endpoint
+before every refresh. A refresh holds its cross-process lease for the whole
+critical section: the lease is renewed on a third of its TTL while the token
+exchange runs and the replacement credential is written, and a lost lease
+aborts the exchange before any replacement token is persisted.
+
+The local worker executes at most a bounded number of submissions
+concurrently; queued work beyond the bound waits for a free slot. The bound
+protects the store writer and the upstream connection pool when a sweep or
+burst discovers a large backlog. Before a replayable submission executes,
+the worker rechecks the submission's accepted descriptor digest against the
+connection's effective descriptor: a submission accepted under one contract
+is not executed under a different descriptor that reuses the tool name, and
+the mismatch fails with `operation_contract_mismatch` before any upstream
+call.
+
 Both the downstream STDIO server and the upstream core transport use a reviewed
 stable release of the official MCP Go SDK. If the selected stable release does
 not expose the separately versioned Tasks methods or task-ID subscription
