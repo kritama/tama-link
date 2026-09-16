@@ -3,6 +3,7 @@ package application
 import (
 	"context"
 	"fmt"
+	"sync"
 
 	"github.com/kritama/tama-link/internal/adapter/tama2026"
 	"github.com/kritama/tama-link/internal/contract"
@@ -12,11 +13,12 @@ import (
 )
 
 // Executor executes local_replayable submissions through one verified
-// connection, resolving it on first use. It implements worker.Executor and
-// maps adapter failures to stable contract errors so the worker records the
-// exact boundary taxonomy on the submission.
+// connection, resolving it on first use and reusing it for the process
+// lifetime. It implements worker.Executor and maps adapter failures to
+// stable contract errors so the worker records the exact boundary taxonomy
+// on the submission.
 type Executor struct {
-	resolve func(ctx context.Context) (*tama2026.Connection, error)
+	conns verifiedConnection
 }
 
 // NewExecutor builds the System-path worker executor over one connection
@@ -26,7 +28,37 @@ func NewExecutor(resolve func(ctx context.Context) (*tama2026.Connection, error)
 	if resolve == nil {
 		panic("application: executor connection resolver is required")
 	}
-	return &Executor{resolve: resolve}
+	return &Executor{conns: verifiedConnection{resolve: resolve}}
+}
+
+// verifiedConnection memoizes the first successful resolved connection for
+// the process lifetime. The documented contract of the connection resolver
+// is that the application calls it once and reuses the result: re-resolving
+// per execution would repeat the authenticated server/discover and the
+// complete paginated tools/list for every locally replayable operation and
+// let a transient discovery outage fail already queued work. The token
+// provider inside the connection still tracks refreshes, so a reused
+// connection always authenticates with the current credential. Failures
+// are never cached: a failed resolve fails the current operation and the
+// next one retries.
+type verifiedConnection struct {
+	mu      sync.Mutex
+	resolve func(ctx context.Context) (*tama2026.Connection, error)
+	conn    *tama2026.Connection
+}
+
+func (v *verifiedConnection) get(ctx context.Context) (*tama2026.Connection, error) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if v.conn != nil {
+		return v.conn, nil
+	}
+	cn, err := v.resolve(ctx)
+	if err != nil {
+		return nil, err
+	}
+	v.conn = cn
+	return cn, nil
 }
 
 // Execute runs one ordinary synchronous tools/call for a replayable
@@ -38,7 +70,7 @@ func NewExecutor(resolve func(ctx context.Context) (*tama2026.Connection, error)
 // the submission was durably pending, the old arguments are not executed
 // under the new contract.
 func (e *Executor) Execute(ctx context.Context, sub *store.Submission) (contract.Result, error) {
-	cn, err := e.resolve(ctx)
+	cn, err := e.conns.get(ctx)
 	if err != nil {
 		if deferredErr := deferredIfContended(err); deferredErr != nil {
 			return contract.Result{}, deferredErr

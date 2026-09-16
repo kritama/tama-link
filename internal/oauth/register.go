@@ -122,9 +122,10 @@ func (c *Client) storeClient(rec *ClientRecord) error {
 	return nil
 }
 
-// TokenEndpointAuthMethod returns the auth method this client will use.
+// TokenEndpointAuthMethod returns the auth method this client will use:
+// the selection discovery validated, shared with registration.
 func (as *AuthorizationServer) TokenEndpointAuthMethod() string {
-	return defaultAuthMethod(as.TokenEndpointAuthMethods)
+	return tokenEndpointAuthMethod(as.TokenEndpointAuthMethods)
 }
 
 // applyFormAuth adds the form-based client credentials for the auth method
@@ -206,6 +207,12 @@ func (c *Client) postToken(ctx context.Context, endpoint string, rec *ClientReco
 		return nil, fmt.Errorf("decode token response: json")
 	}
 	if out.AccessToken != "" {
+		// The upstream transport unconditionally sends the access token as
+		// a Bearer credential: an omitted or different token type would
+		// pass readiness while every authenticated call fails.
+		if !strings.EqualFold(out.TokenType, "bearer") {
+			return nil, fmt.Errorf("token endpoint returned unsupported token type %q", out.TokenType)
+		}
 		return &out, nil
 	}
 	if out.Error == "" {

@@ -145,9 +145,9 @@ func validateAS(as *AuthorizationServer, issuer string) error {
 	if !contains(as.GrantTypes, "authorization_code") || !contains(as.GrantTypes, "refresh_token") {
 		return fmt.Errorf("authorization server does not support the required grants")
 	}
-	method := defaultAuthMethod(as.TokenEndpointAuthMethods)
+	method := tokenEndpointAuthMethod(as.TokenEndpointAuthMethods)
 	if !supportedAuthMethods[method] {
-		return fmt.Errorf("unsupported token endpoint auth method %q", method)
+		return fmt.Errorf("authorization server advertises no supported token endpoint auth method (first: %q)", method)
 	}
 	return nil
 }
@@ -160,9 +160,19 @@ var supportedAuthMethods = map[string]bool{
 	"none":                true,
 }
 
-// defaultAuthMethod applies the RFC 8414 default when the document omits the
-// field.
-func defaultAuthMethod(methods []string) string {
+// tokenEndpointAuthMethod selects the token endpoint auth method this
+// client uses: the first supported method in the advertised set, keeping
+// the server's advertised order — the field is a set of supported methods,
+// so an unsupported first entry must not reject a server that also offers
+// one this client can use. The RFC 8414 default applies when the document
+// omits the field. A server advertising only unsupported methods reports
+// its first entry so the caller's error can name it.
+func tokenEndpointAuthMethod(methods []string) string {
+	for _, method := range methods {
+		if supportedAuthMethods[method] {
+			return method
+		}
+	}
 	if len(methods) == 0 {
 		return "client_secret_basic"
 	}

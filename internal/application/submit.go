@@ -75,7 +75,7 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 	// The accepted identity carries the correlation values the pinned
 	// operation can map: when the operation cannot map the thread ID, the
 	// value is not part of the request's durable identity at all.
-	identity, err := requestIdentity(in, identityThreadID(in, &d))
+	identity, err := requestIdentity(in, identityThread(in, &d))
 	if err != nil {
 		return contract.SubmitOutput{}, failed(contract.CodeInvalidRequest,
 			"Arguments must be a valid JSON document.")
@@ -169,55 +169,62 @@ func submitOutput(sub *store.Submission) contract.SubmitOutput {
 }
 
 // requestIdentity renders the client-visible request with one
-// correlation shape: the raw argument bytes plus the thread ID when the
-// shape carries one. An empty thread ID normalizes to absence, so a
-// context that is omitted and one that is sent empty are one identity.
-func requestIdentity(in contract.SubmitInput, threadID string) (json.RawMessage, error) {
+// correlation shape: the raw argument bytes plus the thread-ID field.
+// A nil thread records that the accepted operation could not map the
+// source: the field is omitted and any client thread value is not part
+// of the identity at all. A non-nil thread records that the source was
+// mappable at acceptance: the field carries the value, or an explicit
+// null when the request carried no value, so an absent-to-present change
+// stays a conflict even after reconciliation unmapped the source.
+func requestIdentity(in contract.SubmitInput, threadID *string) (json.RawMessage, error) {
 	identity := struct {
 		Arguments json.RawMessage `json:"arguments"`
 		ThreadID  *string         `json:"thread_id,omitempty"`
-	}{Arguments: in.Arguments}
-	if threadID != "" {
-		identity.ThreadID = &threadID
-	}
+	}{Arguments: in.Arguments, ThreadID: threadID}
 	return json.Marshal(identity)
 }
 
-// identityThreadID is the correlation value the accepted identity carries
-// for a genuinely new acceptance: the client thread ID when the pinned
-// operation can map it, absent otherwise. A context that carries no value
-// normalizes to absence in every case.
-func identityThreadID(in contract.SubmitInput, d *catalog.Descriptor) string {
-	if in.ClientContext == nil || !mapsThreadID(d) {
-		return ""
+// identityThread is the correlation shape the accepted identity records
+// for a genuinely new acceptance: absent when the pinned operation cannot
+// map the client thread ID, explicit null when it could but the request
+// carried no value, and the value otherwise.
+func identityThread(in contract.SubmitInput, d *catalog.Descriptor) *string {
+	if !mapsThreadID(d) {
+		return nil
 	}
-	return in.ClientContext.ThreadID
+	value := ""
+	if in.ClientContext != nil {
+		value = in.ClientContext.ThreadID
+	}
+	return &value
 }
 
 // retryIdentities renders the candidate client-visible identities an exact
-// retry may correspond to: the full identity, and — when the context
-// carries a thread ID — the identity without it. Which shape the accepted
-// identity took depends on the binding set in force at acceptance, which a
-// retry cannot know: reconciliation may have changed the tool's bindings
-// or removed the tool from the catalog, and both candidates still cover
-// the stored shape without consulting the current descriptor.
+// retry may correspond to. The stored identity recorded how the accepted
+// operation handled the client thread ID — value, explicit null, or
+// omitted field — and the retry cannot know which shape it took: the
+// binding set in force at acceptance may have changed since. A retry that
+// carries a value matches the identity with its own value, or the identity
+// whose operation could not map the source; a retry that carries no value
+// matches the identity with the explicit null, or the identity whose
+// operation could not map the source. Adding a thread ID after the
+// accepted request omitted one from a mappable source conflicts; changing
+// a value the operation never mapped reconciles; an exact retry reconciles
+// no matter what reconciliation did to the tool since.
 func retryIdentities(in contract.SubmitInput) ([]json.RawMessage, error) {
-	threadID := ""
+	base, err := requestIdentity(in, nil)
+	if err != nil {
+		return nil, err
+	}
+	value := ""
 	if in.ClientContext != nil {
-		threadID = in.ClientContext.ThreadID
+		value = in.ClientContext.ThreadID
 	}
-	full, err := requestIdentity(in, threadID)
+	threaded, err := requestIdentity(in, &value)
 	if err != nil {
 		return nil, err
 	}
-	if threadID == "" {
-		return []json.RawMessage{full}, nil
-	}
-	base, err := requestIdentity(in, "")
-	if err != nil {
-		return nil, err
-	}
-	return []json.RawMessage{full, base}, nil
+	return []json.RawMessage{threaded, base}, nil
 }
 
 // mapsThreadID reports whether the descriptor has a binding that can map

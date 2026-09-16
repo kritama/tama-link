@@ -205,13 +205,18 @@ Requirements:
   reconciles to the original submission instead of reporting a conflict. A
   context that carries no correlation value is normalized to absence, so a
   retry that omits the context or sends an empty one carries no value in
-  any candidate identity. The accepted identity carries the correlation
-  values the operation could map at acceptance, and a retry cannot know
-  that binding set: recovery matches the full client-visible identity and,
-  when the context carries a thread ID, the identity without it, so a retry
-  reconciles whether the tool kept, gained, or lost its thread binding, or
-  left the catalog entirely. A retry that actually changed a correlation
-  value the accepted identity carried still reports a conflict.
+  any candidate identity. The accepted identity records how the operation
+  handled the client thread ID at acceptance: its value, an explicit
+  absence when the request carried no value, or no field at all when the
+  operation could not map the source. A retry cannot know which shape it
+  took — the binding set may have changed since — so recovery matches, for
+  a retry that carries a value, the identity with that value or the
+  unmappable-source identity, and, for a retry that carries no value, the
+  explicitly-absent or the unmappable-source identity. Adding a thread ID
+  after an accepted request omitted one from a mappable source reports a
+  conflict; changing a value the accepted operation never mapped
+  reconciles; and an exact retry reconciles whether the tool kept, gained,
+  or lost its thread binding, or left the catalog entirely.
   Reconciliation
   runs before the catalog membership check, argument validation, and binding
   application, in addition to before the readiness and strategy checks
@@ -592,10 +597,14 @@ pinned synchronous operation is a contract violation: the submission fails
 terminal with `operation_contract_mismatch` and the task result is never
 polled, stored, or returned.
 
-The downstream `submit` schema always constrains `tool` to the approved names.
-For legacy clients, `arguments` remains an object and the generated `submit`
-description includes bounded deterministic operation signatures. Tama Link
-performs the authoritative per-operation validation at execution time. A later
+The downstream `submit` schema does not constrain `tool` to the current
+approved names: an exact retry whose tool the profile later removed must
+still reach idempotency reconciliation, and the application enforces the
+catalog for genuinely new work. For legacy clients, `arguments` remains an
+object and the generated `submit` description includes bounded deterministic
+operation signatures, which are the advertisement of the approved
+operations. Tama Link performs the authoritative per-operation validation at
+execution time. A later
 downstream protocol adapter may use a tagged `oneOf` schema when the negotiated
 client supports full JSON Schema composition; correctness must not depend on
 that richer presentation.
@@ -819,7 +828,12 @@ the worker rechecks the submission's accepted descriptor digest against the
 connection's effective descriptor: a submission accepted under one contract
 is not executed under a different descriptor that reuses the tool name, and
 the mismatch fails with `operation_contract_mismatch` before any upstream
-call.
+call. The verified upstream connection is resolved once and reused for the
+process lifetime: the connection's token provider tracks refreshes, so a
+reused connection always authenticates with the current credential, while
+re-resolving per replayable execution would repeat the authenticated
+`server/discover` and the complete paginated `tools/list` for every
+operation and let a transient discovery outage fail already queued work.
 
 Both the downstream STDIO server and the upstream core transport use a reviewed
 stable release of the official MCP Go SDK. If the selected stable release does
@@ -961,12 +975,22 @@ work as `authentication_required` instead of accepting submissions that
 can only fail on the same known-invalid grant. An upstream
 subscription closes no later than credential expiry; after successful refresh,
 Link reconciles through `tasks/get` before opening a replacement stream.
+A successful exchange requires the response to declare the Bearer token
+type, case-insensitive: the upstream transport always sends the access
+token as a Bearer credential, so an omitted or different type is a failed
+exchange, not a credential.
 
 The stored client registration and refresh credential must both bind the
 active profile issuer, and the stored token endpoint is re-validated against
 the issuer-bound metadata policy before use. A profile that changes issuer
 while retaining its credential namespace fails closed rather than replaying a
 foreign token to a stored endpoint.
+The client auth method is selected from the set the authorization server
+advertises — the field is a set of supported methods, not a single choice:
+the first method this client supports, in the server's advertised order,
+with the RFC 8414 default when the field is omitted, and the same
+selection shared between discovery and registration. A server that
+advertises no supported method fails discovery.
 
 ## Validation and limits
 

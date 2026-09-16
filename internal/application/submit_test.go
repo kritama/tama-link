@@ -572,6 +572,76 @@ func TestSubmitReplaysWhenBindingsChange(t *testing.T) {
 	}
 }
 
+// TestSubmitRejectsRetryThatAddsMappedThread pins the explicit-absence
+// shape: when the accepted operation could map the client thread ID but
+// the accepted request carried no value, the durable identity records the
+// source as mappable-but-absent. Reusing the key with a value added would
+// change the bound upstream request, so it conflicts — even after
+// reconciliation removed the binding, because the stored identity
+// remembers the source was mappable at acceptance.
+func TestSubmitRejectsRetryThatAddsMappedThread(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	cfg := fixtureConfigFor(t, f, limits.Default())
+	svc, _, _ := appFromConfig(t, cfg)
+
+	// The status tool maps the thread ID; the accepted request omits it.
+	out, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "absent-1",
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	})
+	if appErr != nil {
+		t.Fatalf("submit: %s", appErr.Message)
+	}
+
+	// An unchanged retry still reconciles.
+	retried, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "absent-1",
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	})
+	if appErr != nil {
+		t.Fatalf("unchanged retry: %s", appErr.Message)
+	}
+	if retried.SubmissionID != out.SubmissionID {
+		t.Fatalf("retry returned %s, want %s", retried.SubmissionID, out.SubmissionID)
+	}
+
+	// Adding a thread value under the same key conflicts.
+	if _, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "absent-1",
+		ClientContext:   &contract.ClientContext{ThreadID: "t-added"},
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	}); appErr == nil || appErr.Code != contract.CodeIdempotencyConflict {
+		t.Fatalf("added thread = %+v, want idempotency_conflict", appErr)
+	}
+
+	// ...and still conflicts after reconciliation removes the binding:
+	// the stored identity recorded the source as mappable at acceptance.
+	for i := range cfg.Profile.Operations {
+		if cfg.Profile.Operations[i].Name != "status" {
+			continue
+		}
+		cfg.Profile.Operations[i].Bindings = []catalog.Binding{
+			{Source: catalog.SourceClientRequestID, Target: "/client_meta/client_request_id", Required: true},
+		}
+		if digest, err := cfg.Profile.Operations[i].ComputeDigest(); err == nil {
+			cfg.Profile.Operations[i].Digest = digest
+		}
+	}
+	if _, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+		Tool:            "status",
+		ClientRequestID: "absent-1",
+		ClientContext:   &contract.ClientContext{ThreadID: "t-added"},
+		Arguments:       json.RawMessage(`{"detail":"unit"}`),
+	}); appErr == nil || appErr.Code != contract.CodeIdempotencyConflict {
+		t.Fatalf("added thread after binding removal = %+v, want idempotency_conflict", appErr)
+	}
+}
+
 // TestSubmitProbesCredentialsBeforeAccepting pins the authenticate-first
 // contract: a profile with no usable credential fails submit as
 // authentication_required before durable acceptance, and the idempotency

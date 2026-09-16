@@ -155,6 +155,25 @@ func TestDiscoverValidation(t *testing.T) {
 			wantErr: "registration endpoint",
 		},
 		{
+			name: "unsupported method advertised first, supported second",
+			prm:  serverPRM,
+			as: func(s string) string {
+				// The field is a set of supported methods: an unsupported
+				// first entry must not reject a server that also offers
+				// one this client can use.
+				return strings.Replace(serverAS(s), `["client_secret_basic"]`, `["private_key_jwt", "client_secret_basic"]`, 1)
+			},
+			ok: true,
+		},
+		{
+			name: "only unsupported methods advertised",
+			prm:  serverPRM,
+			as: func(s string) string {
+				return strings.Replace(serverAS(s), `["client_secret_basic"]`, `["private_key_jwt"]`, 1)
+			},
+			wantErr: "no supported token endpoint auth method",
+		},
+		{
 			name: "token endpoint on an unrelated origin",
 			prm:  serverPRM,
 			as: func(s string) string {
@@ -209,6 +228,44 @@ func TestDiscoverValidation(t *testing.T) {
 				t.Errorf("err = %v, want ErrMetadata wrap", err)
 			}
 		})
+	}
+}
+
+// TestDiscoverSelectsSupportedAuthMethod pins that the selection discovery
+// validates is the one registration uses: the first supported entry in the
+// advertised set, in the server's order.
+func TestDiscoverSelectsSupportedAuthMethod(t *testing.T) {
+	var ts *httptest.Server
+	ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch r.URL.Path {
+		case "/.well-known/oauth-protected-resource/mcp/app":
+			_, _ = fmt.Fprintf(w, `{"issuer":%q,"authorization_servers":[%q],"resource":%q}`, ts.URL+"/mcp/app", ts.URL+"/oauth", ts.URL+"/mcp/app")
+		case "/.well-known/oauth-authorization-server/oauth":
+			as := serverAS(ts.URL)
+			as = strings.Replace(as, `["client_secret_basic"]`, `["private_key_jwt", "client_secret_post"]`, 1)
+			_, _ = fmt.Fprint(w, as)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(ts.Close)
+	client, err := New(Config{
+		Endpoint: ts.URL + "/mcp/app",
+		Issuer:   ts.URL + "/oauth",
+		Secrets:  newFakeSecrets(),
+		Lease:    newFakeLease(),
+		Clock:    newTestClock(time.Now()).nowFn(),
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	md, err := client.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if got := md.AS.TokenEndpointAuthMethod(); got != "client_secret_post" {
+		t.Fatalf("selected auth method = %q, want client_secret_post (the first supported advertised)", got)
 	}
 }
 

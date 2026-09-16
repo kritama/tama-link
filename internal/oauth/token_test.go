@@ -393,6 +393,44 @@ func TestInvalidGrantMasksLegacyGrantWhenSlotDeletionFails(t *testing.T) {
 	}
 }
 
+// TestTokenRejectsNonBearerTokenType pins the exchange contract: the
+// upstream transport unconditionally sends the access token as a Bearer
+// credential, so a response that omits token_type or reports another type
+// is rejected instead of being persisted as a credential that passes
+// readiness and fails every call.
+func TestTokenRejectsNonBearerTokenType(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{"omitted token type", `{"access_token":"at-1","expires_in":3600}`},
+		{"DPoP token type", `{"access_token":"at-1","token_type":"DPoP","expires_in":3600}`},
+		{"MAC token type", `{"access_token":"at-1","token_type":"MAC","expires_in":3600}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := (&metadataServer{}).start(t)
+			server.tokenBody = tc.body
+			secrets := newFakeSecrets()
+			client := clientForServer(t, server, secrets, newFakeLease(), newTestClock(time.Unix(1_700_000_000, 0)))
+			seedCredentials(t, secrets, "cid-1", "shh", server.ts.URL+"/oauth/token", client.issuer, "rt-1")
+			if _, err := client.Token(context.Background()); err == nil {
+				t.Fatalf("Token accepted a %s response", tc.name)
+			}
+		})
+	}
+
+	// The check is case-insensitive: lowercase bearer is the same type.
+	server := (&metadataServer{}).start(t)
+	server.tokenBody = `{"access_token":"at-1","token_type":"bearer","expires_in":3600}`
+	secrets := newFakeSecrets()
+	client := clientForServer(t, server, secrets, newFakeLease(), newTestClock(time.Unix(1_700_000_000, 0)))
+	seedCredentials(t, secrets, "cid-1", "shh", server.ts.URL+"/oauth/token", client.issuer, "rt-1")
+	if _, err := client.Token(context.Background()); err != nil {
+		t.Fatalf("Token rejected a lowercase bearer response: %v", err)
+	}
+}
+
 // fencedSlot reports whether label looks like a per-transaction fenced
 // credential slot (labelRefresh@hex).
 func fencedSlot(label string) bool {
