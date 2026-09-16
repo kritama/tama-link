@@ -51,6 +51,13 @@ func (s *schemaView) validate(value json.RawMessage, path string) error {
 			return err
 		}
 	}
+	// Pinned required properties can only be checked on an object. A
+	// non-object value fails here whenever required is present, regardless
+	// of whether a type assertion was absent, already rejected the value,
+	// or even accepted the kind (for example a null-typed value).
+	if len(s.Required) > 0 && kind != jsonKindObject {
+		return fmt.Errorf("%s has type %s, but required properties are pinned, which require an object", path, kind)
+	}
 	switch kind {
 	case jsonKindObject:
 		if err := s.validateObject(trimmed, path); err != nil {
@@ -129,7 +136,11 @@ func (s *schemaView) validateObject(value json.RawMessage, path string) error {
 		return fmt.Errorf("%s is not a JSON object: %w", path, err)
 	}
 	for _, name := range s.Required {
-		if _, ok := members[name]; !ok {
+		// A required property present only as an explicit JSON null does not
+		// satisfy the requirement: no default annotation fills it in, so the
+		// value is missing either way.
+		raw, ok := members[name]
+		if !ok || isNullRaw(raw) {
 			return fmt.Errorf("%s is missing the required property %q", path, name)
 		}
 	}

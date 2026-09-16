@@ -15,11 +15,14 @@ import (
 
 // gatedExecutor records every submission ID it is asked to execute, then
 // blocks until the test closes release. It lets the saturation test hold the
-// prompt-started executions in place while the sweep delivers the rest.
+// prompt-started executions in place while the sweep delivers the rest. The
+// first execution to reach the gate signals started, so the test can prove
+// the hold is in effect before asserting on drops.
 type gatedExecutor struct {
 	mu       sync.Mutex
 	observed map[string]bool
 	calls    int
+	started  chan struct{}
 	release  chan struct{}
 }
 
@@ -31,6 +34,10 @@ func (g *gatedExecutor) Execute(ctx context.Context, sub *store.Submission) (con
 	g.observed[sub.ID] = true
 	g.calls++
 	g.mu.Unlock()
+	select {
+	case g.started <- struct{}{}:
+	default:
+	}
 	select {
 	case <-g.release:
 	case <-ctx.Done():
@@ -78,7 +85,7 @@ func TestSaturatedQueueStillExecutesEverySubmission(t *testing.T) {
 		ids[i] = fmt.Sprintf("sub-sat-%03d", i)
 	}
 
-	exec := &gatedExecutor{release: make(chan struct{})}
+	exec := &gatedExecutor{started: make(chan struct{}, 1), release: make(chan struct{})}
 	svc, err := worker.NewService(st, exec, worker.Config{
 		Owner:         "worker-sat",
 		LeaseTTL:      30 * time.Second,
@@ -104,6 +111,17 @@ func TestSaturatedQueueStillExecutesEverySubmission(t *testing.T) {
 	for _, id := range ids {
 		svc.Dispatch(id)
 	}
+
+	// Establish the hold before asserting on drops: at least one
+	// prompt-started execution must be parked on the gate, which the test
+	// keeps closed. While the gate is held, no prompt-started execution can
+	// complete, so nothing below can be satisfied by the prompt path alone.
+	select {
+	case <-exec.started:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no prompt-started execution reached the gate")
+	}
+
 	if drops := svc.DroppedDispatches(); drops < 1 {
 		t.Fatalf("queue never saturated: %d dispatches dropped, want at least one", drops)
 	}

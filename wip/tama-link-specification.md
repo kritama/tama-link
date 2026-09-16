@@ -561,7 +561,11 @@ JSON Schema normally assumes, and patterns must compile at profile load.
 At runtime, `minLength` and `maxLength` count Unicode code points, and
 numeric values and bounds accept the complete JSON number grammar,
 including exponent form, compared through exact normalized decimal digits,
-never through `float64`.
+never through `float64`. A non-object value fails validation whenever
+`required` is present, regardless of which type assertion, if any, rejects
+or accepts that kind. No `default` annotation fills a missing required
+property, and a required property present only as an explicit JSON null
+does not satisfy the requirement.
 
 Server instructions are composed from two clearly separated sources:
 

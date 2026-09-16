@@ -218,6 +218,37 @@ func TestValidateAgainstSchemaRejectsMalformedSchema(t *testing.T) {
 	}
 }
 
+// TestValidateAgainstSchemaRequiredFailsNonObjects pins the required
+// contract: a non-object value fails validation whenever required is
+// present, regardless of whether a type assertion is absent or even accepts
+// the kind.
+func TestValidateAgainstSchemaRequiredFailsNonObjects(t *testing.T) {
+	for _, tc := range []struct {
+		schema, value, wantErr string
+	}{
+		{`{"required":["a"]}`, `5`, "required"},
+		{`{"required":["a"]}`, `"s"`, "required"},
+		{`{"required":["a"]}`, `true`, "required"},
+		{`{"required":["a"]}`, `[]`, "required"},
+		{`{"type":"null","required":["a"]}`, `null`, "required"},
+		{`{"type":"object","required":["a"]}`, `{"a":1}`, ""},
+		{`{"type":"object","properties":{"x":{"required":["a"]}}}`, `{"x":5}`, "required"},
+	} {
+		validateTable(t, tc.schema, tc.value, tc.wantErr)
+	}
+}
+
+// TestValidateAgainstSchemaRequiredIgnoresDefaultAndNull pins that no
+// default annotation fills a missing required property, and that a required
+// property present only as an explicit JSON null does not satisfy the
+// requirement.
+func TestValidateAgainstSchemaRequiredIgnoresDefaultAndNull(t *testing.T) {
+	schema := `{"type":"object","required":["a"],"properties":{"a":{"type":["string","null"]}},"default":{"a":"x"}}`
+	validateTable(t, schema, `{}`, `required property "a"`)
+	validateTable(t, schema, `{"a":null}`, `required property "a"`)
+	validateTable(t, schema, `{"a":"y"}`, "")
+}
+
 // TestCheckSchemaVocabularyRejectsMalformedKeywordValues pins the
 // fail-closed meta-shape contract: a supported keyword with a null or
 // malformed value is rejected at profile load instead of being treated as
