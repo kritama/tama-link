@@ -19,7 +19,7 @@ func (s *Store) AppendEvents(ctx context.Context, id string, events []contract.E
 		return s.GetSubmission(ctx, id)
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin event append: %w", err)
 	}

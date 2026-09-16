@@ -19,7 +19,7 @@ func (s *Store) ReplaceTaskIDLeased(
 		return nil, errors.New("submission id, owner, and task id are required")
 	}
 	leaseName := "submission/" + id
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin task reattachment: %w", err)
 	}

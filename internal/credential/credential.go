@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"time"
 
 	keyring "github.com/99designs/keyring"
 )
@@ -43,9 +44,15 @@ func secureBackends() []keyring.BackendType {
 	}
 }
 
+// probeTimeout bounds the startup availability probe. Backends that cannot
+// complete a write within this window (for example a headless Secret Service
+// waiting for user interaction) are treated as unavailable so Tama Link
+// fails fast with a clear error instead of hanging.
+var probeTimeout = 5 * time.Second
+
 // New opens the secure credential backend for profile and namespaces it by
 // profile. It fails closed with ErrUnavailable when no secure backend is
-// available.
+// available or cannot complete an availability probe.
 func New(profile string) (*Keyring, error) {
 	if profile == "" {
 		return nil, errors.New("credential: profile name is required")
@@ -58,7 +65,40 @@ func New(profile string) (*Keyring, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
+	if err := probeBackend(profile, kr); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
 	return &Keyring{kr: kr, prefix: profile + "/"}, nil
+}
+
+// probeBackend verifies that the backend completes a Set/Get/Remove cycle
+// on one disposable profile-scoped entry. Platform backends can accept a
+// connection while still being unable to complete a write, so connect
+// success alone is not availability.
+func probeBackend(profile string, kr keyring.Keyring) error {
+	type result struct{ err error }
+	done := make(chan result, 1)
+	go func() {
+		key := profile + "/__probe__"
+		err := kr.Set(keyring.Item{
+			Key:         key,
+			Data:        []byte{1},
+			Label:       "Tama Link availability probe",
+			Description: "Temporary entry; safe to delete",
+		})
+		if err == nil {
+			if _, err = kr.Get(key); err == nil {
+				err = kr.Remove(key)
+			}
+		}
+		done <- result{err: err}
+	}()
+	select {
+	case res := <-done:
+		return res.err
+	case <-time.After(probeTimeout):
+		return fmt.Errorf("backend did not complete an availability probe within %s", probeTimeout)
+	}
 }
 
 // newWith builds a Keyring over an already-open backend. It is used by tests

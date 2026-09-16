@@ -437,7 +437,13 @@ missing or unavailable must fail closed with `state_unavailable`; Tama Link must
 not generate a replacement, overwrite unreadable rows, delete state, or fall
 back to plaintext. Logout never removes the state key. Version 1 performs no
 automatic state-key rotation, and headless environments are supported only with
-an explicitly available secure credential backend.
+an explicitly available secure credential backend. Backend availability is a
+bounded startup probe: a complete set/read/remove cycle on one disposable
+entry must finish within a short fixed window, or Tama Link fails fast with a
+clear unavailable error. A backend that accepts a connection but blocks on
+user interaction for writes (for example a headless Secret Service) is
+unavailable; Tama Link must never hang the serve process on the platform
+credential store.
 
 Writes must be atomic and safe against symlink traversal. Local state and
 configuration permissions must be restrictive. Retention and garbage
@@ -446,7 +452,14 @@ downstream client disconnected.
 
 The store must tolerate multiple Tama Link processes opening the same profile.
 SQLite uses WAL mode, bounded busy handling, transactional idempotency, and
-lease-based worker ownership. The database file and its `-wal` and `-shm`
+lease-based worker ownership. Every multi-statement write transaction begins
+with `BEGIN IMMEDIATE`: the pinned driver honors the busy timeout only when a
+write lock is acquired at BEGIN time, while a write statement that upgrades a
+deferred transaction after a read fails immediately with a lock error even
+though the other process would release the lock well before the busy timeout.
+A concurrent process's open-validation window is an ordinary write-lock holder;
+overlapping writers must wait for the busy timeout and then proceed, never
+corrupt or lose the submission. The database file and its `-wal` and `-shm`
 sidecars are opened or created without following links inside the validated
 private profile directory before WAL is enabled. On Windows, each child
 directory, the database, and both sidecars are opened relative to the already
@@ -491,7 +504,10 @@ TamaMCP's `2026-07-28` tool listing does not expose the legacy
 strategy. For task-backed operations, Link verifies the Tasks extension in
 `server/discover`, declares it in the current request, and requires the expected
 `tools/call` `resultType`. Absence of legacy task metadata must not be
-interpreted as evidence that a TamaMCP tool is synchronous.
+interpreted as evidence that a TamaMCP tool is synchronous. A task result for a
+pinned synchronous operation is a contract violation: the submission fails
+terminal with `operation_contract_mismatch` and the task result is never
+polled, stored, or returned.
 
 The downstream `submit` schema always constrains `tool` to the approved names.
 For legacy clients, `arguments` remains an object and the generated `submit`

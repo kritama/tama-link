@@ -14,13 +14,12 @@ import (
 	"time"
 
 	"github.com/kritama/tama-link/internal/catalog"
+	"github.com/kritama/tama-link/internal/credential"
 	"github.com/kritama/tama-link/internal/profile"
 )
 
-// demoProfileJSON renders one valid minimal profile for the e2e tests.
-func demoProfileJSON(t *testing.T) []byte {
-	t.Helper()
-
+// demoProfileForWrite builds the demo profile without test helpers.
+func demoProfileForWrite() profile.Profile {
 	op := catalog.Descriptor{
 		Name:        "message",
 		Title:       "Message",
@@ -31,7 +30,7 @@ func demoProfileJSON(t *testing.T) []byte {
 	}
 	digest, err := op.ComputeDigest()
 	if err != nil {
-		t.Fatalf("compute descriptor digest: %v", err)
+		panic(err)
 	}
 	op.Digest = digest
 
@@ -42,18 +41,27 @@ func demoProfileJSON(t *testing.T) []byte {
 		Endpoint:     "https://tama.example/mcp/app",
 		Issuer:       "https://auth.example",
 		Instructions: "Pinned upstream instructions.",
-		Bounds:       profile.Bounds{ProtocolMin: "2025-03-26", ProtocolMax: "2025-11-25"},
+		Bounds:       profile.Bounds{ProtocolMin: "2026-07-28", ProtocolMax: "2026-07-28"},
 		State:        profile.StateRefs{Database: "default", Credentials: "default"},
 		Operations:   []catalog.Descriptor{op},
 	}
 	if err := p.Validate("demo"); err != nil {
-		t.Fatalf("validate demo profile: %v", err)
+		panic(err)
 	}
-	data, err := json.Marshal(p)
+	return p
+}
+
+// writeDemoProfile installs the demo profile under configDir.
+func writeDemoProfile(configDir string) error {
+	profilesDir := filepath.Join(configDir, "profiles")
+	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(demoProfileForWrite())
 	if err != nil {
-		t.Fatalf("marshal demo profile: %v", err)
+		return err
 	}
-	return data
+	return os.WriteFile(filepath.Join(profilesDir, "demo.json"), data, 0o600)
 }
 
 // buildBinary compiles the real command so the tests exercise the same
@@ -95,19 +103,57 @@ func TestServeBinaryFailsCleanlyWithoutProfile(t *testing.T) {
 	}
 }
 
+// credentialBackendAvailable reports whether the platform credential
+// backend can complete an availability probe in this environment. Headless
+// runners without a secure service (or one that blocks on user interaction)
+// cannot run the durable-state serve path.
+func credentialBackendAvailable(t *testing.T) bool {
+	t.Helper()
+	_, err := credential.New("demo")
+	return err == nil
+}
+
 // TestServeBinaryStdioHandshake proves the Phase 0 exit criterion end to end:
-// serve starts the two-tool STDIO MCP server for an existing profile.
+// serve starts the two-tool STDIO MCP server for an existing profile. When
+// the environment has no usable credential backend, the same command must
+// fail fast and cleanly instead of hanging.
 func TestServeBinaryStdioHandshake(t *testing.T) {
 	t.Parallel()
 
 	bin := buildBinary(t)
 
-	configDir := t.TempDir()
-	profilesDir := filepath.Join(configDir, "profiles")
-	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
-		t.Fatalf("create profiles dir: %v", err)
+	if !credentialBackendAvailable(t) {
+		t.Log("credential backend unavailable; asserting clean failure")
+		var stdout, stderr bytes.Buffer
+		configDir := t.TempDir()
+		if err := writeDemoProfile(configDir); err != nil {
+			t.Fatalf("write profile: %v", err)
+		}
+		cmd := exec.Command(bin, "serve", "--profile", "demo", "--config-dir", configDir)
+		cmd.Stdout = &stdout
+		cmd.Stderr = &stderr
+		done := make(chan error, 1)
+		go func() { done <- cmd.Run() }()
+		select {
+		case err := <-done:
+			exitErr, ok := err.(*exec.ExitError)
+			if !ok || exitErr.ExitCode() != 2 {
+				t.Fatalf("exit = %v, want code 2", err)
+			}
+		case <-time.After(25 * time.Second):
+			t.Fatal("serve did not fail fast without a credential backend")
+		}
+		if stdout.Len() != 0 {
+			t.Fatalf("stdout = %q, want empty", stdout.String())
+		}
+		if !strings.Contains(stderr.String(), "credential backend unavailable") {
+			t.Fatalf("stderr = %q, want credential backend unavailable", stderr.String())
+		}
+		return
 	}
-	if err := os.WriteFile(filepath.Join(profilesDir, "demo.json"), demoProfileJSON(t), 0o600); err != nil {
+
+	configDir := t.TempDir()
+	if err := writeDemoProfile(configDir); err != nil {
 		t.Fatalf("write profile: %v", err)
 	}
 

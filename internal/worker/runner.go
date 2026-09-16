@@ -36,7 +36,9 @@ type State interface {
 }
 
 // Executor performs one ordinary upstream tools/call. Implementations must
-// honor context cancellation and must be safe to replay for this worker path.
+// honor context cancellation and must be safe to replay for this worker
+// path. An error carrying a *contract.Error records that stable error on
+// the submission; any other error records upstream_execution_failed.
 type Executor interface {
 	Execute(context.Context, *store.Submission) (contract.Result, error)
 }
@@ -104,6 +106,10 @@ func (r *Runner) Run(ctx context.Context, id string) (runErr error) {
 			_, err = r.state.CompleteLeased(execCtx, id, leaseName, leaseOwner, result)
 		} else if execCtx.Err() == nil {
 			failure := contract.NewError(contract.CodeUpstreamExecutionFailed, "The local operation could not be completed.")
+			var carrier interface{ ContractError() *contract.Error }
+			if errors.As(executeErr, &carrier) {
+				failure = *carrier.ContractError()
+			}
 			if _, transitionErr := r.state.FailLeased(execCtx, id, leaseName, leaseOwner, failure); transitionErr != nil {
 				err = transitionErr
 			} else {

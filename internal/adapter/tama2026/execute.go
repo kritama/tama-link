@@ -61,7 +61,7 @@ func checkResultShape(d catalog.Descriptor, resp *upstream.CallToolResponse) err
 		}
 	case catalog.TaskSupportForbidden:
 		if resp.IsTask() {
-			return fmt.Errorf("%w: tool %q returned a task result", ErrProtocolMismatch, d.Name)
+			return fmt.Errorf("%w: tool %q returned a task result", ErrUnexpectedTaskResult, d.Name)
 		}
 	}
 	return nil

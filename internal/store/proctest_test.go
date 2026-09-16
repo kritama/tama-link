@@ -34,6 +34,7 @@ const (
 	envSubID    = "STORE_PROCTEST_SUBID"
 	envOwner    = "STORE_PROCTEST_OWNER"
 	envTTLMS    = "STORE_PROCTEST_TTLMS"
+	envLockMS   = "STORE_PROCTEST_LOCKMS"
 	envGCSweeps = "STORE_PROCTEST_GC"
 )
 
@@ -162,6 +163,24 @@ func runScenario(scenario string) int {
 		fmt.Println(created.ID)
 		return 0
 
+	case "append-events-once":
+		id := os.Getenv(envSubID)
+		// Open first, then pause so a concurrent writer (the locker
+		// process) can be live while this process's read-then-write
+		// transaction runs. The overlap is the regression under test.
+		time.Sleep(500 * time.Millisecond)
+		event := contract.Event{
+			SubmissionID: id,
+			Sequence:     1,
+			Timestamp:    time.Now().UTC(),
+			State:        contract.StatusQueued,
+		}
+		if _, err := s.AppendEvents(ctx, id, []contract.Event{event}); err != nil {
+			fmt.Fprintf(os.Stderr, "append events: %v\n", err)
+			return 1
+		}
+		return 0
+
 	case "lock":
 		// Hold a raw write lock outside the store so another process must
 		// wait out the busy timeout.
@@ -175,7 +194,11 @@ func runScenario(scenario string) int {
 			fmt.Fprintf(os.Stderr, "begin: %v\n", err)
 			return 1
 		}
-		time.Sleep(1500 * time.Millisecond)
+		hold := 1500 * time.Millisecond
+		if ms, perr := time.ParseDuration(os.Getenv(envLockMS) + "ms"); perr == nil && ms > 0 {
+			hold = ms
+		}
+		time.Sleep(hold)
 		if _, err := raw.ExecContext(ctx, "ROLLBACK"); err != nil {
 			fmt.Fprintf(os.Stderr, "rollback: %v\n", err)
 			return 1
@@ -422,6 +445,47 @@ func TestProctestBusyTimeout(t *testing.T) {
 	if lockerCode := <-lockerDone; lockerCode != 0 {
 		t.Fatalf("locker exited %d", lockerCode)
 	}
+}
+
+// TestProctestWriteAfterReadWaitsForLock pins a driver behavior the store
+// depends on: a write statement that follows a read inside one transaction
+// must wait out the busy timeout while another process holds the write lock
+// (for example inside a concurrent store open's validation window) instead of
+// failing immediately with SQLITE_BUSY. All multi-statement write
+// transactions therefore begin IMMEDIATE (see writeTx).
+func TestProctestWriteAfterReadWaitsForLock(t *testing.T) {
+	st := newScenarioState(t)
+	s := proctestOpen(t, st.db, st.key)
+	created, err := s.CreateSubmission(context.Background(), store.NewSubmission{
+		ID:               "sub-write-after-read",
+		ClientRequestID:  "war-1",
+		Tool:             "message",
+		Strategy:         "local_replayable",
+		DescriptorDigest: "sha256:abc",
+		Arguments:        []byte(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("create submission: %v", err)
+	}
+
+	// Start the appender first so its open completes unblocked; the locker
+	// then holds the write lock across the appender's read-then-write
+	// transaction.
+	appenderDone := make(chan string, 1)
+	go func() {
+		code, out := runProctest(t, "append-events-once", withProctestEnv(st.db, st.key, envSubID+"="+created.ID))
+		appenderDone <- out + fmt.Sprintf("(exit %d)", code)
+	}()
+	time.Sleep(100 * time.Millisecond)
+	lockerCode, out := runProctest(t, "lock", withProctestEnv(st.db, st.key, envLockMS+"=4000"))
+	if lockerCode != 0 {
+		t.Fatalf("locker exited %d: %s", lockerCode, out)
+	}
+	result := <-appenderDone
+	if strings.Contains(result, "(exit 0)") {
+		return
+	}
+	t.Fatalf("append-events-once failed while a writer was held: %s", result)
 }
 
 func TestProctestExclusiveWorkerClaim(t *testing.T) {

@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -83,7 +82,7 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 	argsHash := hashInput(sub)
 
 	now := s.now().UnixMilli()
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin idempotent insert: %w", err)
 	}
@@ -161,7 +160,7 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 
 func (s *Store) reconcileIdempotentSubmission(
 	ctx context.Context,
-	tx *sql.Tx,
+	tx *writeTx,
 	clientRequestID, argsHash string,
 ) (*Submission, error) {
 	// End this transaction before reading through the pool. A concurrent

@@ -11,6 +11,10 @@ import (
 // protocolVersion is the only MCP protocol version this adapter speaks.
 const protocolVersion = "2026-07-28"
 
+// ProtocolVersion returns the MCP protocol version this adapter speaks.
+// Accepted submissions record it as the protocol that will execute them.
+func ProtocolVersion() string { return protocolVersion }
+
 // Adapter verifies one profile's pinned catalog against one TamaMCP 2026
 // upstream endpoint. It owns no transport and no credentials of its own:
 // the upstream client already carries the profile OAuth token provider.

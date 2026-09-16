@@ -65,7 +65,7 @@ func (s *Store) transition(
 		}
 	}
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin transition: %w", err)
 	}
@@ -185,7 +185,7 @@ func (s *Store) finish(
 	failure *contract.Error,
 	lease *leaseIdentity,
 ) (*Submission, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("begin terminal capture: %w", err)
 	}
@@ -253,7 +253,7 @@ func requireUpdated(result sql.Result) error {
 
 // loadEncrypted reads one submission row inside an open transaction without
 // decrypting, so callers can re-seal the same blobs.
-func (s *Store) loadEncrypted(ctx context.Context, tx *sql.Tx, id string) (*Submission, error) {
+func (s *Store) loadEncrypted(ctx context.Context, tx *writeTx, id string) (*Submission, error) {
 	row := tx.QueryRowContext(ctx, submissionQuery, id)
 	sub, err := scanSubmission(row)
 	if errors.Is(err, sql.ErrNoRows) {

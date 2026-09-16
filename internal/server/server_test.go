@@ -36,7 +36,7 @@ func testProfile() *profile.Profile {
 		Endpoint:     "https://tama.example/mcp/app",
 		Issuer:       "https://auth.example",
 		Instructions: "Pinned upstream instructions.",
-		Bounds:       profile.Bounds{ProtocolMin: "2025-03-26", ProtocolMax: "2025-11-25"},
+		Bounds:       profile.Bounds{ProtocolMin: "2026-07-28", ProtocolMax: "2026-07-28"},
 		State:        profile.StateRefs{Database: "default", Credentials: "default"},
 		Operations:   []catalog.Descriptor{op},
 	}
@@ -48,7 +48,7 @@ func testProfile() *profile.Profile {
 
 func connectTestServer(t *testing.T, p *profile.Profile) *mcp.ClientSession {
 	t.Helper()
-	return connectServer(t, New(p, "test"))
+	return connectServer(t, New(p, "test", nil))
 }
 
 func connectServer(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
@@ -193,5 +193,104 @@ func TestServerWithoutPinnedInstructions(t *testing.T) {
 	instructions := clientSession.InitializeResult().Instructions
 	if instructions != workflowInstructions {
 		t.Fatalf("instructions = %q, want workflow only", instructions)
+	}
+}
+
+// decodeStructured re-encodes a structured-content value and decodes it
+// into out, surviving the in-memory transport's any-typed round trip.
+func decodeStructured(t *testing.T, content any, out any) {
+	t.Helper()
+	encoded, err := json.Marshal(content)
+	if err != nil {
+		t.Fatalf("encode structured content: %v", err)
+	}
+	if err := json.Unmarshal(encoded, out); err != nil {
+		t.Fatalf("decode structured content: %v", err)
+	}
+}
+
+// fakeApp is a deterministic App implementation for handler tests.
+type fakeApp struct {
+	submitErr *contract.Error
+	awaitErr  *contract.Error
+}
+
+func (f *fakeApp) Submit(_ context.Context, in contract.SubmitInput) (contract.SubmitOutput, *contract.Error) {
+	if f.submitErr != nil {
+		return contract.SubmitOutput{}, f.submitErr
+	}
+	return contract.SubmitOutput{SubmissionID: "sub-1", Status: contract.StatusAccepted, ClientRequestID: in.ClientRequestID, NextPollMS: 1000}, nil
+}
+
+func (f *fakeApp) Await(_ context.Context, in contract.AwaitInput) (contract.AwaitOutput, *contract.Error) {
+	if f.awaitErr != nil {
+		return contract.AwaitOutput{}, f.awaitErr
+	}
+	return contract.AwaitOutput{SubmissionID: in.SubmissionID, Tool: "message", Status: contract.StatusCompleted, Terminal: true, Cursor: "1"}, nil
+}
+
+func TestServerAppSubmitSuccessAndError(t *testing.T) {
+	t.Parallel()
+
+	app := &fakeApp{}
+	clientSession := connectServer(t, New(testProfile(), "test", app))
+
+	// Success path renders the structured output.
+	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      contract.ToolSubmit,
+		Arguments: map[string]any{"tool": "message", "client_request_id": "r-1", "arguments": map[string]any{"message": "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("submit flagged error: %v", result.StructuredContent)
+	}
+	var out contract.SubmitOutput
+	decodeStructured(t, result.StructuredContent, &out)
+	if out.SubmissionID != "sub-1" || out.Status != contract.StatusAccepted {
+		t.Fatalf("submit output = %+v", out)
+	}
+
+	// App failure renders the stable contract error payload.
+	failed := &fakeApp{}
+	ce := contract.NewError(contract.CodeInvalidRequest, "bad")
+	failed.submitErr = &ce
+	failedSession := connectServer(t, New(testProfile(), "test", failed))
+	failResult, err := failedSession.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      contract.ToolSubmit,
+		Arguments: map[string]any{"tool": "message", "client_request_id": "r-2", "arguments": map[string]any{"message": "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("submit: %v", err)
+	}
+	if !failResult.IsError {
+		t.Fatal("expected isError")
+	}
+	var errOut contract.ErrorOutput
+	decodeStructured(t, failResult.StructuredContent, &errOut)
+	if errOut.Error == nil || errOut.Error.Code != contract.CodeInvalidRequest {
+		t.Fatalf("error output = %+v", errOut)
+	}
+}
+
+func TestServerAppAwait(t *testing.T) {
+	t.Parallel()
+
+	clientSession := connectServer(t, New(testProfile(), "test", &fakeApp{}))
+	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{
+		Name:      contract.ToolAwait,
+		Arguments: map[string]any{"submission_id": "sub-1", "timeout_ms": 0},
+	})
+	if err != nil {
+		t.Fatalf("await: %v", err)
+	}
+	if result.IsError {
+		t.Fatalf("await flagged error: %v", result.StructuredContent)
+	}
+	var out contract.AwaitOutput
+	decodeStructured(t, result.StructuredContent, &out)
+	if out.Status != contract.StatusCompleted || !out.Terminal || out.Cursor != "1" {
+		t.Fatalf("await output = %+v", out)
 	}
 }

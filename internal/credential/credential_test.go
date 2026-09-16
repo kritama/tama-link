@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	keyring "github.com/99designs/keyring"
 
@@ -180,4 +181,52 @@ func TestKeyringSecuresStore(t *testing.T) {
 		t.Fatalf("reopen: %v", err)
 	}
 	_ = reopened.Close()
+}
+
+// blockingKeyring never completes a Set, modeling a backend that accepts a
+// connection but waits on user interaction for writes.
+type blockingKeyring struct{ started chan struct{} }
+
+func (b *blockingKeyring) Get(string) (keyring.Item, error)             { panic("unused") }
+func (b *blockingKeyring) GetMetadata(string) (keyring.Metadata, error) { panic("unused") }
+func (b *blockingKeyring) Set(keyring.Item) error {
+	close(b.started)
+	select {}
+}
+func (b *blockingKeyring) Remove(string) error     { panic("unused") }
+func (b *blockingKeyring) Reset() error            { panic("unused") }
+func (b *blockingKeyring) Keys() ([]string, error) { panic("unused") }
+
+func TestProbeTimesOutOnBlockingBackend(t *testing.T) {
+	blocking := &blockingKeyring{started: make(chan struct{})}
+	old := probeTimeout
+	probeTimeout = 200 * time.Millisecond
+	defer func() { probeTimeout = old }()
+
+	start := time.Now()
+	err := probeBackend("demo", blocking)
+	if err == nil {
+		t.Fatal("probe succeeded, want timeout error")
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("probe took %s, want it to be bounded", time.Since(start))
+	}
+	select {
+	case <-blocking.started:
+	default:
+		t.Fatal("probe never attempted a Set")
+	}
+}
+
+func TestProbeSucceedsAndCleansUp(t *testing.T) {
+	backend := newFakeKeyring()
+	if err := probeBackend("demo", backend); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	backend.mu.Lock()
+	count := len(backend.items)
+	backend.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("probe left %d entries behind", count)
+	}
 }

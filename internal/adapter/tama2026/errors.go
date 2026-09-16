@@ -4,9 +4,9 @@ import "errors"
 
 // Sentinels returned at the adapter boundary. The contract boundary maps
 // them to stable codes: ErrAuthenticationRequired -> authentication_required,
-// ErrProtocolMismatch -> protocol_mismatch, ErrCatalogMismatch ->
-// operation_contract_mismatch, ErrOperationNotAllowed ->
-// operation_not_allowed, ErrStateUnavailable -> state_unavailable.
+// ErrProtocolMismatch -> protocol_mismatch, ErrCatalogMismatch and
+// ErrUnexpectedTaskResult -> operation_contract_mismatch, ErrOperationNotAllowed
+// -> operation_not_allowed, ErrStateUnavailable -> state_unavailable.
 var (
 	// ErrAuthenticationRequired reports that the upstream rejected the
 	// credential or no credential is available. Interactive reauthorization
@@ -25,6 +25,11 @@ var (
 	// ErrOperationNotAllowed reports that the pinned strategy does not
 	// permit execution through this adapter.
 	ErrOperationNotAllowed = errors.New("tama2026: operation not allowed")
+
+	// ErrUnexpectedTaskResult reports that a pinned synchronous operation
+	// came back as a task. The operation's pinned contract forbids task
+	// results, so the result can never be safely interpreted.
+	ErrUnexpectedTaskResult = errors.New("tama2026: unexpected task result")
 
 	// ErrStateUnavailable reports that the secure credential backend
 	// failed. There is no plaintext fallback.

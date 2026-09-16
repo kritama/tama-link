@@ -347,8 +347,8 @@ func TestExecuteForbiddenRejectsTask(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	if _, err := cn.Execute(context.Background(), "message", json.RawMessage(`{}`)); !errors.Is(err, ErrProtocolMismatch) {
-		t.Fatalf("err = %v, want ErrProtocolMismatch", err)
+	if _, err := cn.Execute(context.Background(), "message", json.RawMessage(`{}`)); !errors.Is(err, ErrUnexpectedTaskResult) {
+		t.Fatalf("err = %v, want ErrUnexpectedTaskResult", err)
 	}
 }
 

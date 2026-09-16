@@ -24,7 +24,7 @@ type GCSummary struct {
 func (s *Store) GC(ctx context.Context) (GCSummary, error) {
 	nowMs := s.now().UnixMilli()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return GCSummary{}, fmt.Errorf("begin gc: %w", err)
 	}
@@ -45,7 +45,7 @@ func (s *Store) GC(ctx context.Context) (GCSummary, error) {
 
 // expirePayloads converts terminal submissions past payload retention into
 // payload-free expired tombstones.
-func (s *Store) expirePayloads(ctx context.Context, tx *sql.Tx, nowMs int64) (GCSummary, error) {
+func (s *Store) expirePayloads(ctx context.Context, tx *writeTx, nowMs int64) (GCSummary, error) {
 	query := `
 			UPDATE submissions
 			SET status = ?, args_enc = NULL, task_id = NULL, events_enc = NULL,
@@ -72,7 +72,7 @@ func (s *Store) expirePayloads(ctx context.Context, tx *sql.Tx, nowMs int64) (GC
 
 // deleteLapsedTombstones removes submissions past tombstone retention and
 // their idempotency entries.
-func (s *Store) deleteLapsedTombstones(ctx context.Context, tx *sql.Tx, nowMs int64) (int, error) {
+func (s *Store) deleteLapsedTombstones(ctx context.Context, tx *writeTx, nowMs int64) (int, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT submission_id, client_request_id
 		FROM submissions
