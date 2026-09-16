@@ -199,11 +199,14 @@ Requirements:
   substitute a profile-global or process-global conversation identity.
 - Repeating the same `client_request_id` with equivalent canonical input must
   return the original submission. The request identity is the client-visible
-  input — the tool name and the canonical arguments — never live profile state,
-  so a retry after a profile reconciliation reconciles to the original
-  submission instead of reporting a conflict. A replay appends no progress
-  events and re-offers nothing to the worker: an already advanced row keeps a
-  monotonic event sequence.
+  request — the tool name, the canonical arguments, and the client-owned
+  correlation values bindings may map — never live profile state or bound
+  upstream output, so a retry after a profile reconciliation reconciles to
+  the original submission instead of reporting a conflict. Reconciliation
+  runs before argument validation and binding application, in addition to
+  before the readiness and strategy checks below. A replay appends no
+  progress events and re-offers nothing to the worker: an already advanced
+  row keeps a monotonic event sequence.
 - Reconciliation of an existing idempotency record precedes the readiness and
   strategy checks: recovery of an already accepted request must not depend on
   current credentials or a later profile policy change. The authenticate-first
@@ -730,11 +733,19 @@ by an atomic commit gate immediately before the write, so a lease lost to a
 foreign claim blocks the stale write. The credential persistence itself is
 fenced: every writer commits its replacement at its own unique secure-backend
 slot and then atomically advances a durable fence pointer to that slot's
-generation, and the commit is a compare-and-swap that a concurrent rotation
-already passed is rejected. A writer whose secret-store write blocks past
-its lease therefore cannot make its value live: the fence commit fails, the
-orphan slot is deleted, and the refresh fails instead of reporting a
-superseded success. The fence subsumes post-write ownership checks, which
+generation, and the commit is a single atomic operation that requires both
+an unadvanced fence generation and the writer's own live, unexpired lease
+ownership epoch — with a provider that permits overlapping rotations, a
+writer that lost the lease while its secret-store write was blocked can
+never make its value live, not even before the winner commits its own
+generation. A successful commit leaves the new slot as the only live
+credential and retires both the legacy label and the previous live slot, so
+at most one slot ever holds the grant. The authorization-code exchange is a
+credential rotation too: it claims the same refresh lease and commits its
+credential through the same fence under its own epoch. Logout clears the
+fence before deleting the committed slot and the legacy labels, so readers
+see no credential at all and a later login starts from a clean fence. The
+fence subsumes post-write ownership checks, which
 cannot repair an unfenced external write. Refresh transactions are also
 serialized inside one process, and a burst of concurrent token requests
 reuses one rotation: queued callers recheck the cached token under the

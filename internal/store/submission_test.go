@@ -207,6 +207,7 @@ func TestCreateIdempotentConflict(t *testing.T) {
 	}
 	conflict := testSubmission("sub-2", "req-1")
 	conflict.Arguments = []byte(`{"message":"changed"}`)
+	conflict.RequestArguments = conflict.Arguments
 	if _, _, err := s.CreateSubmission(ctx, conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
 		t.Fatalf("conflicting retry = %v, want ErrIdempotencyConflict", err)
 	}
@@ -291,7 +292,7 @@ func TestReconcileIdempotentSubmission(t *testing.T) {
 
 	// An exact replay reconciles to the original row without claiming or
 	// mutating anything.
-	got, found, err := s.ReconcileIdempotentSubmission(ctx, "req-1", testSubmission("sub-2", "req-1"))
+	got, found, err := s.ReconcileIdempotentSubmission(ctx, "req-1", "message", []byte(`{"message":"hi"}`))
 	if err != nil || !found {
 		t.Fatalf("reconcile = %v found=%v, want the original submission", err, found)
 	}
@@ -300,15 +301,51 @@ func TestReconcileIdempotentSubmission(t *testing.T) {
 	}
 
 	// An unclaimed key is a miss, not an error, and stays free.
-	if _, found, err := s.ReconcileIdempotentSubmission(ctx, "req-2", testSubmission("sub-3", "req-2")); err != nil || found {
+	if _, found, err := s.ReconcileIdempotentSubmission(ctx, "req-2", "message", []byte(`{"message":"hi"}`)); err != nil || found {
 		t.Fatalf("unclaimed reconcile = found=%v err=%v, want miss", found, err)
 	}
 
-	// A key reused with different arguments is a conflict.
-	conflict := testSubmission("sub-4", "req-1")
-	conflict.Arguments = []byte(`{"message":"different"}`)
-	if _, _, err := s.ReconcileIdempotentSubmission(ctx, "req-1", conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
+	// A key reused with a different client-visible request is a conflict.
+	if _, _, err := s.ReconcileIdempotentSubmission(ctx, "req-1", "message", []byte(`{"message":"different"}`)); !errors.Is(err, store.ErrIdempotencyConflict) {
 		t.Fatalf("conflicting reconcile = %v, want ErrIdempotencyConflict", err)
+	}
+}
+
+// TestCreateReconcilesClientVisibleIdentity pins that the idempotency
+// identity is the client-visible request, never the bound upstream
+// arguments: when a reconciled profile binds the same client request
+// differently, an exact retry still reconciles to the original submission,
+// while a different client-visible request conflicts.
+func TestCreateReconcilesClientVisibleIdentity(t *testing.T) {
+	t.Parallel()
+
+	s, _ := openTestStore(t, newMemKeys(), newClock())
+	ctx := context.Background()
+	first := testSubmission("sub-1", "req-1")
+	first.Arguments = []byte(`{"message":"hi","client_meta":{"client_request_id":"req-1"}}`)
+	if _, _, err := s.CreateSubmission(ctx, first); err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+
+	// The retry's client-visible request is unchanged, but the reconciled
+	// profile binds it to different upstream arguments.
+	retry := testSubmission("sub-2", "req-1")
+	retry.Arguments = []byte(`{"message":"hi","client_meta":{"client_request_id":"req-1","thread":"reconciled"}}`)
+	got, created, err := s.CreateSubmission(ctx, retry)
+	if err != nil {
+		t.Fatalf("retry after binding reconciliation: %v", err)
+	}
+	if created || got.ID != "sub-1" {
+		t.Fatalf("retry returned %q created=%v, want original sub-1", got.ID, created)
+	}
+
+	// A different client-visible request conflicts even when the bound
+	// upstream arguments would coincide.
+	conflict := testSubmission("sub-3", "req-1")
+	conflict.RequestArguments = []byte(`{"message":"different"}`)
+	conflict.Arguments = first.Arguments
+	if _, _, err := s.CreateSubmission(ctx, conflict); !errors.Is(err, store.ErrIdempotencyConflict) {
+		t.Fatalf("different client-visible request = %v, want ErrIdempotencyConflict", err)
 	}
 }
 

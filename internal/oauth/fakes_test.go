@@ -123,16 +123,28 @@ type fakeLease struct {
 	fenceCommitErr error
 }
 
-func newFakeLease() *fakeLease { return &fakeLease{} }
+func newFakeLease() *fakeLease {
+	f := &fakeLease{}
+	// The shared state always exists: in production the lease table and
+	// the credential fence live in the same SQLite store. Two simulated
+	// processes share it by pointing one lease's fence at the other's.
+	f.fence = newSharedFence()
+	return f
+}
 
-// sharedFence models the credential fence the way production models it:
-// one durable fence shared by every process using the profile, while each
-// process has its own lease view.
+// sharedFence models the durable state two simulated processes share: the
+// credential fence, and the refresh-lease holder the fence commit is bound
+// to. Each process keeps its own fakeLease claim view, but a claim by
+// either process replaces the shared holder, which is what a lease-bound
+// fence commit checks. The fake models ownership only; the generation
+// arithmetic is covered by the store's own tests.
 type sharedFence struct {
 	mu         sync.Mutex
 	generation int64
 	slot       string
 	found      bool
+	// lease ownership the fence commit verifies.
+	leaseHolder string
 }
 
 func newSharedFence() *sharedFence { return &sharedFence{} }
@@ -143,9 +155,29 @@ func (f *sharedFence) read() (int64, string, bool) {
 	return f.generation, f.slot, f.found
 }
 
-func (f *sharedFence) commit(generation int64, slot string) bool {
+// claimLease records one claim on the shared lease table: the last
+// claimer owns the lease, matching the test scenarios where a foreign
+// process takes over after the first holder's lease lapsed.
+func (f *sharedFence) claimLease(owner string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.leaseHolder = owner
+}
+
+func (f *sharedFence) releaseLease(owner string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.leaseHolder == owner {
+		f.leaseHolder = ""
+	}
+}
+
+func (f *sharedFence) commit(generation int64, slot, leaseOwner string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.leaseHolder != leaseOwner {
+		return false
+	}
 	if generation <= f.generation {
 		return false
 	}
@@ -155,10 +187,21 @@ func (f *sharedFence) commit(generation int64, slot string) bool {
 	return true
 }
 
+func (f *sharedFence) clear() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.generation = 0
+	f.slot = ""
+	f.found = false
+}
+
 func (f *fakeLease) holdOther() {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.holder = "other-process"
+	if f.fence != nil {
+		f.fence.claimLease("other-process")
+	}
 }
 
 func (f *fakeLease) ClaimLease(_ context.Context, name, owner string, ttl time.Duration) (bool, error) {
@@ -174,6 +217,9 @@ func (f *fakeLease) ClaimLease(_ context.Context, name, owner string, ttl time.D
 	}
 	f.claims++
 	f.holder = owner
+	if f.fence != nil {
+		f.fence.claimLease(owner)
+	}
 	hook := f.onClaim
 	f.mu.Unlock()
 	if hook != nil {
@@ -213,14 +259,25 @@ func (f *fakeLease) ReadCredentialFence(_ context.Context) (int64, string, bool,
 	return gen, slot, found, nil
 }
 
-func (f *fakeLease) CommitCredentialFence(_ context.Context, generation int64, slot string) (bool, error) {
-	if f.fence == nil {
-		f.fence = newSharedFence()
+// CommitCredentialFence models the production gate: the fence generation
+// compare-and-swap plus the shared lease holder the commit must still own.
+// The fake checks ownership only; the epoch arithmetic is covered by the
+// store's own tests.
+func (f *fakeLease) CommitCredentialFence(_ context.Context, fenceGeneration int64, slot, leaseName, leaseOwner string, _ int64) (bool, error) {
+	if leaseName != refreshLeaseName {
+		return false, fmt.Errorf("unexpected lease name %q", leaseName)
 	}
 	if f.fenceCommitErr != nil {
 		return false, f.fenceCommitErr
 	}
-	return f.fence.commit(generation, slot), nil
+	return f.fence.commit(fenceGeneration, slot, leaseOwner), nil
+}
+
+func (f *fakeLease) ClearCredentialFence(_ context.Context) error {
+	if f.fence != nil {
+		f.fence.clear()
+	}
+	return nil
 }
 
 // renewLease makes the next renewal report lost ownership, so the test can
@@ -240,10 +297,16 @@ func (f *fakeLease) RenewLease(_ context.Context, name, owner string, ttl time.D
 	f.renewals++
 	if f.loseRenew {
 		f.holder = ""
+		if f.fence != nil {
+			f.fence.releaseLease(owner)
+		}
 		return false, nil
 	}
 	if f.loseAfter > 0 && f.renewals >= f.loseAfter {
 		f.holder = ""
+		if f.fence != nil {
+			f.fence.releaseLease(owner)
+		}
 		return false, nil
 	}
 	if f.holder == owner {
@@ -261,6 +324,9 @@ func (f *fakeLease) ReleaseLease(_ context.Context, name, owner string) error {
 	if f.holder == owner {
 		f.holder = ""
 		f.released++
+		if f.fence != nil {
+			f.fence.releaseLease(owner)
+		}
 	}
 	return nil
 }

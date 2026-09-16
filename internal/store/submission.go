@@ -50,15 +50,24 @@ type Submission struct {
 }
 
 // NewSubmission is the input for creating one accepted submission.
-// Arguments must be the validated canonical argument bytes. Timestamps come
-// from the store clock.
+// Arguments must be the validated canonical upstream argument bytes;
+// RequestArguments must be the canonical client-visible request bytes the
+// idempotency identity covers. Timestamps come from the store clock.
 type NewSubmission struct {
 	ID               string
 	ClientRequestID  string
 	Tool             string
 	Strategy         string
 	DescriptorDigest string
-	Arguments        json.RawMessage
+	// Arguments is the validated canonical upstream argument bytes stored
+	// on the submission after bindings were applied.
+	Arguments json.RawMessage
+	// RequestArguments is the canonical client-visible request — the raw
+	// client arguments plus the client-owned correlation values bindings
+	// may map — that the idempotency hash covers. It is captured before
+	// current schema and binding state applies, so a retry reconciles to
+	// the original submission even when the profile was reconciled.
+	RequestArguments json.RawMessage
 	ProtocolVersion  string
 	AdapterVersion   string
 }
@@ -70,8 +79,8 @@ type NewSubmission struct {
 // Callers use created to distinguish a fresh acceptance (which still needs
 // its acceptance event and dispatch) from a replay of an existing row.
 func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submission, bool, error) {
-	if sub.ID == "" || sub.ClientRequestID == "" || sub.Tool == "" {
-		return nil, false, errors.New("submission id, client request id, and tool are required")
+	if sub.ID == "" || sub.ClientRequestID == "" || sub.Tool == "" || len(sub.RequestArguments) == 0 {
+		return nil, false, errors.New("submission id, client request id, tool, and request arguments are required")
 	}
 	// Canonicalize within the implementation ceiling before applying the
 	// current profile limits. Existing idempotency records remain recoverable
@@ -81,6 +90,11 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 		return nil, false, err
 	}
 	sub.Arguments = arguments
+	requestArguments, err := canonicalArguments(sub.RequestArguments, limits.HardCeiling())
+	if err != nil {
+		return nil, false, err
+	}
+	sub.RequestArguments = requestArguments
 	argsHash := hashInput(sub)
 
 	now := s.now().UnixMilli()
@@ -163,23 +177,25 @@ func (s *Store) CreateSubmission(ctx context.Context, sub NewSubmission) (*Submi
 // ReconcileIdempotentSubmission returns the durable submission previously
 // accepted for clientRequestID, or found=false when the key is unclaimed.
 // The lookup is read-only: it never claims the key, mutates the row, or
-// appends events. A retry reconciles through this method before any
-// readiness or strategy check, so recovery of an already accepted request
-// never depends on current credentials or live profile state. A key reused
-// with different canonical arguments is ErrIdempotencyConflict.
+// appends events. A retry reconciles through this method from the
+// client-visible request before any current schema, binding, readiness, or
+// strategy state applies, so recovery of an already accepted request never
+// depends on them. A key reused with a different client-visible request is
+// ErrIdempotencyConflict. Input outside the canonical hard ceilings can
+// never match an accepted request and reports a miss.
 func (s *Store) ReconcileIdempotentSubmission(
 	ctx context.Context,
-	clientRequestID string,
-	sub NewSubmission,
+	clientRequestID, tool string,
+	requestArguments json.RawMessage,
 ) (*Submission, bool, error) {
 	if clientRequestID == "" {
 		return nil, false, errors.New("client request id is required")
 	}
-	arguments, err := canonicalArguments(sub.Arguments, limits.HardCeiling())
+	arguments, err := canonicalArguments(requestArguments, limits.HardCeiling())
 	if err != nil {
-		return nil, false, err
+		return nil, false, nil
 	}
-	argsHash := hashInput(NewSubmission{Tool: sub.Tool, Arguments: arguments})
+	argsHash := hashInput(NewSubmission{Tool: tool, RequestArguments: arguments})
 	var existingID, existingHash string
 	err = s.db.QueryRowContext(ctx,
 		"SELECT submission_id, args_hash FROM idempotency WHERE client_request_id = ?",
@@ -226,17 +242,18 @@ func (s *Store) reconcileIdempotentSubmission(
 }
 
 // hashInput hashes a length-delimited, versioned client request identity:
-// the tool name and the canonical argument bytes. Live profile state — the
-// execution strategy and the pinned descriptor digest — is deliberately
-// excluded, so a retry after a profile reconciliation reconciles to the
-// original submission instead of reporting a conflict. The executor rechecks
-// the accepted digest against the live catalog before any upstream call.
+// the tool name and the canonical client-visible request bytes. Live
+// profile state — the execution strategy, the pinned descriptor digest,
+// and the bound upstream arguments — is deliberately excluded, so a retry
+// after a profile reconciliation reconciles to the original submission
+// instead of reporting a conflict. The executor rechecks the accepted
+// digest against the live catalog before any upstream call.
 func hashInput(sub NewSubmission) string {
 	var input bytes.Buffer
 	input.WriteString("tama-link/idempotency/v1\x00")
 	for _, value := range [][]byte{
 		[]byte(sub.Tool),
-		sub.Arguments,
+		sub.RequestArguments,
 	} {
 		_ = input.WriteByte(byte(len(value) >> 24))
 		_ = input.WriteByte(byte(len(value) >> 16))

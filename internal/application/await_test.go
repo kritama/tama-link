@@ -189,6 +189,7 @@ func TestSubmitStaleDescriptorDigestFailsContractMismatch(t *testing.T) {
 		Strategy:         string(catalog.StrategyLocalReplayable),
 		DescriptorDigest: "sha256:stale-different-contract",
 		Arguments:        json.RawMessage(`{"detail":"unit"}`),
+		RequestArguments: json.RawMessage(`{"detail":"unit"}`),
 		ProtocolVersion:  "2026-07-28",
 		AdapterVersion:   "test-adapter",
 	})

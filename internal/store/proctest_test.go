@@ -154,6 +154,7 @@ func runScenario(scenario string) int {
 			Strategy:         "upstream_task",
 			DescriptorDigest: "sha256:abc",
 			Arguments:        []byte(`{"message":"hi"}`),
+			RequestArguments: []byte(`{"message":"hi"}`),
 		}
 		created, _, err := s.CreateSubmission(ctx, sub)
 		if err != nil {
@@ -258,7 +259,7 @@ func runScenario(scenario string) int {
 		if _, _, err := s.CreateSubmission(ctx, store.NewSubmission{
 			ID: "sub-wal", ClientRequestID: "req-wal", Tool: "message",
 			Strategy: "upstream_task", DescriptorDigest: "sha256:abc",
-			Arguments: []byte(`{"message":"hi"}`),
+			Arguments: []byte(`{"message":"hi"}`), RequestArguments: []byte(`{"message":"hi"}`),
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "create: %v\n", err)
 			return 1
@@ -272,7 +273,7 @@ func runScenario(scenario string) int {
 		if _, _, err := s.CreateSubmission(ctx, store.NewSubmission{
 			ID: subID, ClientRequestID: "req-race", Tool: "message",
 			Strategy: "upstream_task", DescriptorDigest: "sha256:abc",
-			Arguments: []byte(`{"message":"hi"}`),
+			Arguments: []byte(`{"message":"hi"}`), RequestArguments: []byte(`{"message":"hi"}`),
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "create: %v\n", err)
 			return 1
@@ -463,6 +464,7 @@ func TestProctestWriteAfterReadWaitsForLock(t *testing.T) {
 		Strategy:         "local_replayable",
 		DescriptorDigest: "sha256:abc",
 		Arguments:        []byte(`{}`),
+		RequestArguments: []byte(`{}`),
 	})
 	if err != nil {
 		t.Fatalf("create submission: %v", err)

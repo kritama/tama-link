@@ -164,7 +164,8 @@ func createReplayable(t *testing.T, s *store.Store, id string) {
 	_, _, err := s.CreateSubmission(context.Background(), store.NewSubmission{
 		ID: id, ClientRequestID: "request-" + id, Tool: "recall",
 		Strategy: string(catalog.StrategyLocalReplayable), DescriptorDigest: "sha256:test",
-		Arguments: []byte(`{"query":"memory"}`), ProtocolVersion: "2025-11-25", AdapterVersion: "tama014/1",
+		Arguments: []byte(`{"query":"memory"}`), RequestArguments: []byte(`{"query":"memory"}`),
+		ProtocolVersion: "2025-11-25", AdapterVersion: "tama014/1",
 	})
 	if err != nil {
 		t.Fatalf("CreateSubmission: %v", err)

@@ -166,6 +166,7 @@ func testSubmission(id, clientRequestID string) store.NewSubmission {
 		Strategy:         "upstream_task",
 		DescriptorDigest: "sha256:abc",
 		Arguments:        []byte(`{"message":"hi"}`),
+		RequestArguments: []byte(`{"message":"hi"}`),
 		ProtocolVersion:  "2025-11-25",
 		AdapterVersion:   "tama014/1",
 	}

@@ -208,6 +208,7 @@ func TestRestartReplayReexecutesAfterLeaseExpiry(t *testing.T) {
 		Strategy:         "local_replayable",
 		DescriptorDigest: "digest",
 		Arguments:        json.RawMessage(`{}`),
+		RequestArguments: json.RawMessage(`{}`),
 		ProtocolVersion:  "2026-07-28",
 		AdapterVersion:   "test",
 	})
@@ -299,6 +300,7 @@ func TestWorkerSingleWinnerAcrossProcesses(t *testing.T) {
 		Strategy:         "local_replayable",
 		DescriptorDigest: "digest",
 		Arguments:        json.RawMessage(`{}`),
+		RequestArguments: json.RawMessage(`{}`),
 		ProtocolVersion:  "2026-07-28",
 		AdapterVersion:   "test",
 	})

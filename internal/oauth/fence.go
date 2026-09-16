@@ -20,16 +20,26 @@ func newRefreshSlotLabel() (string, error) {
 	return labelRefresh + "@" + hex.EncodeToString(b[:]), nil
 }
 
-// fencedCredential is one refresh credential plus the generation and slot
-// a replacement must be committed at.
+// fencedCredential is one refresh credential plus the generations and
+// slots a replacement commits at: the credential-fence generation the
+// replacement advances, the lease ownership epoch it must still hold, and
+// the previous live slot to retire after the commit.
 type fencedCredential struct {
 	credential *refreshCredential
 	generation int64
+	// leaseGeneration is the refresh lease ownership epoch captured when
+	// the caller claimed the lease; the fence commit is bound to it.
+	leaseGeneration int64
+	// previousSlot is the secure-backend label the credential was loaded
+	// from. A successful commit retires it, so at most one live slot
+	// holds the grant at any time.
+	previousSlot string
 }
 
 // loadFenced loads the live refresh credential. When no fence has been
 // committed yet, the legacy single-label credential is adopted as
-// generation 1. The returned generation is what a replacement commits at.
+// generation 1. The returned generations are what a replacement commits
+// at, and the returned slot is what a successful commit retires.
 func (c *Client) loadFenced(ctx context.Context) (*fencedCredential, error) {
 	generation, slot, found, err := c.lease.ReadCredentialFence(ctx)
 	if err != nil {
@@ -43,7 +53,7 @@ func (c *Client) loadFenced(ctx context.Context) (*fencedCredential, error) {
 		if !ok {
 			return nil, nil
 		}
-		return &fencedCredential{credential: cred, generation: 1}, nil
+		return &fencedCredential{credential: cred, generation: 1, previousSlot: labelRefresh}, nil
 	}
 	data, ok, err := c.secrets.GetSecret(slot)
 	if err != nil {
@@ -59,16 +69,18 @@ func (c *Client) loadFenced(ctx context.Context) (*fencedCredential, error) {
 	if cred.RefreshToken == "" || cred.TokenEndpoint == "" || cred.Issuer == "" {
 		return nil, fmt.Errorf("stored refresh credential is incomplete")
 	}
-	return &fencedCredential{credential: &cred, generation: generation + 1}, nil
+	return &fencedCredential{credential: &cred, generation: generation + 1, previousSlot: slot}, nil
 }
 
 // storeFenced persists the refresh credential at a fresh slot and commits
-// the fence to it. The commit is the credential-side compare-and-swap:
-// when a concurrent rotation already passed the generation, the commit is
-// rejected and the orphan slot is deleted, so a stale writer can never
-// make its value live — even if its secret-store write blocks past the
-// lease TTL. A successful commit leaves the new slot as the only live
-// credential and retires the legacy label.
+// the fence to it under the caller's live lease epoch. The commit is the
+// credential-side compare-and-swap: when a concurrent rotation already
+// passed the generation, or the caller lost the lease while its secret-store
+// write was blocked, the commit is rejected and the orphan slot is deleted,
+// so a stale writer can never make its value live — even before the winner
+// commits its own generation. A successful commit leaves the new slot as
+// the only live credential and retires the legacy label and the previous
+// live slot.
 func (c *Client) storeFenced(ctx context.Context, fenced *fencedCredential) error {
 	cred := fenced.credential
 	data, err := json.Marshal(cred)
@@ -84,17 +96,25 @@ func (c *Client) storeFenced(ctx context.Context, fenced *fencedCredential) erro
 		_ = c.secrets.DeleteSecret(slot)
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
-	committed, err := c.lease.CommitCredentialFence(ctx, fenced.generation, slot)
+	committed, err := c.lease.CommitCredentialFence(
+		ctx, fenced.generation, slot, refreshLeaseName, c.owner, fenced.leaseGeneration)
 	if err != nil {
 		_ = c.secrets.DeleteSecret(slot)
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
 	if !committed {
-		// A concurrent rotation passed this generation: the write must
-		// not be reported as success and the orphan slot must not linger.
+		// A concurrent rotation passed this generation, or this writer
+		// lost the lease during the write: the write must not be reported
+		// as success and the orphan slot must not linger.
 		_ = c.secrets.DeleteSecret(slot)
 		return fmt.Errorf("%w: refresh credential superseded by a concurrent rotation", ErrBackendUnavailable)
 	}
+	// Retire the credentials this commit replaced: the legacy single-label
+	// form and the previous live slot. Otherwise every rotation would
+	// leave a still-valid grant behind, surviving logout.
 	_ = c.secrets.DeleteSecret(labelRefresh)
+	if previous := fenced.previousSlot; previous != "" && previous != labelRefresh {
+		_ = c.secrets.DeleteSecret(previous)
+	}
 	return nil
 }

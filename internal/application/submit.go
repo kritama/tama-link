@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 
 	"github.com/kritama/tama-link/internal/adapter/tama2026"
@@ -36,6 +37,34 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 		clientRequestID = "crid_" + hex.EncodeToString(b[:])
 		in.ClientRequestID = clientRequestID
 	}
+
+	// Reconcile an existing idempotency record from the client-visible
+	// request BEFORE any current-profile state applies: schema validation,
+	// bindings, credential readiness, and the strategy gate are acceptance
+	// checks for genuinely new work and must not block recovery of an
+	// already accepted request, even when the profile was reconciled or
+	// credentials were removed since acceptance. The lookup is read-only,
+	// so a miss leaves the key free for a genuinely new acceptance below.
+	// A generated key is fresh on every call and skips the lookup.
+	identity, err := requestIdentity(in)
+	if err != nil {
+		return contract.SubmitOutput{}, failed(contract.CodeInvalidRequest,
+			"Arguments must be a valid JSON document.")
+	}
+	if clientRequestID != "" {
+		sub, found, err := s.store.ReconcileIdempotentSubmission(ctx, clientRequestID, d.Name, identity)
+		if err != nil {
+			if errors.Is(err, store.ErrIdempotencyConflict) {
+				return contract.SubmitOutput{}, failed(contract.CodeIdempotencyConflict,
+					"client_request_id was already used with different arguments for this profile.")
+			}
+			return contract.SubmitOutput{}, s.storeError(err)
+		}
+		if found {
+			return submitOutput(sub), nil
+		}
+	}
+
 	clientSchema := d.ClientSchema
 	if len(clientSchema) == 0 {
 		clientSchema = d.InputSchema
@@ -51,30 +80,6 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 	if err := catalog.ValidateAgainstSchema(d.InputSchema, upstreamArgs); err != nil {
 		return contract.SubmitOutput{}, failed(contract.CodeInvalidRequest,
 			"Arguments do not satisfy the pinned upstream schema: %v", err)
-	}
-
-	// Reconcile an existing idempotency record before any readiness or
-	// strategy check: repeating the same key with equivalent canonical
-	// input must return the original submission even when credentials were
-	// removed or the profile was reconciled since acceptance. The lookup is
-	// read-only, so a miss leaves the key free for a genuinely new
-	// acceptance below. A generated key is fresh on every call and skips
-	// the lookup.
-	if clientRequestID != "" {
-		sub, found, err := s.store.ReconcileIdempotentSubmission(ctx, clientRequestID, store.NewSubmission{
-			Tool:      d.Name,
-			Arguments: upstreamArgs,
-		})
-		if err != nil {
-			if errors.Is(err, store.ErrIdempotencyConflict) {
-				return contract.SubmitOutput{}, failed(contract.CodeIdempotencyConflict,
-					"client_request_id was already used with different arguments for this profile.")
-			}
-			return contract.SubmitOutput{}, s.storeError(err)
-		}
-		if found {
-			return submitOutput(sub), nil
-		}
 	}
 
 	// Authenticate before durable acceptance: a profile with no usable
@@ -110,6 +115,7 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 		Strategy:         string(d.Strategy),
 		DescriptorDigest: d.Digest,
 		Arguments:        upstreamArgs,
+		RequestArguments: identity,
 		ProtocolVersion:  tama2026.ProtocolVersion(),
 		AdapterVersion:   s.adapterVersion,
 	})
@@ -144,6 +150,18 @@ func submitOutput(sub *store.Submission) contract.SubmitOutput {
 		SubmittedAt:     &sub.CreatedAt,
 		NextPollMS:      1000,
 	}
+}
+
+// requestIdentity renders the client-visible request the idempotency
+// identity covers: the raw argument bytes plus the client-owned correlation
+// values that reviewed bindings may map. Current schema, binding, and
+// descriptor state is deliberately excluded — those are acceptance checks
+// for new work, applied only after reconciliation.
+func requestIdentity(in contract.SubmitInput) (json.RawMessage, error) {
+	return json.Marshal(struct {
+		Arguments     json.RawMessage         `json:"arguments"`
+		ClientContext *contract.ClientContext `json:"client_context"`
+	}{Arguments: in.Arguments, ClientContext: in.ClientContext})
 }
 
 // strategyGate rejects execution strategies the initial production profiles

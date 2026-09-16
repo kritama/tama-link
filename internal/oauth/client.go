@@ -58,10 +58,17 @@ type Leaser interface {
 	// credential has been committed yet.
 	ReadCredentialFence(ctx context.Context) (generation int64, slot string, found bool, err error)
 	// CommitCredentialFence atomically points the fence at slot for
-	// generation when, and only when, the fence has not advanced past
-	// generation. It is the credential-side compare-and-swap that a stale
-	// writer cannot pass.
-	CommitCredentialFence(ctx context.Context, generation int64, slot string) (bool, error)
+	// fenceGeneration when, and only when, the fence has not advanced past
+	// fenceGeneration AND leaseOwner still holds leaseName unexpired in
+	// the lease ownership epoch leaseGeneration. It is the credential-side
+	// compare-and-swap that a stale writer cannot pass: a writer that lost
+	// the lease while its secret-store write was blocked can never advance
+	// the fence, even before the winner commits its own generation.
+	CommitCredentialFence(ctx context.Context, fenceGeneration int64, slot, leaseName, leaseOwner string, leaseGeneration int64) (bool, error)
+	// ClearCredentialFence removes the credential fence, so the profile
+	// has no live fenced credential. Logout pairs it with deleting the
+	// committed slot and the legacy labels.
+	ClearCredentialFence(ctx context.Context) error
 }
 
 // Config configures one profile's OAuth client.

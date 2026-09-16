@@ -103,6 +103,17 @@ func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *C
 		Issuer:        md.AS.Issuer,
 		Updated:       c.clock().UTC(),
 	}
+	// The authorization write is a credential rotation: it claims the same
+	// refresh lease and commits the fence under its epoch, so it is
+	// ordered against concurrent refreshes instead of clobbering them.
+	leaseGeneration, claimed, err := c.claimRefreshLease(ctx)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return fmt.Errorf("%w: another process is refreshing the credential", ErrLeaseContention)
+	}
+	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
 	// The authorization commits its credential through the same fence as
 	// every refresh, so a concurrent rotation is detected by the commit,
 	// never clobbered.
@@ -114,7 +125,7 @@ func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *C
 		fenced = &fencedCredential{generation: 1}
 	}
 	fenced.credential = cred
-	return c.applyTokens(ctx, fenced, tok)
+	return c.applyTokens(ctx, fenced, tok, leaseGeneration)
 }
 
 // checkLoopbackRedirect enforces D5: the only redirect this client accepts

@@ -42,7 +42,7 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 		return "", err
 	}
 
-	claimed, err := c.claimRefreshLease(ctx)
+	leaseGeneration, claimed, err := c.claimRefreshLease(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -112,30 +112,25 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 		return "", err
 	}
 	// Pre-write gate: the renewal loop keeps the lease alive, and this
-	// atomic commit fails when a foreign claim has already taken it, so
-	// the stale exchange never reaches the credential write.
+	// atomic commit fails when a foreign claim has already taken the
+	// ownership epoch captured at claim time, so the stale exchange never
+	// reaches the credential write.
 	if leaseLost {
 		return "", errors.New("refresh lease lost before the credential write")
 	}
-	leaseGen, ok, err := c.lease.LeaseGeneration(ctx, refreshLeaseName, c.owner)
-	if err != nil {
-		return "", err
-	}
-	if !ok {
-		return "", errors.New("refresh lease lost before the credential write")
-	}
-	if committed, cerr := c.lease.CommitLease(ctx, refreshLeaseName, c.owner, leaseGen); ctx.Err() != nil {
+	if committed, cerr := c.lease.CommitLease(ctx, refreshLeaseName, c.owner, leaseGeneration); ctx.Err() != nil {
 		return "", ctx.Err()
 	} else if cerr != nil || !committed {
 		return "", errors.New("refresh lease lost before the credential write")
 	}
 	// The fenced store is the persistence fence: the slot write plus the
-	// atomic fence commit decide the outcome. A concurrent rotation that
-	// passed our generation makes the commit fail, the orphan slot is
-	// deleted, and the refresh fails instead of reporting a superseded
-	// success. A stale writer can therefore never make its value live,
-	// even if its secret-store write blocks past the lease TTL.
-	if err := c.applyTokens(ctx, fenced, tok); err != nil {
+	// atomic fence commit decide the outcome. The commit is bound to the
+	// lease epoch captured at claim time, so a writer whose lease a
+	// foreign claim took while its secret-store write was blocked can
+	// never advance the fence — even before the winner commits its own
+	// generation. A failed commit deletes the orphan slot, and the refresh
+	// fails instead of reporting a superseded success.
+	if err := c.applyTokens(ctx, fenced, tok, leaseGeneration); err != nil {
 		if ctx.Err() == nil {
 			c.clearToken()
 		}
@@ -196,25 +191,33 @@ func checkIssuerBoundEndpoint(endpoint, issuer string) error {
 	return nil
 }
 
-// claimRefreshLease claims the refresh lease with bounded attempts.
-func (c *Client) claimRefreshLease(ctx context.Context) (bool, error) {
+// claimRefreshLease claims the refresh lease with bounded attempts and
+// returns the claimed ownership epoch.
+func (c *Client) claimRefreshLease(ctx context.Context) (int64, bool, error) {
 	for attempt := 0; attempt < claimAttempts; attempt++ {
 		if attempt > 0 {
 			select {
 			case <-ctx.Done():
-				return false, ctx.Err()
+				return 0, false, ctx.Err()
 			case <-time.After(claimInterval):
 			}
 		}
 		claimed, err := c.lease.ClaimLease(ctx, refreshLeaseName, c.owner, refreshLeaseTTL)
 		if err != nil {
-			return false, fmt.Errorf("claim refresh lease: %w", err)
+			return 0, false, fmt.Errorf("claim refresh lease: %w", err)
 		}
 		if claimed {
-			return true, nil
+			generation, ok, err := c.lease.LeaseGeneration(ctx, refreshLeaseName, c.owner)
+			if err != nil {
+				return 0, false, err
+			}
+			if !ok {
+				return 0, false, errors.New("refresh lease lost before the credential write")
+			}
+			return generation, true, nil
 		}
 	}
-	return false, nil
+	return 0, false, nil
 }
 
 // clearToken drops the in-memory access token after a grant failure.

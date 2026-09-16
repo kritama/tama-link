@@ -164,24 +164,84 @@ func TestRefreshIssuerMismatch(t *testing.T) {
 
 func TestHasCredentialsAndLogout(t *testing.T) {
 	_, client, secrets, _, _ := tokenFixture(t, "rt-1")
-	if ok, err := client.HasCredentials(context.Background()); err != nil || !ok {
+	ctx := context.Background()
+	if ok, err := client.HasCredentials(ctx); err != nil || !ok {
 		t.Fatalf("HasCredentials = %v %v", ok, err)
 	}
 	if _, err := client.Token(context.Background()); err != nil {
 		t.Fatalf("Token: %v", err)
 	}
-	if err := client.Logout(context.Background()); err != nil {
+	if err := client.Logout(ctx); err != nil {
 		t.Fatalf("Logout: %v", err)
 	}
-	if ok, _ := client.HasCredentials(context.Background()); ok {
-		t.Error("credentials survived logout")
+	// The fence is cleared with the slots: the probe must report no
+	// credentials — not follow the fence to a deleted slot and fail the
+	// backend — so a logged-out profile can log in again.
+	if ok, err := client.HasCredentials(ctx); err != nil || ok {
+		t.Fatalf("HasCredentials after logout = %v %v, want false without a backend error", ok, err)
+	}
+	if _, err := client.Token(context.Background()); !errors.Is(err, ErrNoCredentials) {
+		t.Fatalf("Token after logout = %v, want ErrNoCredentials", err)
 	}
 	if _, ok := client.Expiry(); ok {
 		t.Error("in-memory token survived logout")
 	}
-	if _, found, _ := secrets.GetSecret(labelClient); found {
-		t.Error("client record survived logout")
+	for _, label := range secrets.secretLabels() {
+		if label != labelClient && label != labelRefresh && !fencedSlot(label) {
+			continue
+		}
+		if _, found, _ := secrets.GetSecret(label); found {
+			t.Errorf("credential %q survived logout", label)
+		}
 	}
+}
+
+// fencedSlot reports whether label looks like a per-transaction fenced
+// credential slot (labelRefresh@hex).
+func fencedSlot(label string) bool {
+	return strings.HasPrefix(label, labelRefresh+"@")
+}
+
+// TestRefreshRetiresPreviousSlot pins that each successful rotation leaves
+// exactly one live credential slot: the previous live slot and the legacy
+// label are deleted after the fence commit, so historical grants — still
+// valid when the provider omits a replacement refresh token — cannot
+// survive logout.
+func TestRefreshRetiresPreviousSlot(t *testing.T) {
+	server, client, secrets, _, clock := tokenFixture(t, "rt-1")
+	ctx := context.Background()
+
+	if _, err := client.Token(ctx); err != nil {
+		t.Fatalf("first Token: %v", err)
+	}
+	_, slot1, found, err := client.lease.ReadCredentialFence(ctx)
+	if err != nil || !found {
+		t.Fatalf("fence after first refresh: %v", err)
+	}
+
+	// Expire and rotate again: the provider omits a replacement refresh
+	// token, so the second slot holds the same still-valid grant.
+	clock.set(clock.now.Add(2 * time.Hour))
+	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600}`
+	if _, err := client.Token(ctx); err != nil {
+		t.Fatalf("second Token: %v", err)
+	}
+	_, slot2, found, err := client.lease.ReadCredentialFence(ctx)
+	if err != nil || !found || slot2 == slot1 {
+		t.Fatalf("fence after second refresh: slot=%q prev=%q found=%v err=%v", slot2, slot1, found, err)
+	}
+	if _, ok, _ := secrets.GetSecret(slot1); ok {
+		t.Errorf("previous live slot %q survived the rotation", slot1)
+	}
+	for _, label := range secrets.secretLabels() {
+		if label == labelClient || label == slot2 {
+			continue
+		}
+		if _, ok, _ := secrets.GetSecret(label); ok {
+			t.Errorf("retired credential entry %q survived", label)
+		}
+	}
+	clock.set(clock.now.Add(time.Minute))
 }
 
 // TestHasCredentialsSeesFencedCredential pins the fence-aware probe: after
