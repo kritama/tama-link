@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -317,6 +318,26 @@ func TestCallToolRejectsUnknownResultType(t *testing.T) {
 	_, err := client.CallTool(context.Background(), &CallToolParams{Name: "message"})
 	if err == nil {
 		t.Fatal("unknown resultType accepted")
+	}
+}
+
+// TestCallToolRejectsUnknownInitialTaskStatus proves a task-shaped result
+// with an unknown or absent status fails closed on the first response,
+// before any polling begins.
+func TestCallToolRejectsUnknownInitialTaskStatus(t *testing.T) {
+	for _, tc := range []string{
+		`{"resultType":"task","taskId":"t-1","status":"paused"}`,
+		`{"resultType":"task","taskId":"t-1"}`,
+	} {
+		ts := newTestServer(t, func(rec *recordedRequest) (int, string, string) {
+			return 200, "application/json", jsonReply(rec.BodyID, tc)
+		})
+		client := newTestClient(t, ts)
+		_, err := client.CallTool(context.Background(), &CallToolParams{Name: "message"})
+		var uerr *Error
+		if !errors.As(err, &uerr) || uerr.Kind != KindProtocol {
+			t.Fatalf("%s: err = %v, want protocol kind", tc, err)
+		}
 	}
 }
 

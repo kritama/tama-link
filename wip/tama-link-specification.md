@@ -563,10 +563,20 @@ durable Submission or graph execution.
 
 `subscriptions/listen` is an authorized, task-ID-scoped SSE optimization. Link
 accepts no task notification before the acknowledgement, captures complete
-snapshots only when the subscription ID and task ID match, and always recovers
-through `tasks/get` after a disconnect, missed notification, overflow,
-credential expiry, or policy invalidation. Correctness never depends on
-notification delivery.
+snapshots only when the subscription ID matches and the task ID is in the
+acknowledged set, and always recovers through `tasks/get` after a disconnect,
+missed notification, overflow, credential expiry, or policy invalidation.
+Correctness never depends on notification delivery.
+
+The stream contract fails closed: the acknowledgement must be the first event
+and may authorize only a subset of the requested task IDs; every later task
+snapshot must carry an acknowledged task ID; the final JSON-RPC response may
+only follow the acknowledgement and marks graceful closure; a final JSON-RPC
+error is a protocol failure, not a clean close. SSE events are bounded as a
+complete encoded event, including multi-line data fields, and an event whose
+delimiter never arrives at end of stream is not dispatched. A stream's
+lifetime is bounded by the caller context, credential expiry, and the
+stream-lifetime owner, never by a finite-request client timeout.
 
 At discovery time Tama Link records and validates:
 
@@ -688,12 +698,25 @@ operation may refresh authorization when standards and policy permit, but must
 return an actionable terminal or retryable error when user interaction is
 required.
 
+The authorization-code exchange binds one exact loopback redirect URI. The
+ephemeral listener port is selected before the authorization URL is built, and
+that exact URI appears in the authorization request, is required on the
+observed callback, and is resent verbatim in the token request, as the
+authorization-code grant requires. A callback observed on any other URI is
+rejected before any token request is sent.
+
 Tama Link coordinates refresh through a profile-scoped cross-process lease,
 re-reads the credential after acquiring it, and safely stores a replacement
 refresh token when the provider returns one. `invalid_grant` maps to
 `authentication_required` without an automatic retry loop. An upstream
 subscription closes no later than credential expiry; after successful refresh,
 Link reconciles through `tasks/get` before opening a replacement stream.
+
+The stored client registration and refresh credential must both bind the
+active profile issuer, and the stored token endpoint is re-validated against
+the issuer-bound metadata policy before use. A profile that changes issuer
+while retaining its credential namespace fails closed rather than replaying a
+foreign token to a stored endpoint.
 
 ## Validation and limits
 
@@ -716,9 +739,12 @@ completion for payload-free expiry tombstones. Profiles may lower these values;
 raising them requires explicit values within implementation hard ceilings and
 a reconciled profile digest.
 
-All network destinations come from a validated profile. Redirects, discovered
-metadata, JWKS locations, and authorization endpoints require the same SSRF and
-origin review expected of an OAuth/MCP client.
+All network destinations come from a validated profile. Discovered metadata,
+JWKS locations, and authorization endpoints require the same SSRF and origin
+review expected of an OAuth/MCP client. HTTP redirects are never followed on
+either side: every client, default or supplied, rejects 3xx responses instead
+of changing destination, so a bearer token or form credential can never be
+replayed to a destination introduced by a `Location` header.
 
 Standard output must never contain logs. Logs must not contain credentials,
 authorization headers, private keys, raw assertions, complete sensitive

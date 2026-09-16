@@ -3,6 +3,7 @@ package upstream
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -25,7 +26,7 @@ func buildMeta(clientInfo mcp.Implementation, capabilities json.RawMessage) (jso
 // object. Capabilities must be a JSON object; it is encoded verbatim so
 // declared extension objects survive unchanged.
 func buildMetaWith(clientInfo mcp.Implementation, capabilities json.RawMessage) (json.RawMessage, error) {
-	if !isJSONObject(capabilities) {
+	if !IsJSONObject(capabilities) {
 		return nil, fmt.Errorf("client capabilities must be a JSON object")
 	}
 	meta, err := json.Marshal(metaTriple{
@@ -39,8 +40,13 @@ func buildMetaWith(clientInfo mcp.Implementation, capabilities json.RawMessage) 
 	return meta, nil
 }
 
-// isJSONObject reports whether raw is a valid JSON object document.
-func isJSONObject(raw json.RawMessage) bool {
+// IsJSONObject reports whether raw is a valid JSON object document. JSON
+// null and scalar documents are not objects.
+func IsJSONObject(raw json.RawMessage) bool {
+	trimmed := strings.TrimSpace(string(raw))
+	if !strings.HasPrefix(trimmed, "{") || !strings.HasSuffix(trimmed, "}") {
+		return false
+	}
 	var v map[string]json.RawMessage
 	return json.Unmarshal(raw, &v) == nil
 }

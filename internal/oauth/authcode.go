@@ -19,15 +19,24 @@ type AuthorizationRequest struct {
 	State string
 	// Verifier is the PKCE code verifier required by the exchange.
 	Verifier string
-	// RedirectURI is the registered loopback redirect URI.
+	// RedirectURI is the exact loopback URI in the authorization request.
+	// The listener that serves it must observe exactly this URI; the token
+	// exchange resends it verbatim because the authorization-code grant
+	// requires both values to be equal.
 	RedirectURI string
 }
 
 // NewAuthorizationRequest builds one authorization URL with PKCE S256 and
-// RFC 8707 resource binding.
-func (c *Client) NewAuthorizationRequest(md *Metadata, rec *ClientRecord) (*AuthorizationRequest, error) {
+// RFC 8707 resource binding. redirectURI must be the exact URI the loopback
+// listener will serve: the ephemeral listener port must be selected before
+// this is called, and that exact URI is what the authorization request and
+// the later token exchange both carry.
+func (c *Client) NewAuthorizationRequest(md *Metadata, rec *ClientRecord, redirectURI string) (*AuthorizationRequest, error) {
 	if rec.Issuer != md.AS.Issuer {
 		return nil, fmt.Errorf("%w: client registration binds a different issuer", ErrMetadata)
+	}
+	if err := checkLoopbackRedirect(redirectURI); err != nil {
+		return nil, err
 	}
 	verifier, err := randomToken(48)
 	if err != nil {
@@ -47,29 +56,38 @@ func (c *Client) NewAuthorizationRequest(md *Metadata, rec *ClientRecord) (*Auth
 	q := endpoint.Query()
 	q.Set("response_type", "code")
 	q.Set("client_id", rec.ClientID)
-	q.Set("redirect_uri", c.redirectURI)
+	q.Set("redirect_uri", redirectURI)
 	q.Set("state", state)
 	q.Set("code_challenge", challenge)
 	q.Set("code_challenge_method", "S256")
 	q.Set("resource", c.endpoint)
 	endpoint.RawQuery = q.Encode()
-	return &AuthorizationRequest{URL: endpoint, State: state, Verifier: verifier, RedirectURI: c.redirectURI}, nil
+	return &AuthorizationRequest{URL: endpoint, State: state, Verifier: verifier, RedirectURI: redirectURI}, nil
 }
 
-// CompleteAuthorization exchanges an authorization code for tokens, using
-// the loopback redirect URI actually observed by the listener. The exchanged
-// access token is held in memory; the refresh credential is persisted.
+// CompleteAuthorization exchanges an authorization code for tokens. The
+// authorization-code grant requires the token request's redirect_uri to
+// equal the value sent in the authorization request, so observedRedirectURI
+// must equal req.RedirectURI exactly; a mismatch is rejected before any
+// token request is sent. The exchanged access token is held in memory; the
+// refresh credential is persisted.
 func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *ClientRecord, req *AuthorizationRequest, code, observedRedirectURI string) error {
 	if code == "" {
 		return fmt.Errorf("authorization code is required")
 	}
-	if err := checkLoopbackRedirect(observedRedirectURI); err != nil {
+	if req == nil {
+		return fmt.Errorf("authorization request is required")
+	}
+	if observedRedirectURI != req.RedirectURI {
+		return fmt.Errorf("observed redirect uri does not match the authorization request")
+	}
+	if err := checkLoopbackRedirect(req.RedirectURI); err != nil {
 		return err
 	}
 	form := url.Values{}
 	form.Set("grant_type", "authorization_code")
 	form.Set("code", code)
-	form.Set("redirect_uri", observedRedirectURI)
+	form.Set("redirect_uri", req.RedirectURI)
 	form.Set("code_verifier", req.Verifier)
 	form.Set("resource", c.endpoint)
 	tok, err := c.postToken(ctx, md.AS.TokenEndpoint, rec, form)

@@ -161,6 +161,12 @@ scoped, documented exception to the original "must not open a TCP listener"
 rule, which the authoritative specification now states as "no persistent
 control-surface listener."
 
+The listener port is selected before the authorization URL exists. That exact
+redirect URI is carried in the authorization request, matched against the
+observed callback, and resent verbatim in the token exchange; the
+authorization-code grant requires the two values to be equal, so any mismatch
+is rejected before a token request is sent.
+
 ### D6. Terminal results are captured immediately and owned locally
 
 TamaMCP includes the complete state-specific payload, including a terminal

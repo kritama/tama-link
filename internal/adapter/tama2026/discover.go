@@ -28,15 +28,15 @@ func classify(err error) error {
 // verifyDiscovery enforces the pinned protocol and server capability
 // contract before any catalog work begins.
 func (a *Adapter) verifyDiscovery(disc *upstream.DiscoverResult) error {
+	if !a.profile.Bounds.Contains(protocolVersion) {
+		return fmt.Errorf("%w: protocol %s is outside the profile bounds %s to %s",
+			ErrProtocolMismatch, protocolVersion, a.profile.Bounds.ProtocolMin, a.profile.Bounds.ProtocolMax)
+	}
 	if !slices.Contains(disc.SupportedVersions, protocolVersion) {
 		return fmt.Errorf("%w: server does not support %s", ErrProtocolMismatch, protocolVersion)
 	}
-	caps, err := decodeCapabilities(disc.Capabilities)
-	if err != nil {
+	if _, err := decodeCapabilities(disc.Capabilities); err != nil {
 		return fmt.Errorf("%w: %w", ErrProtocolMismatch, err)
-	}
-	if len(caps.Tools) == 0 {
-		return fmt.Errorf("%w: server declares no tools capability", ErrProtocolMismatch)
 	}
 	if a.profile.Instructions != disc.Instructions {
 		return fmt.Errorf("%w: live instructions do not match the pinned profile", ErrCatalogMismatch)
@@ -51,10 +51,25 @@ type capabilityView struct {
 	Extensions map[string]json.RawMessage
 }
 
+// decodeCapabilities enforces the capability object shapes: capabilities
+// must be a JSON object, tools must be declared as a JSON object, and every
+// declared extension value must be a JSON object. A null or scalar
+// declaration is malformed, not an empty object.
 func decodeCapabilities(raw json.RawMessage) (*capabilityView, error) {
+	if !upstream.IsJSONObject(raw) {
+		return nil, fmt.Errorf("capabilities is not a JSON object")
+	}
 	var view capabilityView
 	if err := json.Unmarshal(raw, &view); err != nil {
 		return nil, fmt.Errorf("decode server capabilities")
+	}
+	if len(view.Tools) == 0 || !upstream.IsJSONObject(view.Tools) {
+		return nil, fmt.Errorf("server declares no tools capability object")
+	}
+	for _, ext := range view.Extensions {
+		if !upstream.IsJSONObject(ext) {
+			return nil, fmt.Errorf("capability extension value is not a JSON object")
+		}
 	}
 	return &view, nil
 }

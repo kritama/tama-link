@@ -30,16 +30,21 @@ type DiscoverResult struct {
 	ServerInfo *mcp.Implementation
 }
 
-// HasTaskExtension reports whether the server declared the Tasks extension.
+// HasTaskExtension reports whether the server declared the Tasks extension
+// with the required JSON object value. A missing or malformed declaration
+// (null, scalar, array) is not a declaration.
 func (r *DiscoverResult) HasTaskExtension() bool {
+	if !IsJSONObject(r.Capabilities) {
+		return false
+	}
 	var caps struct {
 		Extensions map[string]json.RawMessage `json:"extensions"`
 	}
 	if json.Unmarshal(r.Capabilities, &caps) != nil {
 		return false
 	}
-	_, ok := caps.Extensions["io.modelcontextprotocol/tasks"]
-	return ok
+	ext, ok := caps.Extensions["io.modelcontextprotocol/tasks"]
+	return ok && IsJSONObject(ext)
 }
 
 // Discover performs server/discover. The client never sends initialize; this

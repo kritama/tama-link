@@ -9,7 +9,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
@@ -212,21 +214,84 @@ func TestNewValidation(t *testing.T) {
 	}
 }
 
-// TestRedirectsAreRejected proves a 3xx never changes destination.
-func TestRedirectsAreRejected(t *testing.T) {
+// newRedirectingEndpoint answers every request with one redirect to the
+// target, counting how many times the target was actually reached.
+func newRedirectingEndpoint(t *testing.T, status int) (endpoint string, targetHits *int32) {
+	t.Helper()
+	hits := new(int32)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(hits, 1)
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = fmt.Fprint(w, jsonReply("x", `{}`))
 	}))
-	defer target.Close()
-	redirector := newTestServer(t, func(_ *recordedRequest) (int, string, string) {
-		return http.StatusFound, "text/plain", ""
-	})
-	redirector.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, target.URL, http.StatusFound)
-	})
+	t.Cleanup(target.Close)
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, status)
+	}))
+	t.Cleanup(redirector.Close)
+	return redirector.URL, hits
+}
+
+// TestRedirectsAreRejected proves a 3xx never changes destination: the
+// redirect target receives zero requests for every redirect status, and the
+// caller sees a classified failure.
+func TestRedirectsAreRejected(t *testing.T) {
+	for _, status := range []int{http.StatusFound, http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
+			endpoint, hits := newRedirectingEndpoint(t, status)
+			client, err := New(Config{
+				Endpoint:           endpoint,
+				ClientInfo:         mcp.Implementation{Name: "tama-link", Version: "0.1.0"},
+				ClientCapabilities: json.RawMessage(`{}`),
+				TokenProvider:      func(context.Context) (string, error) { return "t", nil },
+				MaxResponseBytes:   1 << 20,
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if _, err := client.Discover(context.Background()); err == nil {
+				t.Fatal("redirected request succeeded")
+			}
+			if got := atomic.LoadInt32(hits); got != 0 {
+				t.Fatalf("redirect target hit %d times, want 0", got)
+			}
+		})
+	}
+}
+
+// TestRedirectsRejectedOnAuthenticatedPost proves the refusal also applies
+// to authenticated tools/call POSTs with 307/308, where following the
+// redirect would replay the bearer token to a different destination.
+func TestRedirectsRejectedOnAuthenticatedPost(t *testing.T) {
+	for _, status := range []int{http.StatusTemporaryRedirect, http.StatusPermanentRedirect} {
+		t.Run(fmt.Sprintf("%d", status), func(t *testing.T) {
+			endpoint, hits := newRedirectingEndpoint(t, status)
+			client, err := New(Config{
+				Endpoint:           endpoint,
+				ClientInfo:         mcp.Implementation{Name: "tama-link", Version: "0.1.0"},
+				ClientCapabilities: json.RawMessage(`{}`),
+				TokenProvider:      func(context.Context) (string, error) { return "secret-token", nil },
+				MaxResponseBytes:   1 << 20,
+			})
+			if err != nil {
+				t.Fatalf("New: %v", err)
+			}
+			if _, err := client.CallTool(context.Background(), &CallToolParams{Name: "message"}); err == nil {
+				t.Fatal("redirected authenticated POST succeeded")
+			}
+			if got := atomic.LoadInt32(hits); got != 0 {
+				t.Fatalf("redirect target hit %d times, want 0", got)
+			}
+		})
+	}
+}
+
+// TestDefaultClientRefusesRedirects proves the default (caller-supplied-nil)
+// client also refuses redirects, not only cloned supplied clients.
+func TestDefaultClientRefusesRedirects(t *testing.T) {
+	endpoint, hits := newRedirectingEndpoint(t, http.StatusFound)
 	client, err := New(Config{
-		Endpoint:           redirector.URL,
+		Endpoint:           endpoint,
 		ClientInfo:         mcp.Implementation{Name: "tama-link", Version: "0.1.0"},
 		ClientCapabilities: json.RawMessage(`{}`),
 		TokenProvider:      func(context.Context) (string, error) { return "t", nil },
@@ -235,13 +300,11 @@ func TestRedirectsAreRejected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = client.Discover(context.Background())
-	if err == nil {
-		t.Fatal("redirected request succeeded")
+	if _, err := client.Discover(context.Background()); err == nil {
+		t.Fatal("default client followed a redirect")
 	}
-	var uerr *Error
-	if !errors.As(err, &uerr) || (uerr.Kind != KindTransport && uerr.Kind != KindHTTP) {
-		t.Fatalf("error kind = %v, want transport or http", err)
+	if got := atomic.LoadInt32(hits); got != 0 {
+		t.Fatalf("redirect target hit %d times, want 0", got)
 	}
 }
 
@@ -413,4 +476,103 @@ func TestMalformedResponses(t *testing.T) {
 			t.Fatalf("err = %v, want transport kind", err)
 		}
 	})
+}
+
+// TestFiniteCallHonorsRequestTimeout proves ordinary requests are bounded by
+// the per-request deadline even though the client carries no overall timeout.
+func TestFiniteCallHonorsRequestTimeout(t *testing.T) {
+	release := make(chan struct{})
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		select {
+		case <-release:
+		case <-time.After(500 * time.Millisecond):
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, jsonReply("x", `{}`))
+	}))
+	defer slow.Close()
+	defer close(release)
+	client, err := New(Config{
+		Endpoint:           slow.URL,
+		ClientInfo:         mcp.Implementation{Name: "tama-link", Version: "0.1.0"},
+		ClientCapabilities: json.RawMessage(`{}`),
+		TokenProvider:      func(context.Context) (string, error) { return "t", nil },
+		MaxResponseBytes:   1 << 20,
+		RequestTimeout:     50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	start := time.Now()
+	_, err = client.Discover(context.Background())
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want context deadline", err)
+	}
+	if elapsed := time.Since(start); elapsed > 400*time.Millisecond {
+		t.Errorf("call outlived the per-request deadline by a wide margin: %s", elapsed)
+	}
+}
+
+// TestSubscriptionNotBoundByRequestTimeout proves a subscription stream may
+// remain open far beyond the finite-request timeout, and still closes
+// promptly when the caller cancels its context.
+func TestSubscriptionNotBoundByRequestTimeout(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(io.LimitReader(r.Body, 4096))
+		var envelope struct {
+			ID string `json:"id"`
+		}
+		_ = json.Unmarshal(raw, &envelope)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		w.WriteHeader(http.StatusOK)
+		flusher := w.(http.Flusher)
+		_, _ = fmt.Fprintf(w, `data: {"jsonrpc":"2.0","method":"notifications/subscriptions/acknowledged","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":%q},"notifications":{"taskIds":[]}}}`+"\n\n", envelope.ID)
+		flusher.Flush()
+		// Stay open until the client cancels.
+		<-r.Context().Done()
+	}))
+	defer ts.Close()
+	client, err := New(Config{
+		Endpoint:           ts.URL,
+		ClientInfo:         mcp.Implementation{Name: "tama-link", Version: "0.1.0"},
+		ClientCapabilities: json.RawMessage(`{"extensions":{"io.modelcontextprotocol/tasks":{}}}`),
+		TokenProvider:      func(context.Context) (string, error) { return "t", nil },
+		MaxResponseBytes:   1 << 20,
+		RequestTimeout:     50 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	ackedCh := make(chan struct{})
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- client.Subscribe(ctx, []string{"task-1"}, &SubscribeCallbacks{
+			OnAcknowledged: func([]string) error { close(ackedCh); return nil },
+			OnTask:         func(TaskState) error { return nil },
+		})
+	}()
+	// Wait for the acknowledgement, then hold the stream open well past the
+	// 50ms finite-request timeout.
+	select {
+	case <-ackedCh:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stream never acknowledged")
+	}
+	time.Sleep(300 * time.Millisecond)
+	select {
+	case <-errCh:
+		t.Fatal("stream died before the caller cancelled it")
+	default:
+	}
+	cancel()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("err = %v, want context canceled", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream did not close promptly on cancellation")
+	}
 }

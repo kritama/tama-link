@@ -126,13 +126,32 @@ func TestSubscribeHappyPath(t *testing.T) {
 	}
 }
 
+// taskCompletedNotificationFixture is the completed snapshot as a
+// notifications/tasks payload: the same detailed state minus the tasks/get
+// resultType envelope.
+const taskCompletedNotificationFixture = `{
+  "taskId": "d59d7f2a-933e-44f4-8c28-4d28e9f0d937",
+  "status": "completed",
+  "statusMessage": "The message completed successfully.",
+  "createdAt": "2026-09-11T10:00:00Z",
+  "lastUpdatedAt": "2026-09-11T10:00:05Z",
+  "ttlMs": 86400000,
+  "pollIntervalMs": 1000,
+  "result": {
+    "resultType": "complete",
+    "content": [{"type": "text", "text": "The project foundation is complete."}],
+    "structuredContent": {"status": "completed"},
+    "isError": false
+  }
+}`
+
 // TestSubscribeTaskSnapshotPayload covers a completed snapshot carrying the
 // full terminal result.
 func TestSubscribeTaskSnapshotPayload(t *testing.T) {
 	ts := subServer(t, func(id string) []string {
 		payload := fmt.Sprintf(
 			`{"jsonrpc":"2.0","method":"notifications/tasks","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":%q},%s}}`,
-			id, stripOuterBraces(taskCompletedFixture))
+			id, stripOuterBraces(taskCompletedNotificationFixture))
 		return []string{ackEvent(id, subTaskID), sseReply(payload), finalResponse(id)}
 	})
 	client := newSubClient(t, ts.URL)
@@ -210,6 +229,36 @@ func TestSubscribeProtocolViolations(t *testing.T) {
 		}},
 		{"duplicate ack", func(id string) []string {
 			return []string{ackEvent(id, subTaskID), ackEvent(id, subTaskID)}
+		}},
+		{"ack authorizes an unrequested task", func(id string) []string {
+			return []string{ackEvent(id, "rogue-task", subTaskID)}
+		}},
+		{"ack repeats a task id", func(id string) []string {
+			return []string{ackEvent(id, subTaskID, subTaskID)}
+		}},
+		{"notification outside the acknowledged set", func(id string) []string {
+			// The ack authorizes nothing; a snapshot for a requested-but-not-
+			// authorized id must still be rejected.
+			return []string{ackEvent(id), taskEvent(id)}
+		}},
+		{"final response before ack", func(id string) []string {
+			return []string{finalResponse(id)}
+		}},
+		{"final JSON-RPC error is not graceful", func(id string) []string {
+			payload := fmt.Sprintf(`{"jsonrpc":"2.0","id":%q,"error":{"code":-32600,"message":"stream failed"}}`, id)
+			return []string{ackEvent(id, subTaskID), sseReply(payload)}
+		}},
+		{"notification carries resultType", func(id string) []string {
+			payload := fmt.Sprintf(
+				`{"jsonrpc":"2.0","method":"notifications/tasks","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":%q},"resultType":"complete","taskId":%q,"status":"working"}}`,
+				id, subTaskID)
+			return []string{ackEvent(id, subTaskID), sseReply(payload)}
+		}},
+		{"notification with null result payload", func(id string) []string {
+			payload := fmt.Sprintf(
+				`{"jsonrpc":"2.0","method":"notifications/tasks","params":{"_meta":{"io.modelcontextprotocol/subscriptionId":%q},"taskId":%q,"status":"completed","result":null}}`,
+				id, subTaskID)
+			return []string{ackEvent(id, subTaskID), sseReply(payload)}
 		}},
 	}
 	for _, tc := range cases {

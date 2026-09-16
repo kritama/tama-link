@@ -430,3 +430,77 @@ func TestNewEndpointBinding(t *testing.T) {
 		t.Fatal("cross-endpoint wiring accepted")
 	}
 }
+
+// TestProfileBoundsRejectStaleAndFuture proves the adapter refuses profiles
+// whose compatibility bounds do not cover the pinned protocol version.
+func TestProfileBoundsRejectStaleAndFuture(t *testing.T) {
+	server := newTamaServer(t)
+	endpoint := server.ts.URL + "/mcp/app"
+	up, err := upstream.New(upstream.Config{
+		Endpoint:           endpoint,
+		ClientInfo:         mcp.Implementation{Name: "tama-link", Version: "0.1.0"},
+		ClientCapabilities: json.RawMessage(`{}`),
+		TokenProvider:      func(context.Context) (string, error) { return "test-token", nil },
+		MaxResponseBytes:   1 << 20,
+		HTTPClient:         &http.Client{},
+	})
+	if err != nil {
+		t.Fatalf("upstream.New: %v", err)
+	}
+	for _, tc := range []struct {
+		name     string
+		min, max string
+	}{
+		{"stale bounds", "2025-03-26", "2025-11-25"},
+		{"future bounds", "2026-08-01", "2026-12-31"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := New(Config{
+				Profile: profile.Profile{
+					Endpoint:     endpoint,
+					Instructions: pinnedInstructions,
+					Bounds:       profile.Bounds{ProtocolMin: tc.min, ProtocolMax: tc.max},
+					Operations:   []catalog.Descriptor{pinnedMessage(catalog.StrategyUpstreamTask, catalog.TaskSupportRequired)},
+				},
+				Upstream:       up,
+				AdapterVersion: "0.2.0",
+			})
+			if err == nil {
+				t.Fatal("out-of-bounds profile accepted")
+			}
+		})
+	}
+}
+
+// TestConnectMalformedCapabilities proves malformed capability declarations
+// fail closed: null or scalar tools, an array extensions member, and a null
+// Tasks extension value are not empty objects.
+func TestConnectMalformedCapabilities(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(doc string) string
+	}{
+		{"null tools", func(doc string) string {
+			return strings.Replace(doc, `"tools":{}`, `"tools":null`, 1)
+		}},
+		{"scalar tools", func(doc string) string {
+			return strings.Replace(doc, `"tools":{}`, `"tools":"yes"`, 1)
+		}},
+		{"array extensions", func(doc string) string {
+			return strings.Replace(doc, `"extensions":{"io.modelcontextprotocol/tasks":{}}`, `"extensions":[1]`, 1)
+		}},
+		{"null tasks extension value", func(doc string) string {
+			return strings.Replace(doc, `"io.modelcontextprotocol/tasks":{}}`, `"io.modelcontextprotocol/tasks":null}`, 1)
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			server := newTamaServer(t)
+			server.discoverDoc = tc.mutate(server.discoverDoc)
+			adapter := newTestAdapter(t, server, pinnedMessage(catalog.StrategyUpstreamTask, catalog.TaskSupportRequired))
+			if _, err := adapter.Connect(context.Background()); !errors.Is(err, ErrProtocolMismatch) {
+				t.Fatalf("err = %v, want ErrProtocolMismatch", err)
+			}
+		})
+	}
+}

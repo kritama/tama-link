@@ -154,30 +154,46 @@ func protocolError(werr *jsonrpc.Error) error {
 
 // scanSSE consumes an SSE stream, dispatching each data payload as a decoded
 // JSON-RPC message until dispatch stops, an error occurs, or the stream
-// closes. Every frame counts against the per-event bound; the stream itself
-// is bounded by the caller context. A clean close without a stop signal
-// returns nil: stream end is an ordinary outcome the caller reconciles.
+// closes. The complete encoded event counts against the per-event bound:
+// every data line adds its value plus the newline that rejoining inserts, so
+// an unbounded number of individually valid lines cannot allocate an
+// unbounded payload. The stream itself is bounded by the caller context.
+//
+// A clean close without a stop signal returns nil: stream end is an ordinary
+// outcome the caller reconciles. An event whose blank-line delimiter never
+// arrives at EOF is not dispatched, matching the WHATWG event-stream parser
+// (an implied line feed completes the last line, but only a blank line
+// dispatches). Callers that were waiting for a response treat that as a
+// clean close and reconcile.
 func (c *Client) scanSSE(r io.Reader, dispatch func(msg jsonrpc.Message) (stop bool, err error)) error {
 	scanner := bufio.NewScanner(r)
-	scanner.Buffer(make([]byte, 0, 64*1024), int(c.maxBytes))
+	// The line bound is the event bound plus the data-field prefix: the
+	// cumulative event count below is the actual bound, the line bound only
+	// has to avoid truncating one bounded event.
+	scanner.Buffer(make([]byte, 0, 64*1024), int(c.maxBytes)+8)
 	var data []string
+	var eventBytes int64
+	flush := func() error {
+		payload := strings.Join(data, "\n")
+		data = data[:0]
+		eventBytes = 0
+		if payload == "" {
+			return nil
+		}
+		msg, err := jsonrpc.DecodeMessage([]byte(payload))
+		if err != nil {
+			return newError(KindTransport, 0, fmt.Errorf("decode SSE payload: jsonrpc"))
+		}
+		stop, err := dispatch(msg)
+		if stop || err != nil {
+			return err
+		}
+		return nil
+	}
 	for scanner.Scan() {
 		line := scanner.Text()
-		if int64(len(line)) > c.maxBytes {
-			return newError(KindTooLarge, 0, fmt.Errorf("SSE line exceeds %d bytes", c.maxBytes))
-		}
 		if line == "" {
-			payload := strings.Join(data, "\n")
-			data = data[:0]
-			if payload == "" {
-				continue
-			}
-			msg, err := jsonrpc.DecodeMessage([]byte(payload))
-			if err != nil {
-				return newError(KindTransport, 0, fmt.Errorf("decode SSE payload: jsonrpc"))
-			}
-			stop, err := dispatch(msg)
-			if stop || err != nil {
+			if err := flush(); err != nil {
 				return err
 			}
 			continue
@@ -186,7 +202,14 @@ func (c *Client) scanSSE(r io.Reader, dispatch func(msg jsonrpc.Message) (stop b
 			continue // keepalive comment
 		}
 		if value, ok := strings.CutPrefix(line, "data:"); ok {
-			data = append(data, stripOneSpace(value))
+			value = stripOneSpace(value)
+			// Count the line plus its join separator so the cumulative
+			// encoded payload is bounded before the event completes.
+			eventBytes += int64(len(value)) + 1
+			if eventBytes > c.maxBytes {
+				return newError(KindTooLarge, 0, fmt.Errorf("SSE event exceeds %d bytes", c.maxBytes))
+			}
+			data = append(data, value)
 		}
 		// event:, id:, retry: fields carry no payload for this contract.
 	}
@@ -196,6 +219,7 @@ func (c *Client) scanSSE(r io.Reader, dispatch func(msg jsonrpc.Message) (stop b
 		}
 		return newError(KindTooLarge, 0, fmt.Errorf("SSE frame exceeds bound: %w", err))
 	}
+	// A final event without its blank-line delimiter is dropped by design.
 	return nil
 }
 

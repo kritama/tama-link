@@ -60,8 +60,20 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 	if !found {
 		return "", fmt.Errorf("%w: no refresh credential", ErrNoCredentials)
 	}
+	// Both stored values must bind the active profile issuer: if the profile
+	// changed issuer while retaining its credential namespace, refresh fails
+	// closed instead of replaying a foreign token to a stored endpoint.
+	if rec.Issuer != c.issuer {
+		return "", fmt.Errorf("%w: stored client registration binds a different issuer than the active profile", ErrNoCredentials)
+	}
+	if cred.Issuer != c.issuer {
+		return "", fmt.Errorf("%w: stored refresh credential binds a different issuer than the active profile", ErrNoCredentials)
+	}
 	if rec.Issuer != cred.Issuer {
 		return "", fmt.Errorf("%w: client registration and refresh credential bind different issuers", ErrNoCredentials)
+	}
+	if err := checkStoredTokenEndpoint(cred.TokenEndpoint, cred.Issuer); err != nil {
+		return "", fmt.Errorf("%w: %v", ErrNoCredentials, err)
 	}
 
 	form := url.Values{}
@@ -79,6 +91,23 @@ func (c *Client) refresh(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return tok.AccessToken, nil
+}
+
+// checkStoredTokenEndpoint validates the persisted token endpoint against
+// the issuer-bound metadata policy: a secure absolute URL on the same
+// origin as the issuer it claims.
+func checkStoredTokenEndpoint(endpoint, issuer string) error {
+	u, err := url.Parse(endpoint)
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("stored token endpoint is not an absolute URL")
+	}
+	if err := checkSecureURL(u); err != nil {
+		return fmt.Errorf("stored token endpoint: %w", err)
+	}
+	if endpointOrigin(endpoint) != endpointOrigin(issuer) {
+		return fmt.Errorf("stored token endpoint origin does not match its issuer")
+	}
+	return nil
 }
 
 // claimRefreshLease claims the refresh lease with bounded attempts.

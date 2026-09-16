@@ -55,8 +55,11 @@ type Config struct {
 	// Issuer is the expected authorization-server issuer, exactly.
 	// Required.
 	Issuer string
-	// RedirectURI is the registered loopback redirect URI. Defaults to
-	// "http://127.0.0.1" (any ephemeral port).
+	// RedirectURI is the loopback URI registered with the authorization
+	// server during dynamic client registration. Defaults to
+	// "http://127.0.0.1" (any ephemeral port). The actual listener port is
+	// selected by the caller before NewAuthorizationRequest, which carries
+	// the exact URI through the authorization and token exchanges.
 	RedirectURI string
 	// Secrets stores OAuth secrets in the profile credential namespace.
 	// Required.
@@ -129,16 +132,19 @@ func New(cfg Config) (*Client, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxMetadataBytes
 	}
-	httpClient := cfg.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{Timeout: 30 * time.Second}
-	} else {
-		cloned := *httpClient
-		cloned.CheckRedirect = func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		}
-		httpClient = &cloned
+	// Redirects are refused on every client, default or supplied: metadata,
+	// registration, and token destinations must all come from validated
+	// profile metadata, never from a Location header. The supplied client is
+	// cloned so the refusal never mutates caller state.
+	base := cfg.HTTPClient
+	if base == nil {
+		base = &http.Client{Timeout: 30 * time.Second}
 	}
+	cloned := *base
+	cloned.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	httpClient := &cloned
 	owner, err := newOwner()
 	if err != nil {
 		return nil, err

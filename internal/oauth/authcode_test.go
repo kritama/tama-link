@@ -22,7 +22,8 @@ func TestAuthorizationRequest(t *testing.T) {
 	rec := &ClientRecord{ClientID: "cid-1", AuthMethod: "client_secret_basic", Issuer: testIssuer}
 	md := serverMetadata(testBase)
 
-	req, err := client.NewAuthorizationRequest(md, rec)
+	redirect := "http://127.0.0.1:51234/callback"
+	req, err := client.NewAuthorizationRequest(md, rec, redirect)
 	if err != nil {
 		t.Fatalf("NewAuthorizationRequest: %v", err)
 	}
@@ -33,8 +34,11 @@ func TestAuthorizationRequest(t *testing.T) {
 	if got := q.Get("client_id"); got != "cid-1" {
 		t.Errorf("client_id = %q", got)
 	}
-	if got := q.Get("redirect_uri"); got != "http://127.0.0.1" {
-		t.Errorf("redirect_uri = %q", got)
+	if got := q.Get("redirect_uri"); got != redirect {
+		t.Errorf("redirect_uri = %q, want the exact listener uri %q", got, redirect)
+	}
+	if req.RedirectURI != redirect {
+		t.Errorf("request redirect uri = %q, want %q", req.RedirectURI, redirect)
 	}
 	if q.Get("state") == "" || q.Get("state") != req.State {
 		t.Errorf("state mismatch: %q vs %q", q.Get("state"), req.State)
@@ -64,11 +68,13 @@ func TestCompleteAuthorization(t *testing.T) {
 	rec := &ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer}
 	md := serverMetadata(server.ts.URL)
 
-	authReq, err := client.NewAuthorizationRequest(md, rec)
+	// The listener port is selected before the authorization URL exists; the
+	// exact URI then flows through both the request and the exchange.
+	observed := "http://127.0.0.1:51234/callback"
+	authReq, err := client.NewAuthorizationRequest(md, rec, observed)
 	if err != nil {
 		t.Fatalf("NewAuthorizationRequest: %v", err)
 	}
-	observed := "http://127.0.0.1:51234/callback"
 	if err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "code-1", observed); err != nil {
 		t.Fatalf("CompleteAuthorization: %v", err)
 	}
@@ -129,22 +135,46 @@ func TestCompleteAuthorizationRejections(t *testing.T) {
 	secrets := newFakeSecrets()
 	clock := newTestClock(time.Now())
 	client := clientForServer(t, server, secrets, newFakeLease(), clock)
-	rec := &ClientRecord{ClientID: "cid-1", AuthMethod: "client_secret_basic", Issuer: client.issuer}
+	rec := &ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer}
 	md := serverMetadata(server.ts.URL)
-	authReq, err := client.NewAuthorizationRequest(md, rec)
+	requestURI := "http://127.0.0.1:51234/callback"
+	authReq, err := client.NewAuthorizationRequest(md, rec, requestURI)
 	if err != nil {
 		t.Fatalf("NewAuthorizationRequest: %v", err)
 	}
+	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":60,"refresh_token":"rt-1"}`
 
-	t.Run("non-loopback redirect", func(t *testing.T) {
-		if err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "code", "https://evil.example/cb"); err == nil {
-			t.Fatal("non-loopback redirect accepted")
+	t.Run("non-loopback request redirect", func(t *testing.T) {
+		if _, err := client.NewAuthorizationRequest(md, rec, "https://evil.example/cb"); err == nil {
+			t.Fatal("non-loopback request redirect accepted")
+		}
+	})
+
+	t.Run("mismatched observed port is rejected before the token request", func(t *testing.T) {
+		server.tokenCalls = 0
+		err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "code", "http://127.0.0.1:61234/callback")
+		if err == nil {
+			t.Fatal("mismatched port accepted")
+		}
+		if server.tokenCalls != 0 {
+			t.Fatalf("token request sent for a mismatched redirect uri: %d calls", server.tokenCalls)
+		}
+	})
+
+	t.Run("mismatched observed path is rejected before the token request", func(t *testing.T) {
+		server.tokenCalls = 0
+		err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "code", "http://127.0.0.1:51234/other")
+		if err == nil {
+			t.Fatal("mismatched path accepted")
+		}
+		if server.tokenCalls != 0 {
+			t.Fatalf("token request sent for a mismatched redirect uri: %d calls", server.tokenCalls)
 		}
 	})
 
 	t.Run("invalid grant", func(t *testing.T) {
 		server.tokenBody = `{"error":"invalid_grant","error_description":"code already used"}`
-		err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "code", "http://127.0.0.1:1")
+		err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "code", requestURI)
 		if !errors.Is(err, ErrGrantInvalid) {
 			t.Fatalf("err = %v, want ErrGrantInvalid", err)
 		}
@@ -155,14 +185,14 @@ func TestCompleteAuthorizationRejections(t *testing.T) {
 
 	t.Run("no refresh token", func(t *testing.T) {
 		server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":60}`
-		err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "code", "http://127.0.0.1:1")
+		err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "code", requestURI)
 		if !errors.Is(err, ErrNoCredentials) {
 			t.Fatalf("err = %v, want ErrNoCredentials", err)
 		}
 	})
 
 	t.Run("empty code", func(t *testing.T) {
-		if err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "", "http://127.0.0.1:1"); err == nil {
+		if err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "", requestURI); err == nil {
 			t.Fatal("empty code accepted")
 		}
 	})

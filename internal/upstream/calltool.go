@@ -55,7 +55,7 @@ func (c *Client) CallTool(ctx context.Context, p *CallToolParams) (*CallToolResp
 	}
 	var meta json.RawMessage
 	if p.Capabilities != nil {
-		if !isJSONObject(p.Capabilities) {
+		if !IsJSONObject(p.Capabilities) {
 			return nil, fmt.Errorf("per-request capabilities must be a JSON object")
 		}
 		meta, err = buildMetaWith(c.info, p.Capabilities)
@@ -103,8 +103,13 @@ func decodeCallTool(raw json.RawMessage) (*CallToolResponse, error) {
 	default:
 		return nil, newError(KindProtocol, 0, fmt.Errorf("unknown tools/call resultType %q", view.ResultType))
 	}
-	if view.ResultType == resultTypeTask && view.TaskID == "" {
-		return nil, newError(KindProtocol, 0, fmt.Errorf("task result has no task id"))
+	if view.ResultType == resultTypeTask {
+		if view.TaskID == "" {
+			return nil, newError(KindProtocol, 0, fmt.Errorf("task result has no task id"))
+		}
+		if !ValidTaskStatus(view.Status) {
+			return nil, newError(KindProtocol, 0, fmt.Errorf("unknown initial task status %q", view.Status))
+		}
 	}
 	return &CallToolResponse{
 		Raw:            raw,

@@ -46,6 +46,9 @@ func New(cfg Config) (*Adapter, error) {
 	if cfg.AdapterVersion == "" {
 		return nil, fmt.Errorf("adapter version is required")
 	}
+	if !cfg.Profile.Bounds.Contains(protocolVersion) {
+		return nil, fmt.Errorf("profile bounds %s to %s do not cover protocol %s", cfg.Profile.Bounds.ProtocolMin, cfg.Profile.Bounds.ProtocolMax, protocolVersion)
+	}
 	if err := cfg.Profile.Catalog().Validate(); err != nil {
 		return nil, fmt.Errorf("profile catalog: %w", err)
 	}

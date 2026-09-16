@@ -24,6 +24,11 @@ import (
 // both classify as KindAuth.
 type TokenProvider func(ctx context.Context) (string, error)
 
+// DefaultRequestTimeout bounds one finite upstream request. It applies per
+// request, never to subscription streams, whose lifetime is owned by the
+// caller context, credential expiry, and the stream-lifetime owner.
+const DefaultRequestTimeout = 60 * time.Second
+
 // Config configures one upstream client for one profile endpoint.
 type Config struct {
 	// Endpoint is the profile-validated upstream MCP endpoint URL.
@@ -37,9 +42,14 @@ type Config struct {
 	TokenProvider TokenProvider
 	// MaxResponseBytes bounds one response body or one SSE event. Required.
 	MaxResponseBytes int64
+	// RequestTimeout bounds one finite request (discover, tools/list,
+	// tools/call, tasks/*). It does not bound subscription streams. It
+	// defaults to DefaultRequestTimeout.
+	RequestTimeout time.Duration
 	// HTTPClient is optional. Redirects are always rejected: every
 	// destination must come from the validated profile, never from a
-	// Location header.
+	// Location header. A supplied client is cloned; its Timeout is not used
+	// to bound subscription streams.
 	HTTPClient *http.Client
 }
 
@@ -47,12 +57,13 @@ type Config struct {
 // no protocol session and no mutable per-request state; it is safe for
 // concurrent use.
 type Client struct {
-	endpoint   *url.URL
-	info       mcp.Implementation
-	meta       json.RawMessage
-	tokens     TokenProvider
-	maxBytes   int64
-	httpClient *http.Client
+	endpoint       *url.URL
+	info           mcp.Implementation
+	meta           json.RawMessage
+	tokens         TokenProvider
+	maxBytes       int64
+	requestTimeout time.Duration
+	httpClient     *http.Client
 }
 
 // New validates cfg and builds a Client.
@@ -80,28 +91,31 @@ func New(cfg Config) (*Client, error) {
 	if cfg.MaxResponseBytes <= 0 {
 		return nil, fmt.Errorf("max response bytes must be positive")
 	}
-	// Redirects are always rejected, even when a client is supplied: copy
-	// the struct and force a refusing callback rather than trusting an
-	// existing one.
-	httpClient := cfg.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{
-			Timeout: 60 * time.Second,
-		}
-	} else {
-		cloned := *httpClient
-		cloned.CheckRedirect = func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		}
-		httpClient = &cloned
+	requestTimeout := cfg.RequestTimeout
+	if requestTimeout <= 0 {
+		requestTimeout = DefaultRequestTimeout
+	}
+	// Redirects are rejected on every client, default or supplied: copy the
+	// struct and force a refusing callback rather than trusting an existing
+	// one. The client itself carries no overall Timeout because that would
+	// also bound subscription streams; finite requests get a per-request
+	// deadline in callWithMeta.
+	base := cfg.HTTPClient
+	if base == nil {
+		base = &http.Client{}
+	}
+	cloned := *base
+	cloned.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
 	}
 	return &Client{
-		endpoint:   endpoint,
-		info:       cfg.ClientInfo,
-		meta:       meta,
-		tokens:     cfg.TokenProvider,
-		maxBytes:   cfg.MaxResponseBytes,
-		httpClient: httpClient,
+		endpoint:       endpoint,
+		info:           cfg.ClientInfo,
+		meta:           meta,
+		tokens:         cfg.TokenProvider,
+		maxBytes:       cfg.MaxResponseBytes,
+		requestTimeout: requestTimeout,
+		httpClient:     &cloned,
 	}, nil
 }
 
@@ -115,10 +129,13 @@ func (c *Client) call(ctx context.Context, method, name string, params json.RawM
 	return c.callWithMeta(ctx, method, name, params, nil)
 }
 
-// callWithMeta performs one stateless request. metaOverride, when non-nil,
-// replaces the client's default _meta triple for this request only (the
-// per-request Tasks capability seam).
+// callWithMeta performs one stateless finite request. metaOverride, when
+// non-nil, replaces the client's default _meta triple for this request only
+// (the per-request Tasks capability seam). The per-request deadline bounds
+// this one round trip only; subscription streams never take this path.
 func (c *Client) callWithMeta(ctx context.Context, method, name string, params, metaOverride json.RawMessage) (json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
+	defer cancel()
 	id, resp, err := c.doRequest(ctx, method, name, params, metaOverride)
 	if err != nil {
 		return nil, err
@@ -132,7 +149,7 @@ func (c *Client) callWithMeta(ctx context.Context, method, name string, params, 
 // The caller owns the response body. The returned id correlates the reply
 // for stream reads.
 func (c *Client) doRequest(ctx context.Context, method, name string, params, metaOverride json.RawMessage) (string, *http.Response, error) {
-	if !isJSONObject(params) {
+	if !IsJSONObject(params) {
 		return "", nil, fmt.Errorf("params for %s must be a JSON object", method)
 	}
 	meta := c.meta
@@ -191,7 +208,7 @@ func withMeta(meta json.RawMessage, params json.RawMessage) (json.RawMessage, er
 		return nil, fmt.Errorf("params must be a JSON object")
 	}
 	// Rebuild the object textually: _meta first, then the original members
-	// verbatim. The original document is known-valid because isJSONObject
+	// verbatim. The original document is known-valid because IsJSONObject
 	// accepted it.
 	inner := trimmed[1 : len(trimmed)-1]
 	var out strings.Builder
@@ -204,7 +221,7 @@ func withMeta(meta json.RawMessage, params json.RawMessage) (json.RawMessage, er
 	}
 	out.WriteByte('}')
 	merged := json.RawMessage(out.String())
-	if !isJSONObject(merged) {
+	if !IsJSONObject(merged) {
 		return nil, fmt.Errorf("merged params are not a JSON object")
 	}
 	return merged, nil

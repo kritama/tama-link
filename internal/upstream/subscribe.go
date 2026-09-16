@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"slices"
 
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
@@ -41,6 +42,11 @@ type SubscribeCallbacks struct {
 // caller to reconcile through TaskGet. Non-2xx responses and protocol
 // violations return classified errors.
 //
+// Every event is bound to the requested task IDs: the acknowledgement must
+// authorize only a subset of the request, and every later task snapshot must
+// carry an acknowledged ID. A matching subscription ID alone is not
+// sufficient to deliver an unrequested task.
+//
 // Correctness must never depend on observing every notification: dropped
 // events, overflow closes, and credential expiry all end the stream and
 // recovery is always tasks/get.
@@ -50,6 +56,16 @@ func (c *Client) Subscribe(ctx context.Context, taskIDs []string, cb *SubscribeC
 	}
 	if len(taskIDs) == 0 {
 		return fmt.Errorf("at least one task id is required")
+	}
+	requested := make(map[string]bool, len(taskIDs))
+	for _, id := range taskIDs {
+		if id == "" {
+			return fmt.Errorf("task ids must be non-empty")
+		}
+		if requested[id] {
+			return fmt.Errorf("duplicate task id %q in subscription request", id)
+		}
+		requested[id] = true
 	}
 	params, err := json.Marshal(wireSubscribe{Notifications: wireSubscribeNotifications{TaskIDs: taskIDs}})
 	if err != nil {
@@ -67,7 +83,7 @@ func (c *Client) Subscribe(ctx context.Context, taskIDs []string, cb *SubscribeC
 		drain(resp.Body)
 		return newError(KindTransport, 0, fmt.Errorf("subscription stream has content type %q", resp.Header.Get("Content-Type")))
 	}
-	return c.readSubscription(id, resp.Body, cb)
+	return c.readSubscription(id, requested, resp.Body, cb)
 }
 
 // wireSubscribe is the subscriptions/listen params object.
@@ -79,10 +95,13 @@ type wireSubscribeNotifications struct {
 	TaskIDs []string `json:"taskIds"`
 }
 
-// readSubscription consumes the stream: acknowledgement first, then task
-// snapshots correlated by subscription ID, and an optional final response.
-func (c *Client) readSubscription(subscriptionID string, body io.ReadCloser, cb *SubscribeCallbacks) error {
+// readSubscription consumes the stream: an acknowledgement that authorizes a
+// subset of the requested task IDs, task snapshots bound to that subset, and
+// an optional final response that may only follow the acknowledgement. A
+// matching final JSON-RPC error is a protocol failure, not a graceful close.
+func (c *Client) readSubscription(subscriptionID string, requested map[string]bool, body io.ReadCloser, cb *SubscribeCallbacks) error {
 	acknowledged := false
+	authorized := make(map[string]bool)
 	return c.scanSSE(body, func(msg jsonrpc.Message) (bool, error) {
 		req, ok := msg.(*jsonrpc.Request)
 		if ok {
@@ -94,12 +113,13 @@ func (c *Client) readSubscription(subscriptionID string, body io.ReadCloser, cb 
 				if acknowledged {
 					return true, newError(KindProtocol, 0, fmt.Errorf("duplicate subscription acknowledgement"))
 				}
-				authorized, err := parseAcknowledgement(req.Params, subscriptionID)
+				ids, err := parseAcknowledgement(req.Params, subscriptionID, requested)
 				if err != nil {
 					return true, err
 				}
+				authorized = ids
 				acknowledged = true
-				return false, cb.OnAcknowledged(authorized)
+				return false, cb.OnAcknowledged(sortedKeys(ids))
 			case notificationTasks:
 				if !acknowledged {
 					return true, newError(KindProtocol, 0, fmt.Errorf("task notification before acknowledgement"))
@@ -108,22 +128,34 @@ func (c *Client) readSubscription(subscriptionID string, body io.ReadCloser, cb 
 				if err != nil {
 					return true, err
 				}
+				if !authorized[state.TaskID] {
+					return true, newError(KindProtocol, 0, fmt.Errorf("task notification outside the acknowledged set"))
+				}
 				return false, cb.OnTask(*state)
 			default:
 				return true, newError(KindProtocol, 0, fmt.Errorf("undeclared notification type on subscription stream"))
 			}
 		}
-		// The final JSON-RPC response marks graceful closure.
+		// The final JSON-RPC response marks graceful closure; it must follow
+		// the acknowledgement. A final error is a protocol failure, not a
+		// clean close.
 		if resp, ok := msg.(*jsonrpc.Response); ok && idMatches(resp.ID, subscriptionID) {
+			if !acknowledged {
+				return true, newError(KindProtocol, 0, fmt.Errorf("final response before acknowledgement"))
+			}
+			if werr, isErr := asWireError(resp); isErr {
+				return true, protocolError(werr)
+			}
 			return true, nil
 		}
 		return true, newError(KindProtocol, 0, fmt.Errorf("unexpected message on subscription stream"))
 	})
 }
 
-// parseAcknowledgement validates the acknowledgement event and returns the
-// authorized task ID subset.
-func parseAcknowledgement(params json.RawMessage, subscriptionID string) ([]string, error) {
+// parseAcknowledgement validates the acknowledgement event: it must name the
+// stream, carry a non-duplicate subset of the requested task IDs, and return
+// that subset as the authorized set.
+func parseAcknowledgement(params json.RawMessage, subscriptionID string, requested map[string]bool) (map[string]bool, error) {
 	var view struct {
 		Meta          map[string]json.RawMessage `json:"_meta"`
 		Notifications struct {
@@ -136,11 +168,27 @@ func parseAcknowledgement(params json.RawMessage, subscriptionID string) ([]stri
 	if err := checkSubscriptionID(view.Meta, subscriptionID); err != nil {
 		return nil, err
 	}
-	authorized := view.Notifications.TaskIDs
-	if authorized == nil {
-		authorized = []string{}
+	authorized := make(map[string]bool, len(view.Notifications.TaskIDs))
+	for _, id := range view.Notifications.TaskIDs {
+		if !requested[id] {
+			return nil, newError(KindProtocol, 0, fmt.Errorf("acknowledgement authorizes an unrequested task id"))
+		}
+		if authorized[id] {
+			return nil, newError(KindProtocol, 0, fmt.Errorf("acknowledgement repeats a task id"))
+		}
+		authorized[id] = true
 	}
 	return authorized, nil
+}
+
+// sortedKeys renders a task ID set in deterministic order for the callback.
+func sortedKeys(set map[string]bool) []string {
+	out := make([]string, 0, len(set))
+	for id := range set {
+		out = append(out, id)
+	}
+	slices.Sort(out)
+	return out
 }
 
 // parseTaskNotification validates one notifications/tasks event and projects
@@ -155,7 +203,7 @@ func parseTaskNotification(params json.RawMessage, subscriptionID string) (*Task
 	if err := checkSubscriptionID(envelope.Meta, subscriptionID); err != nil {
 		return nil, err
 	}
-	state, err := decodeTaskState(params, "")
+	state, err := decodeTaskState(params, "", false)
 	if err != nil {
 		return nil, err
 	}

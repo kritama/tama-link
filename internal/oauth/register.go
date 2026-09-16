@@ -127,23 +127,38 @@ func (as *AuthorizationServer) TokenEndpointAuthMethod() string {
 	return defaultAuthMethod(as.TokenEndpointAuthMethods)
 }
 
-// applyAuth applies the token endpoint auth method to the request. The
-// client secret never appears outside this function.
-func (rec *ClientRecord) applyAuth(req *http.Request, form url.Values) error {
+// applyFormAuth adds the form-based client credentials for the auth method
+// (RFC 7591 public clients send client_id; client_secret_post sends both).
+// It must run before the form is encoded into the request body; the client
+// secret never appears outside this function and applyHeaderAuth.
+func (rec *ClientRecord) applyFormAuth(form url.Values) error {
 	switch rec.AuthMethod {
-	case "client_secret_basic":
-		req.SetBasicAuth(rec.ClientID, rec.ClientSecret)
+	case "none":
+		form.Set("client_id", rec.ClientID)
 	case "client_secret_post":
 		if rec.ClientSecret == "" {
 			return fmt.Errorf("client secret missing for client_secret_post")
 		}
 		form.Set("client_id", rec.ClientID)
 		form.Set("client_secret", rec.ClientSecret)
-	case "none":
-		form.Set("client_id", rec.ClientID)
+	case "client_secret_basic":
+		// The credentials ride in the Authorization header instead.
 	default:
 		return fmt.Errorf("unsupported token endpoint auth method %q", rec.AuthMethod)
 	}
+	return nil
+}
+
+// applyHeaderAuth applies the header-based credentials for the auth method
+// after the request is constructed.
+func (rec *ClientRecord) applyHeaderAuth(req *http.Request) error {
+	if rec.AuthMethod != "client_secret_basic" {
+		return nil
+	}
+	if rec.ClientSecret == "" {
+		return fmt.Errorf("client secret missing for client_secret_basic")
+	}
+	req.SetBasicAuth(rec.ClientID, rec.ClientSecret)
 	return nil
 }
 
@@ -162,13 +177,19 @@ type tokenResponse struct {
 // The provider's error description is deliberately not carried into the
 // returned error: it is provider text that could embed request data.
 func (c *Client) postToken(ctx context.Context, endpoint string, rec *ClientRecord, form url.Values) (*tokenResponse, error) {
+	// Form-based credentials (none, client_secret_post) must be added before
+	// the body is encoded; header-based credentials (client_secret_basic)
+	// are applied after the request exists.
+	if err := rec.applyFormAuth(form); err != nil {
+		return nil, err
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(form.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("build token request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
-	if err := rec.applyAuth(req, form); err != nil {
+	if err := rec.applyHeaderAuth(req); err != nil {
 		return nil, err
 	}
 	resp, err := c.httpClient.Do(req)
