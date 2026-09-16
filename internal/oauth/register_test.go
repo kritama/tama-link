@@ -120,6 +120,44 @@ func TestRegisterReuseIssuerMismatch(t *testing.T) {
 	}
 }
 
+// TestRegisteredClientTreatsLegacySecretlessRecordAsAbsent pins the
+// upgrade path: a record persisted before the per-method secret check is
+// unusable for every exchange, so it must not count as a registered
+// client — readiness reports not-ready and the next login re-registers
+// instead of the profile looping on the unusable record.
+func TestRegisteredClientTreatsLegacySecretlessRecordAsAbsent(t *testing.T) {
+	secrets := newFakeSecrets()
+	client := newStaticClient(t, secrets, newFakeLease(), newTestClock(time.Unix(1_700_000_000, 0)))
+
+	legacy := ClientRecord{ClientID: "cid-1", AuthMethod: "client_secret_basic", Issuer: testIssuer, RegisteredAt: time.Now().UTC()}
+	data, err := json.Marshal(legacy)
+	if err != nil {
+		t.Fatalf("marshal legacy record: %v", err)
+	}
+	if err := secrets.SetSecret(labelClient, data); err != nil {
+		t.Fatalf("store legacy record: %v", err)
+	}
+
+	if _, found, err := client.RegisteredClient(); err != nil || found {
+		t.Fatalf("RegisteredClient = found:%v err:%v, want absent without an error", found, err)
+	}
+
+	// The reuse path must not return it: Register re-registers and the
+	// fresh record replaces the legacy one.
+	var calls int32
+	ts := registerServer(t, `{"client_id":"cid-2","client_secret":"shh"}`, http.StatusCreated, &calls)
+	rec, err := client.Register(context.Background(), regMetadata(ts, testIssuer))
+	if err != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if rec.ClientID != "cid-2" || rec.ClientSecret != "shh" {
+		t.Fatalf("Register reused or corrupted the record: %+v", rec)
+	}
+	if got, found, _ := client.RegisteredClient(); !found || got.ClientID != "cid-2" {
+		t.Fatalf("stored record after re-registration = %q found:%v, want the fresh record", got.ClientID, found)
+	}
+}
+
 func TestRegisterFailures(t *testing.T) {
 	cases := []struct {
 		name   string

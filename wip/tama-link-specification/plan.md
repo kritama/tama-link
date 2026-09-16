@@ -223,6 +223,21 @@ operations. Runtime validation against the selected client-visible and
 upstream schemas is authoritative. Rich tagged-union schema projection is a
 later negotiated optimization, not a correctness dependency.
 
+The idempotency identity is the client-visible request: the tool name and
+the canonical arguments plus the client thread ID in one of three shapes —
+its string value, an explicit JSON null when the accepted operation could
+map the source but the request carried no value, or an omitted field when
+it could not. A retry cannot know which shape the accepted request took,
+so recovery matches candidates against the stored identity: a retry that
+carries a value matches its value-shape or the omitted-field identity, and
+a retry that carries no value matches the explicit-null or the omitted-
+field identity. Adding a value after an accepted request omitted one from a
+mappable source conflicts; changing a value the accepted operation never
+mapped reconciles. The same candidate matching applies to the atomic create
+path: when a concurrent process claims the key and the insert loses, the
+loser reconciles the winner's row against the candidates instead of
+reporting a conflict for an otherwise exact request.
+
 ### D9. Operation descriptors select the execution strategy
 
 The initial strategies are:

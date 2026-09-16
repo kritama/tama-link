@@ -27,6 +27,10 @@ type ClientRecord struct {
 }
 
 // RegisteredClient returns the stored client registration, or found=false.
+// A legacy record that predates the per-method secret check and lacks the
+// secret its auth method requires is treated as absent: refresh and
+// readiness fail as no-credential, and the next login re-registers, so an
+// upgraded profile self-heals instead of looping on an unusable record.
 func (c *Client) RegisteredClient() (*ClientRecord, bool, error) {
 	data, found, err := c.secrets.GetSecret(labelClient)
 	if err != nil {
@@ -42,7 +46,17 @@ func (c *Client) RegisteredClient() (*ClientRecord, bool, error) {
 	if rec.ClientID == "" || rec.Issuer == "" || rec.AuthMethod == "" {
 		return nil, false, fmt.Errorf("stored client record is incomplete")
 	}
+	if recordMissingSecret(&rec) {
+		return nil, false, nil
+	}
 	return &rec, true, nil
+}
+
+// recordMissingSecret reports whether the record's auth method requires a
+// client secret the record does not carry.
+func recordMissingSecret(rec *ClientRecord) bool {
+	return (rec.AuthMethod == "client_secret_basic" || rec.AuthMethod == "client_secret_post") &&
+		rec.ClientSecret == ""
 }
 
 // Register returns the stored registration when it still binds the same
@@ -97,20 +111,20 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	if created.ClientID == "" {
 		return nil, fmt.Errorf("registration returned no client id")
 	}
-	// A client-secret auth method without a secret would be persisted as a
-	// permanently unusable registration: readiness would accept submits
-	// that burn idempotency keys, and every token exchange would fail
-	// locally on the missing secret.
-	method := md.AS.TokenEndpointAuthMethod()
-	if (method == "client_secret_basic" || method == "client_secret_post") && created.ClientSecret == "" {
-		return nil, fmt.Errorf("registration returned no client secret for %s", method)
-	}
 	rec := &ClientRecord{
 		ClientID:     created.ClientID,
 		ClientSecret: created.ClientSecret,
 		AuthMethod:   md.AS.TokenEndpointAuthMethod(),
 		Issuer:       md.AS.Issuer,
 		RegisteredAt: c.clock().UTC(),
+	}
+	// A client-secret auth method without a secret would be persisted as a
+	// permanently unusable registration: readiness would accept submits
+	// that burn idempotency keys, and every token exchange would fail
+	// locally on the missing secret. The same check re-validates stored
+	// records on load, so a legacy record self-heals on the next login.
+	if recordMissingSecret(rec) {
+		return nil, fmt.Errorf("registration returned no client secret for %s", rec.AuthMethod)
 	}
 	if err := c.storeClient(rec); err != nil {
 		return nil, err
