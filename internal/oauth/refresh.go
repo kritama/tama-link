@@ -115,28 +115,55 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 }
 
 // invalidateCredential removes the durable refresh credential after the
-// authorization server rejected the grant with invalid_grant: the fenced
-// slot, the fence pointer, and the legacy label. The caller holds the
-// refresh lease (epoch leaseGeneration). Without this, HasCredentials
-// would keep reporting the profile ready and every submit would burn an
-// idempotency key on a terminal failure against the same known-invalid
-// grant.
+// authorization server rejected the grant with invalid_grant: the fence
+// pointer and the fenced slot, plus the legacy label. The caller holds the
+// refresh lease (epoch leaseGeneration). The pointer is cleared — under a
+// renewal span, honoring a lost epoch — before the slot is deleted, so a
+// slow backend deletion can never leave the fence pointing at a missing
+// slot and break readiness or a reauthorization; a slot whose deletion
+// fails after the pointer is cleared is recorded durably for cleanup,
+// though it holds only a rejected grant. Without invalidation,
+// HasCredentials would keep reporting the profile ready and every submit
+// would burn an idempotency key on a terminal failure against the same
+// known-invalid grant.
 func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64) error {
-	fenced, err := c.loadFenced(ctx)
+	// Renew ownership across the cleanup: the failed exchange's renewal
+	// loop has already stopped, and a slow secure-backend deletion must
+	// not outlive the lease TTL.
+	execCtx, cancelExec := context.WithCancel(ctx)
+	renewed := make(chan struct{})
+	go c.renewLease(execCtx, cancelExec, renewed)
+	defer func() {
+		cancelExec()
+		<-renewed
+	}()
+
+	fenced, err := c.loadFenced(execCtx)
 	if err != nil {
 		return err
 	}
+	cleared, err := c.lease.ClearCredentialFence(execCtx, refreshLeaseName, c.owner, leaseGeneration)
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	if !cleared {
+		return fmt.Errorf("%w: refresh lease lost while invalidating the rejected grant; retry", ErrLeaseContention)
+	}
+	// The pointer is durably gone. The slot holds only a rejected grant,
+	// so a failed deletion is a cleanup matter: record it for retry and
+	// keep the refresh outcome unchanged.
 	if fenced != nil && fenced.previousSlot != "" {
 		if err := c.secrets.DeleteSecret(fenced.previousSlot); err != nil {
-			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+			if recordErr := c.lease.RecordRetiredCredentialSlot(execCtx, fenced.previousSlot); recordErr != nil {
+				return fmt.Errorf("%w: %w", ErrBackendUnavailable, recordErr)
+			}
+		} else if clearErr := c.lease.ClearRetiredCredentialSlot(execCtx, fenced.previousSlot); clearErr != nil {
+			return fmt.Errorf("%w: %w", ErrBackendUnavailable, clearErr)
 		}
 	}
-	if _, err := c.lease.ClearCredentialFence(ctx, refreshLeaseName, c.owner, leaseGeneration); err != nil {
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
-	}
-	if err := c.secrets.DeleteSecret(labelRefresh); err != nil {
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
-	}
+	// The legacy label is fixed and every logout retries it; a failure
+	// here needs no durable record.
+	_ = c.secrets.DeleteSecret(labelRefresh)
 	return nil
 }
 

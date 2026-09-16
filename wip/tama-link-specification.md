@@ -738,7 +738,10 @@ itself is fenced: every writer commits its replacement at its own unique
 secure-backend slot and then atomically advances a durable fence pointer to
 that slot's generation, and the commit is a single atomic operation that
 requires both an unadvanced fence generation and the writer's own live,
-unexpired lease ownership epoch — with a provider that permits overlapping
+unexpired lease ownership epoch — the epoch gate covers the plain insert
+path too, so a fence row that is absent because logout cleared it or no
+authorization ever committed cannot be created by a stale writer either —
+with a provider that permits overlapping
 rotations, a writer that lost the lease while its secret-store write was
 blocked can never make its value live, not even before the winner commits
 its own generation. The commit is the last fallible step for the slot
@@ -909,8 +912,12 @@ Tama Link coordinates refresh through a profile-scoped cross-process lease,
 re-reads the credential after acquiring it, and safely stores a replacement
 refresh token when the provider returns one. `invalid_grant` maps to
 `authentication_required` without an automatic retry loop, and the durable
-refresh credential is invalidated — fenced slot, fence pointer, and legacy
-label removed under the held lease — so credential readiness rejects new
+refresh credential is invalidated under the held, renewed lease: the fence
+pointer is cleared — honoring a lost epoch and treating an absent fence as
+already cleared — before the fenced slot is deleted, so a slow backend
+deletion can never leave the fence pointing at a missing slot, and a slot
+whose deletion fails is recorded durably for cleanup retry. With the
+credential invalidated, readiness rejects new
 work as `authentication_required` instead of accepting submissions that
 can only fail on the same known-invalid grant. An upstream
 subscription closes no later than credential expiry; after successful refresh,

@@ -375,6 +375,11 @@ func (f *fakeLease) ClearRetiredCredentialSlot(_ context.Context, slot string) e
 	return nil
 }
 
+func (f *fakeLease) RecordRetiredCredentialSlot(_ context.Context, slot string) error {
+	f.retire(slot)
+	return nil
+}
+
 // renewLease makes the next renewal report lost ownership, so the test can
 // prove a refresh aborts when it loses the lease mid-exchange.
 func (f *fakeLease) loseOnRenew() {

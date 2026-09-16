@@ -110,6 +110,39 @@ func TestOpenRejectsCurrentSchemaWithoutIdempotencyPrimaryKey(t *testing.T) {
 	}
 }
 
+// TestOpenRejectsCurrentSchemaWithoutInputResponsePrimaryKey pins the
+// composite primary-key validation: an input_responses table with all
+// expected columns but no PRIMARY KEY (submission_id, request_id) fails
+// closed during Open, because the first SetInputResponse conflict target
+// would not match a unique constraint.
+func TestOpenRejectsCurrentSchemaWithoutInputResponsePrimaryKey(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	keys := &testKeys{}
+	s, err := Open(context.Background(), path, keys, Config{Limits: limits.Default()})
+	if err != nil {
+		t.Fatalf("create database: %v", err)
+	}
+	if _, err := s.db.Exec(`
+		ALTER TABLE input_responses RENAME TO input_responses_original;
+		CREATE TABLE input_responses (
+			submission_id TEXT NOT NULL,
+			request_id TEXT NOT NULL,
+			response_enc BLOB NOT NULL,
+			answered_at INTEGER NOT NULL
+		);
+		DROP TABLE input_responses_original;
+	`); err != nil {
+		t.Fatalf("remove input_responses primary key: %v", err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatalf("close database: %v", err)
+	}
+
+	if _, err := Open(context.Background(), path, keys, Config{Limits: limits.Default()}); !errors.Is(err, ErrStateUnavailable) {
+		t.Fatalf("Open without input_responses primary key = %v, want ErrStateUnavailable", err)
+	}
+}
+
 func TestOpenRejectsMalformedSchemaVersions(t *testing.T) {
 	for _, version := range []string{"2garbage", "2.0", "2 3", " 2", "2 "} {
 		t.Run(version, func(t *testing.T) {

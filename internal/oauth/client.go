@@ -81,6 +81,11 @@ type Leaser interface {
 	// ClearRetiredCredentialSlot removes the retirement record for one
 	// slot after its deletion succeeded.
 	ClearRetiredCredentialSlot(ctx context.Context, slot string) error
+	// RecordRetiredCredentialSlot durably records one credential slot
+	// whose secure-backend deletion failed, so a later refresh or logout
+	// can retry the deletion. Cleanup paths that delete without a commit
+	// use it; the fence-advance path enqueues atomically instead.
+	RecordRetiredCredentialSlot(ctx context.Context, slot string) error
 }
 
 // Config configures one profile's OAuth client.

@@ -71,6 +71,39 @@ func TestCommitCredentialFenceRequiresLiveLease(t *testing.T) {
 	}
 }
 
+// TestCommitCredentialFenceRejectsInsertWithoutLiveLease pins that the
+// plain INSERT path — a fence row absent because logout cleared it or no
+// authorization ever committed — is gated on the live lease epoch too: a
+// stale writer whose SetSecret blocked past its lease cannot reinstall
+// credentials behind a logout by creating a fresh fence row.
+func TestCommitCredentialFenceRejectsInsertWithoutLiveLease(t *testing.T) {
+	keys, clk := newMemKeys(), newClock()
+	s, _ := openTestStore(t, keys, clk)
+	ctx := context.Background()
+
+	// The fence row is absent; owner-a's lease expires while its write is
+	// blocked.
+	if ok, err := s.ClaimLease(ctx, "oauth/refresh", "owner-a", time.Minute); err != nil || !ok {
+		t.Fatalf("claim = %v %v", ok, err)
+	}
+	clk.Advance(2 * time.Minute)
+
+	if ok, err := fenceCommit(ctx, s, 1, "slot-stale", "", "owner-a", 1); err != nil || ok {
+		t.Fatalf("insert without a live lease = %v %v, want rejected", ok, err)
+	}
+	if _, _, found, err := s.ReadCredentialFence(ctx); err != nil || found {
+		t.Fatalf("fence after stale insert = found:%v err:%v, want absent", found, err)
+	}
+
+	// The fresh epoch that takes over can create the fence row.
+	if ok, err := s.ClaimLease(ctx, "oauth/refresh", "owner-b", time.Minute); err != nil || !ok {
+		t.Fatalf("owner-b claim = %v %v", ok, err)
+	}
+	if ok, err := fenceCommit(ctx, s, 1, "slot-1", "", "owner-b", 2); err != nil || !ok {
+		t.Fatalf("owner-b commit = %v %v, want committed", ok, err)
+	}
+}
+
 // TestCommitCredentialFenceEnqueuesPreviousSlot pins that the retirement
 // record is one transaction with the fence advance: a committed fence
 // always carries a durable record for the slot it replaced, so a later

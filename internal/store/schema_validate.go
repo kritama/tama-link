@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 )
 
 func databaseIsEmpty(ctx context.Context, conn *sql.Conn) (bool, error) {
@@ -81,16 +82,19 @@ func validateCurrentSchema(ctx context.Context, conn *sql.Conn) error {
 
 func validatePrimaryKeys(ctx context.Context, conn *sql.Conn) error {
 	expected := []struct {
-		table, column string
+		table   string
+		columns []string
 	}{
-		{"meta", "key"},
-		{"submissions", "submission_id"},
-		{"idempotency", "client_request_id"},
-		{"leases", "name"},
-		{"credential_fence", "name"},
+		{"meta", []string{"key"}},
+		{"submissions", []string{"submission_id"}},
+		{"idempotency", []string{"client_request_id"}},
+		{"leases", []string{"name"}},
+		{"credential_fence", []string{"name"}},
+		{"input_responses", []string{"submission_id", "request_id"}},
 	}
 	for _, key := range expected {
-		rows, err := conn.QueryContext(ctx, "SELECT name, pk FROM pragma_table_info(?) WHERE pk > 0", key.table)
+		rows, err := conn.QueryContext(ctx,
+			"SELECT name, pk FROM pragma_table_info(?) WHERE pk > 0 ORDER BY pk", key.table)
 		if err != nil {
 			return fmt.Errorf("%w: inspect primary key for %s: %v", ErrStateUnavailable, key.table, err)
 		}
@@ -112,8 +116,13 @@ func validatePrimaryKeys(ctx context.Context, conn *sql.Conn) error {
 		if closeErr != nil {
 			return fmt.Errorf("%w: close primary key inspection for %s: %v", ErrStateUnavailable, key.table, closeErr)
 		}
-		if len(columns) != 1 || columns[0] != key.column {
-			return fmt.Errorf("%w: table %s must have primary key %s", ErrStateUnavailable, key.table, key.column)
+		if len(columns) != len(key.columns) {
+			return fmt.Errorf("%w: table %s must have primary key (%s)", ErrStateUnavailable, key.table, strings.Join(key.columns, ", "))
+		}
+		for i, column := range key.columns {
+			if columns[i] != column {
+				return fmt.Errorf("%w: table %s must have primary key (%s)", ErrStateUnavailable, key.table, strings.Join(key.columns, ", "))
+			}
 		}
 	}
 	return nil

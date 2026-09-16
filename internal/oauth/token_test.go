@@ -566,6 +566,59 @@ func TestLogoutLostLeaseKeepsRetryableState(t *testing.T) {
 	clock.set(clock.now.Add(time.Minute))
 }
 
+// TestRefreshInvalidGrantRecordsUndeletableSlot pins the cleanup ordering
+// and durability of an invalid_grant invalidation: the fence pointer is
+// cleared before the slot is deleted, and a slot whose deletion fails is
+// recorded durably for cleanup retry — the durable state is never left
+// pointing at a missing slot.
+func TestRefreshInvalidGrantRecordsUndeletableSlot(t *testing.T) {
+	server, client, secrets, lease, clock := tokenFixture(t, "rt-1")
+	ctx := context.Background()
+	if _, err := client.Token(ctx); err != nil {
+		t.Fatalf("first Token: %v", err)
+	}
+	_, slot, found, err := lease.ReadCredentialFence(ctx)
+	if err != nil || !found {
+		t.Fatalf("fence after refresh: %v", err)
+	}
+
+	// Expire the token; the authorization server rejects the grant and the
+	// slot deletion fails.
+	clock.set(clock.now.Add(2 * time.Hour))
+	server.tokenBody = `{"error":"invalid_grant"}`
+	secrets.failDeletes(slot)
+	if _, err := client.Token(ctx); !errors.Is(err, ErrGrantInvalid) {
+		t.Fatalf("err = %v, want ErrGrantInvalid", err)
+	}
+	// The pointer is cleared, so readiness fails closed instead of
+	// reporting a dangling fence; the undeletable slot is durably recorded
+	// for cleanup.
+	if _, _, stillFound, ferr := lease.ReadCredentialFence(ctx); ferr != nil || stillFound {
+		t.Fatalf("fence after invalid grant = found:%v err:%v, want cleared", stillFound, ferr)
+	}
+	if ok, err := client.HasCredentials(ctx); err != nil || ok {
+		t.Fatalf("HasCredentials after invalid grant = %v %v, want false without a backend error", ok, err)
+	}
+	pending, err := lease.RetiredCredentialSlots(ctx)
+	if err != nil || len(pending) != 1 || pending[0] != slot {
+		t.Fatalf("retirement backlog = %v err=%v, want [slot]", pending, err)
+	}
+
+	// The next logout drains the backlog and removes the blob.
+	secrets.allowDeletes(slot)
+	if err := client.Logout(ctx); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if _, ok, _ := secrets.GetSecret(slot); ok {
+		t.Fatal("the undrainable slot survived logout")
+	}
+	pending, err = lease.RetiredCredentialSlots(ctx)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("retirement backlog after logout = %v err=%v, want empty", pending, err)
+	}
+	clock.set(clock.now.Add(time.Minute))
+}
+
 func TestNewValidation(t *testing.T) {
 	cases := []struct {
 		name string

@@ -79,19 +79,28 @@ func (s *Store) CommitCredentialFence(ctx context.Context, commit CredentialFenc
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	nowMs := s.now().UnixMilli()
+	// Verify the lease epoch before touching the fence: the check must
+	// gate the plain INSERT path too, because a fence row that logout
+	// cleared or a first-ever authorization leaves the upsert without an
+	// existing row, and a stale writer whose SetSecret blocked past its
+	// lease would otherwise reinstall credentials behind the logout.
+	var held int
+	err = tx.QueryRowContext(ctx,
+		"SELECT 1 FROM leases WHERE name = ? AND owner = ? AND generation = ? AND expires_at > ?",
+		commit.LeaseName, commit.LeaseOwner, commit.LeaseGeneration, s.now().UnixMilli()).Scan(&held)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("%w: commit credential fence: %w", ErrStateUnavailable, err)
+	}
 	res, err := tx.ExecContext(ctx, `
 		INSERT INTO credential_fence (name, generation, slot) VALUES (?, ?, ?)
 		ON CONFLICT(name) DO UPDATE SET
 			generation = excluded.generation,
 			slot = excluded.slot
-		WHERE credential_fence.generation < excluded.generation
-		  AND EXISTS (
-			  SELECT 1 FROM leases
-			  WHERE name = ? AND owner = ? AND generation = ? AND expires_at > ?
-		  )`,
-		credentialFenceName, commit.FenceGeneration, commit.Slot,
-		commit.LeaseName, commit.LeaseOwner, commit.LeaseGeneration, nowMs)
+		WHERE credential_fence.generation < excluded.generation`,
+		credentialFenceName, commit.FenceGeneration, commit.Slot)
 	if err != nil {
 		return false, fmt.Errorf("%w: commit credential fence: %w", ErrStateUnavailable, err)
 	}
@@ -163,6 +172,24 @@ func (s *Store) ClearCredentialFence(
 // that a later refresh or logout must retry.
 func retiredCredentialSlotName(slot string) string {
 	return credentialFenceName + "-retired:" + slot
+}
+
+// RecordRetiredCredentialSlot durably records one live credential slot
+// whose secure-backend deletion failed, so a later refresh or logout can
+// retry the deletion instead of silently stranding the blob in the
+// backend. The fence-advance enqueue path uses the atomic commit; this
+// covers the cleanup paths that delete without a commit.
+func (s *Store) RecordRetiredCredentialSlot(ctx context.Context, slot string) error {
+	if slot == "" {
+		return errors.New("credential slot is required")
+	}
+	if _, err := s.exec(ctx, `
+		INSERT INTO credential_fence (name, generation, slot) VALUES (?, 0, ?)
+		ON CONFLICT(name) DO UPDATE SET slot = excluded.slot`,
+		retiredCredentialSlotName(slot), slot); err != nil {
+		return fmt.Errorf("%w: record retired credential slot: %w", ErrStateUnavailable, err)
+	}
+	return nil
 }
 
 // RetiredCredentialSlots lists the credential slots recorded for retirement
