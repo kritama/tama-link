@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/kritama/tama-link/internal/store"
 )
 
 // Secret labels inside the profile credential namespace.
@@ -28,10 +30,6 @@ type ClientRecord struct {
 	// second after which the secret is invalid, or zero when the secret
 	// does not expire.
 	SecretExpiresAt int64 `json:"client_secret_expires_at,omitempty"`
-	// WriteNonce identifies the specific write that stored this record.
-	// A writer whose lease epoch was lost can remove only the record its
-	// own write stored, never a record a winning process stored after it.
-	WriteNonce string `json:"write_nonce,omitempty"`
 }
 
 // secretExpired reports whether the record's client secret has passed its
@@ -46,10 +44,10 @@ func (c *Client) secretExpired(rec *ClientRecord) bool {
 // secret its auth method requires is treated as absent: refresh and
 // readiness fail as no-credential, and the next login re-registers, so an
 // upgraded profile self-heals instead of looping on an unusable record.
-func (c *Client) RegisteredClient() (*ClientRecord, bool, error) {
-	data, found, err := c.secrets.GetSecret(labelClient)
+func (c *Client) RegisteredClient(ctx context.Context) (*ClientRecord, bool, error) {
+	data, found, err := c.loadStoredClient(ctx)
 	if err != nil {
-		return nil, false, fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+		return nil, false, err
 	}
 	if !found {
 		return nil, false, nil
@@ -67,6 +65,31 @@ func (c *Client) RegisteredClient() (*ClientRecord, bool, error) {
 	return &rec, true, nil
 }
 
+// loadStoredClient returns the live client registration record: the
+// fenced slot when a client fence has been committed, otherwise the
+// legacy single-label form. found=false means no usable record.
+func (c *Client) loadStoredClient(ctx context.Context) ([]byte, bool, error) {
+	_, slot, found, err := c.lease.ReadCredentialFence(ctx, store.ClientFenceName)
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	if found {
+		data, ok, err := c.secrets.GetSecret(slot)
+		if err != nil {
+			return nil, false, fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+		}
+		if !ok {
+			return nil, false, fmt.Errorf("%w: client record slot is missing", ErrBackendUnavailable)
+		}
+		return data, true, nil
+	}
+	data, found, err := c.secrets.GetSecret(labelClient)
+	if err != nil {
+		return nil, false, fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	return data, found, nil
+}
+
 // recordMissingSecret reports whether the record's auth method requires a
 // client secret the record does not carry.
 func recordMissingSecret(rec *ClientRecord) bool {
@@ -80,8 +103,8 @@ func recordMissingSecret(rec *ClientRecord) bool {
 // completes browser consent; an in-memory record outlives neither, so an
 // exchange or commit against it must fail instead of authenticating a
 // superseded identity.
-func (c *Client) currentRecord(rec *ClientRecord) error {
-	stored, found, err := c.RegisteredClient()
+func (c *Client) currentRecord(ctx context.Context, rec *ClientRecord) error {
+	stored, found, err := c.RegisteredClient(ctx)
 	if err != nil {
 		return err
 	}
@@ -98,7 +121,7 @@ func (c *Client) currentRecord(rec *ClientRecord) error {
 // issuer, otherwise performs dynamic client registration and persists the
 // result.
 func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, error) {
-	if rec, found, err := c.RegisteredClient(); err != nil {
+	if rec, found, err := c.RegisteredClient(ctx); err != nil {
 		return nil, err
 	} else if found {
 		if rec.Issuer != md.AS.Issuer {
@@ -212,78 +235,69 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 			return nil, err
 		}
 	}
-	// Reject a lost epoch before the final write: if the lease is no
-	// longer held at this generation, another process has already
-	// registered and may have committed a matching grant, and this
-	// stale record would pair it with the wrong client.
-	if generation, ok, err := c.lease.LeaseGeneration(ctx, refreshLeaseName, c.owner); err != nil {
+	// The fence commit is atomic against the claimed epoch: a writer
+	// that loses the lease while its slot write is blocked is rejected
+	// and rolls back its own slot, so no optimistic pre- or post-write
+	// check is needed.
+	if err := c.storeClient(ctx, rec, leaseGeneration); err != nil {
 		return nil, err
-	} else if !ok || generation != leaseGeneration {
-		return nil, fmt.Errorf("%w: the refresh lease was lost before storing the client record", ErrLeaseContention)
-	}
-	if err := c.storeClient(rec); err != nil {
-		return nil, err
-	}
-	// The write is uninterruptible and the renewal can fail while it
-	// is in flight: if the epoch is gone when the write returns, this
-	// stale record may have overwritten the winning process's
-	// registration. The credential backend cannot fence the write
-	// itself, so the commit is checked optimistically: the stale record
-	// is removed again, so the replacement can never be read as a ready
-	// pair, and the winner's flow re-registers on its next login. The
-	// check runs on a context that outlives the caller: a caller
-	// cancellation during the write must not short-circuit it, or the
-	// lost-ownership cleanup would be skipped.
-	if generation, ok, err := c.lease.LeaseGeneration(context.WithoutCancel(ctx), refreshLeaseName, c.owner); err != nil {
-		return nil, err
-	} else if !ok || generation != leaseGeneration {
-		lost := fmt.Errorf("%w: the refresh lease was lost during the client record write", ErrLeaseContention)
-		if delErr := c.removeStaleClientRecord(rec); delErr != nil {
-			return nil, fmt.Errorf("%w: %w", lost, delErr)
-		}
-		return nil, lost
 	}
 	return rec, nil
 }
 
-// removeStaleClientRecord removes the client record only if the write
-// that stored it is still the committed record: a winning process that
-// took over the lease may have stored its own registration after this
-// stale write returned, and that record must survive the cleanup.
-func (c *Client) removeStaleClientRecord(rec *ClientRecord) error {
-	data, found, err := c.secrets.GetSecret(labelClient)
-	if err != nil {
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
-	}
-	if !found {
-		return nil
-	}
-	var stored ClientRecord
-	if err := json.Unmarshal(data, &stored); err != nil {
-		return fmt.Errorf("stored client record is malformed: json")
-	}
-	if stored.WriteNonce != rec.WriteNonce {
-		return nil
-	}
-	if err := c.secrets.DeleteSecret(labelClient); err != nil {
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
-	}
-	return nil
-}
-
-// storeClient persists the registration record.
-func (c *Client) storeClient(rec *ClientRecord) error {
-	nonce, err := randomToken(16)
-	if err != nil {
-		return fmt.Errorf("generate write nonce: %w", err)
-	}
-	rec.WriteNonce = nonce
+// storeClient commits one client registration through the client fence,
+// the same protocol as the refresh credential: the record goes to a
+// unique secure-backend slot, and the fence pointer — advanced atomically
+// against the claimed lease epoch — makes it live. A writer that lost the
+// epoch, or was passed by a concurrent commit, has its advance rejected
+// and removes its own slot; it can never install or remove another
+// writer's record. The caller holds the refresh lease (epoch
+// leaseGeneration).
+func (c *Client) storeClient(ctx context.Context, rec *ClientRecord, leaseGeneration int64) error {
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return fmt.Errorf("encode client record: %w", err)
 	}
-	if err := c.secrets.SetSecret(labelClient, data); err != nil {
+	slot, err := newClientSlotLabel()
+	if err != nil {
+		return err
+	}
+	if err := c.secrets.SetSecret(slot, data); err != nil {
+		// Best-effort rollback of the uncommitted slot.
+		_ = c.secrets.DeleteSecret(slot)
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	generation, previous, found, err := c.lease.ReadCredentialFence(ctx, store.ClientFenceName)
+	if err != nil {
+		_ = c.secrets.DeleteSecret(slot)
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	fenceGeneration := int64(1)
+	if found {
+		fenceGeneration = generation + 1
+		previous = slot
+	}
+	committed, err := c.lease.CommitCredentialFence(ctx, store.CredentialFenceCommit{
+		FenceName:       store.ClientFenceName,
+		FenceGeneration: fenceGeneration,
+		Slot:            slot,
+		PreviousSlot:    previous,
+		LeaseName:       refreshLeaseName,
+		LeaseOwner:      c.owner,
+		LeaseGeneration: leaseGeneration,
+	})
+	if err != nil {
+		_ = c.secrets.DeleteSecret(slot)
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	if !committed {
+		// This writer lost the epoch or was passed by a concurrent
+		// commit: the slot is referenced by no fence, so removing it
+		// cannot touch another writer's record.
+		if delErr := c.secrets.DeleteSecret(slot); delErr != nil {
+			return fmt.Errorf("%w: %w", ErrLeaseContention, delErr)
+		}
+		return fmt.Errorf("%w: the client record commit was rejected", ErrLeaseContention)
 	}
 	return nil
 }

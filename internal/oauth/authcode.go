@@ -125,7 +125,7 @@ func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *C
 			// consent, and an expired or superseded record
 			// authenticates no exchange. Failing here keeps the
 			// code for a fresh attempt.
-			if err := c.currentRecord(rec); err != nil {
+			if err := c.currentRecord(ectx, rec); err != nil {
 				return nil, err
 			}
 			return c.postToken(ectx, md.AS.TokenEndpoint, rec, form)
@@ -140,7 +140,7 @@ func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *C
 			// can never be paired with a different client. A
 			// replacement that commits after this check retires
 			// the newly committed grant as orphaned.
-			if err := c.currentRecord(rec); err != nil {
+			if err := c.currentRecord(pctx, rec); err != nil {
 				return err
 			}
 			cred := &refreshCredential{

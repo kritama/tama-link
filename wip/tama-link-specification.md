@@ -1014,21 +1014,25 @@ retired as orphaned — or aborts, and the new client is never paired with a
 grant issued under the old one. The registration mutation also holds the
 local lock that orders completions, refreshes, and logouts (a same-owner
 claim never advances the epoch, so the lease alone cannot order in-process
-mutations), renews the epoch across the whole mutation — the renewal
-outlives caller cancellation, because the final record write takes no
-context and cannot be aborted, so a cancel while the secure backend is
-busy must not hand the epoch away mid-write. The commit is checked
-optimistically on both sides of that write: the epoch is verified before
-it, and if it is lost while the uninterruptible write is in flight, the
-stale record the write may have stored over the winner's registration is
-removed again — the credential backend cannot fence the write itself —
-and only if the stale write is still the committed record: each write
-stamps the record with a per-write nonce, so a winner whose registration
-landed in between keeps its own record and its authorization flow can
-still complete. The post-write check itself runs on a context that
-outlives the caller's, so a cancellation mid-write cannot skip the
-lost-ownership cleanup: a stale registration can never be read as a
-ready pair. The normal
+mutations) and renews the epoch across the whole mutation. The client
+record is fenced exactly like the refresh credential: the record is
+written to a unique secure-backend slot and made live only by an atomic
+fence advance that requires the writer's own live, unexpired lease
+ownership epoch. The slot write itself takes no context and cannot be
+aborted, but a writer that loses the lease while the write is in flight —
+or whose caller cancels before the commit is observed — has its fence
+advance rejected and removes its own uncommitted slot, so it can never
+install a stale registration, and a winner whose registration commits in
+between keeps its own fenced record untouched. The fence pointer and its
+clear are therefore the only authority for which registration is live:
+reads take the fenced slot when a client fence has been committed and
+fall back to the legacy single-label record only when no fence exists, a
+registration replaced by a newer commit is retired through the same
+retirement backlog as refresh credentials, and logout clears the client
+fence and removes its slot under the same epoch-bound protocol as the
+refresh fence, so a logout that loses its lease mid-cleanup fails
+retryably and can never wipe a registration installed by the process
+that took over. The normal
 first-login path, which stores no credential yet, is unaffected.
 The client auth method is selected from the set the authorization server
 advertises — the field is a set of supported methods, not a single choice:

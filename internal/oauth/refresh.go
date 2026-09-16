@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/url"
 	"time"
+
+	"github.com/kritama/tama-link/internal/store"
 )
 
 // claimAttempts bounds how long one process waits for the refresh lease
@@ -31,7 +33,7 @@ const claimInterval = 250 * time.Millisecond
 // acquired), so without the mutex concurrent in-process refreshes would
 // rotate the same refresh grant at once.
 func (c *Client) refreshLocked(ctx context.Context) (string, error) {
-	rec, found, err := c.RegisteredClient()
+	rec, found, err := c.RegisteredClient(ctx)
 	if err != nil {
 		return "", err
 	}
@@ -170,7 +172,7 @@ func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64
 	if err := c.lease.MarkRefreshCredentialInvalidated(ctx); err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
-	cleared, err := c.lease.ClearCredentialFence(ctx, refreshLeaseName, c.owner, leaseGeneration, slot)
+	cleared, err := c.lease.ClearCredentialFence(ctx, store.RefreshFenceName, refreshLeaseName, c.owner, leaseGeneration, slot)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
@@ -184,7 +186,7 @@ func (c *Client) invalidateCredential(ctx context.Context, leaseGeneration int64
 		if err := c.secrets.DeleteSecret(slot); err != nil {
 			return nil
 		}
-		if err := c.lease.ClearRetiredCredentialSlot(ctx, slot); err != nil {
+		if err := c.lease.ClearRetiredCredentialSlot(ctx, store.RefreshFenceName, slot); err != nil {
 			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
 	}

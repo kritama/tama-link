@@ -12,6 +12,7 @@ import (
 // leaseGeneration, enqueuing previousSlot for retirement retry.
 func fenceCommit(ctx context.Context, s *store.Store, generation int64, slot, previousSlot, leaseOwner string, leaseGeneration int64) (bool, error) {
 	return s.CommitCredentialFence(ctx, store.CredentialFenceCommit{
+		FenceName:       store.RefreshFenceName,
 		FenceGeneration: generation,
 		Slot:            slot,
 		PreviousSlot:    previousSlot,
@@ -50,7 +51,7 @@ func TestCommitCredentialFenceRequiresLiveLease(t *testing.T) {
 	if ok, err := fenceCommit(ctx, s, 2, "slot-stale", "", "owner-a", 1); err != nil || ok {
 		t.Fatalf("stale writer commit = %v %v, want rejected", ok, err)
 	}
-	generation, slot, found, err := s.ReadCredentialFence(ctx)
+	generation, slot, found, err := s.ReadCredentialFence(ctx, store.RefreshFenceName)
 	if err != nil || !found || generation != 1 || slot != "slot-1" {
 		t.Fatalf("fence after stale commit = %d %s found:%v err:%v, want slot-1 at 1", generation, slot, found, err)
 	}
@@ -59,7 +60,7 @@ func TestCommitCredentialFenceRequiresLiveLease(t *testing.T) {
 	if ok, err := fenceCommit(ctx, s, 2, "slot-2", "slot-1", "owner-b", 2); err != nil || !ok {
 		t.Fatalf("owner-b commit = %v %v, want committed", ok, err)
 	}
-	generation, slot, found, err = s.ReadCredentialFence(ctx)
+	generation, slot, found, err = s.ReadCredentialFence(ctx, store.RefreshFenceName)
 	if err != nil || !found || generation != 2 || slot != "slot-2" {
 		t.Fatalf("fence after owner-b commit = %d %s found:%v err:%v", generation, slot, found, err)
 	}
@@ -91,7 +92,7 @@ func TestCommitCredentialFenceRejectsInsertWithoutLiveLease(t *testing.T) {
 	if ok, err := fenceCommit(ctx, s, 1, "slot-stale", "", "owner-a", 1); err != nil || ok {
 		t.Fatalf("insert without a live lease = %v %v, want rejected", ok, err)
 	}
-	if _, _, found, err := s.ReadCredentialFence(ctx); err != nil || found {
+	if _, _, found, err := s.ReadCredentialFence(ctx, store.RefreshFenceName); err != nil || found {
 		t.Fatalf("fence after stale insert = found:%v err:%v, want absent", found, err)
 	}
 
@@ -119,7 +120,7 @@ func TestCommitCredentialFenceEnqueuesPreviousSlot(t *testing.T) {
 	if ok, err := fenceCommit(ctx, s, 1, "slot-1", "slot-0", "owner-a", 1); err != nil || !ok {
 		t.Fatalf("commit = %v %v", ok, err)
 	}
-	pending, err := s.RetiredCredentialSlots(ctx)
+	pending, err := s.RetiredCredentialSlots(ctx, store.RefreshFenceName)
 	if err != nil || len(pending) != 1 || pending[0] != "slot-0" {
 		t.Fatalf("retirement backlog = %v err=%v, want [slot-0]", pending, err)
 	}
@@ -129,16 +130,16 @@ func TestCommitCredentialFenceEnqueuesPreviousSlot(t *testing.T) {
 	if ok, err := fenceCommit(ctx, s, 1, "slot-x", "slot-stale", "owner-a", 1); err != nil || ok {
 		t.Fatalf("stale commit = %v %v, want rejected", ok, err)
 	}
-	pending, err = s.RetiredCredentialSlots(ctx)
+	pending, err = s.RetiredCredentialSlots(ctx, store.RefreshFenceName)
 	if err != nil || len(pending) != 1 {
 		t.Fatalf("retirement backlog after rejected commit = %v err=%v, want unchanged", pending, err)
 	}
 
 	// A successful deletion clears the record.
-	if err := s.ClearRetiredCredentialSlot(ctx, "slot-0"); err != nil {
+	if err := s.ClearRetiredCredentialSlot(ctx, store.RefreshFenceName, "slot-0"); err != nil {
 		t.Fatalf("ClearRetiredCredentialSlot: %v", err)
 	}
-	pending, err = s.RetiredCredentialSlots(ctx)
+	pending, err = s.RetiredCredentialSlots(ctx, store.RefreshFenceName)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("retirement backlog after clear = %v err=%v, want empty", pending, err)
 	}
@@ -158,16 +159,16 @@ func TestClearCredentialFence(t *testing.T) {
 	if ok, err := s.ClaimLease(ctx, "oauth/refresh", "owner-a", time.Minute); err != nil || !ok {
 		t.Fatalf("claim = %v %v", ok, err)
 	}
-	if cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1, ""); err != nil || !cleared {
+	if cleared, err := s.ClearCredentialFence(ctx, store.RefreshFenceName, "oauth/refresh", "owner-a", 1, ""); err != nil || !cleared {
 		t.Fatalf("absent-fence clear = %v %v, want cleared", cleared, err)
 	}
 	if ok, err := fenceCommit(ctx, s, 1, "slot-1", "", "owner-a", 1); err != nil || !ok {
 		t.Fatalf("commit = %v %v", ok, err)
 	}
-	if cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1, ""); err != nil || !cleared {
+	if cleared, err := s.ClearCredentialFence(ctx, store.RefreshFenceName, "oauth/refresh", "owner-a", 1, ""); err != nil || !cleared {
 		t.Fatalf("ClearCredentialFence = %v %v, want cleared", cleared, err)
 	}
-	if _, _, found, err := s.ReadCredentialFence(ctx); err != nil || found {
+	if _, _, found, err := s.ReadCredentialFence(ctx, store.RefreshFenceName); err != nil || found {
 		t.Fatalf("fence after clear = found:%v err:%v, want none", found, err)
 	}
 
@@ -175,7 +176,7 @@ func TestClearCredentialFence(t *testing.T) {
 	if ok, err := fenceCommit(ctx, s, 1, "slot-2", "", "owner-a", 1); err != nil || !ok {
 		t.Fatalf("commit after clear = %v %v, want committed", ok, err)
 	}
-	if _, slot, found, err := s.ReadCredentialFence(ctx); err != nil || !found || slot != "slot-2" {
+	if _, slot, found, err := s.ReadCredentialFence(ctx, store.RefreshFenceName); err != nil || !found || slot != "slot-2" {
 		t.Fatalf("fence after relogin = %s found:%v err:%v", slot, found, err)
 	}
 
@@ -186,14 +187,14 @@ func TestClearCredentialFence(t *testing.T) {
 	if ok, err := s.ClaimLease(ctx, "oauth/refresh", "owner-b", time.Minute); err != nil || !ok {
 		t.Fatalf("owner-b claim = %v %v", ok, err)
 	}
-	cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1, "")
+	cleared, err := s.ClearCredentialFence(ctx, store.RefreshFenceName, "oauth/refresh", "owner-a", 1, "")
 	if err != nil || cleared {
 		t.Fatalf("stale-epoch clear = %v %v, want refused", cleared, err)
 	}
-	if _, slot, found, err := s.ReadCredentialFence(ctx); err != nil || !found || slot != "slot-2" {
+	if _, slot, found, err := s.ReadCredentialFence(ctx, store.RefreshFenceName); err != nil || !found || slot != "slot-2" {
 		t.Fatalf("fence after refused clear = %s found:%v err:%v", slot, found, err)
 	}
-	pending, err := s.RetiredCredentialSlots(ctx)
+	pending, err := s.RetiredCredentialSlots(ctx, store.RefreshFenceName)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("retirement backlog after refused clear = %v err=%v, want empty", pending, err)
 	}
@@ -240,13 +241,13 @@ func TestClearCredentialFenceRetiresSlotAtomically(t *testing.T) {
 	if ok, err := fenceCommit(ctx, s, 1, "slot-1", "", "owner-a", 1); err != nil || !ok {
 		t.Fatalf("commit = %v %v", ok, err)
 	}
-	if cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1, "slot-1"); err != nil || !cleared {
+	if cleared, err := s.ClearCredentialFence(ctx, store.RefreshFenceName, "oauth/refresh", "owner-a", 1, "slot-1"); err != nil || !cleared {
 		t.Fatalf("clear with retired slot = %v %v, want cleared", cleared, err)
 	}
-	if _, _, found, err := s.ReadCredentialFence(ctx); err != nil || found {
+	if _, _, found, err := s.ReadCredentialFence(ctx, store.RefreshFenceName); err != nil || found {
 		t.Fatalf("fence after clear = found:%v err:%v, want none", found, err)
 	}
-	pending, err := s.RetiredCredentialSlots(ctx)
+	pending, err := s.RetiredCredentialSlots(ctx, store.RefreshFenceName)
 	if err != nil || len(pending) != 1 || pending[0] != "slot-1" {
 		t.Fatalf("retirement backlog = %v err=%v, want [slot-1]", pending, err)
 	}
@@ -260,10 +261,10 @@ func TestClearCredentialFenceRetiresSlotAtomically(t *testing.T) {
 	if ok, err := fenceCommit(ctx, s, 1, "slot-2", "", "owner-b", 2); err != nil || !ok {
 		t.Fatalf("owner-b commit = %v %v", ok, err)
 	}
-	if cleared, err := s.ClearCredentialFence(ctx, "oauth/refresh", "owner-a", 1, "slot-2"); err != nil || cleared {
+	if cleared, err := s.ClearCredentialFence(ctx, store.RefreshFenceName, "oauth/refresh", "owner-a", 1, "slot-2"); err != nil || cleared {
 		t.Fatalf("stale-epoch clear with retired slot = %v %v, want refused", cleared, err)
 	}
-	pending, err = s.RetiredCredentialSlots(ctx)
+	pending, err = s.RetiredCredentialSlots(ctx, store.RefreshFenceName)
 	if err != nil || len(pending) != 1 || pending[0] != "slot-1" {
 		t.Fatalf("retirement backlog after refused clear = %v err=%v, want [slot-1] unchanged", pending, err)
 	}

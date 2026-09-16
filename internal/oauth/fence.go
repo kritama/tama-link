@@ -22,6 +22,16 @@ func newRefreshSlotLabel() (string, error) {
 	return labelRefresh + "@" + hex.EncodeToString(b[:]), nil
 }
 
+// newClientSlotLabel returns one unique secure-backend label for a client
+// record awaiting its fence commit.
+func newClientSlotLabel() (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate client slot label: %w", err)
+	}
+	return store.ClientFenceName + "@" + hex.EncodeToString(b[:]), nil
+}
+
 // fencedCredential is one refresh credential plus the generations and
 // slots a replacement commits at: the credential-fence generation the
 // replacement advances, the lease ownership epoch it must still hold, and
@@ -43,7 +53,7 @@ type fencedCredential struct {
 // generation 1. The returned generations are what a replacement commits
 // at, and the returned slot is what a successful commit retires.
 func (c *Client) loadFenced(ctx context.Context) (*fencedCredential, error) {
-	generation, slot, found, err := c.lease.ReadCredentialFence(ctx)
+	generation, slot, found, err := c.lease.ReadCredentialFence(ctx, store.RefreshFenceName)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
@@ -121,6 +131,7 @@ func (c *Client) storeFenced(ctx context.Context, fenced *fencedCredential) erro
 		previous = ""
 	}
 	committed, err := c.lease.CommitCredentialFence(ctx, store.CredentialFenceCommit{
+		FenceName:       store.RefreshFenceName,
 		FenceGeneration: fenced.generation,
 		Slot:            slot,
 		PreviousSlot:    previous,
@@ -154,7 +165,7 @@ func (c *Client) storeFenced(ctx context.Context, fenced *fencedCredential) erro
 			// retries the deletion.
 			return nil
 		}
-		if err := c.lease.ClearRetiredCredentialSlot(ctx, previous); err != nil {
+		if err := c.lease.ClearRetiredCredentialSlot(ctx, store.RefreshFenceName, previous); err != nil {
 			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
 	}
@@ -166,14 +177,16 @@ func (c *Client) storeFenced(ctx context.Context, fenced *fencedCredential) erro
 // effort: a slot whose deletion still fails keeps its record for the next
 // refresh or logout.
 func (c *Client) retireFailedSlots(ctx context.Context) {
-	slots, err := c.lease.RetiredCredentialSlots(ctx)
-	if err != nil {
-		return
-	}
-	for _, slot := range slots {
-		if err := c.secrets.DeleteSecret(slot); err != nil {
+	for _, fenceName := range []string{store.RefreshFenceName, store.ClientFenceName} {
+		slots, err := c.lease.RetiredCredentialSlots(ctx, fenceName)
+		if err != nil {
 			continue
 		}
-		_ = c.lease.ClearRetiredCredentialSlot(ctx, slot)
+		for _, slot := range slots {
+			if err := c.secrets.DeleteSecret(slot); err != nil {
+				continue
+			}
+			_ = c.lease.ClearRetiredCredentialSlot(ctx, fenceName, slot)
+		}
 	}
 }

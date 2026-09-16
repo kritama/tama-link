@@ -41,9 +41,7 @@ func TestTokenExchangePublicClientNone(t *testing.T) {
 		server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
 		client := clientForServer(t, server, newFakeSecrets(), newFakeLease(), newTestClock(time.Unix(1_700_000_000, 0)))
 		rec := &ClientRecord{ClientID: "cid-none", AuthMethod: "none", Issuer: client.issuer}
-		if err := client.storeClient(rec); err != nil {
-			t.Fatalf("storeClient: %v", err)
-		}
+		storeTestClient(t, client, rec)
 		md := serverMetadata(server.ts.URL)
 		redirect := "http://127.0.0.1:51234/callback"
 		req, err := client.NewAuthorizationRequest(md, rec, redirect)
@@ -111,7 +109,7 @@ func TestCompleteAuthorizationSerializesWithRefresh(t *testing.T) {
 	seedMethodCredentials(t, secrets, "cid-1", "", "none", client.issuer, server.ts.URL+"/oauth/token", "rt-0")
 	md := serverMetadata(server.ts.URL)
 	redirect := "http://127.0.0.1:51234/callback"
-	rec, found, err := client.RegisteredClient()
+	rec, found, err := client.RegisteredClient(context.Background())
 	if err != nil || !found {
 		t.Fatalf("client record = found:%v err:%v, want present", found, err)
 	}

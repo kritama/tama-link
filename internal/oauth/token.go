@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"math"
 	"time"
+
+	"github.com/kritama/tama-link/internal/store"
 )
 
 // maxTokenExpirySeconds is the largest provider-reported expires_in this
@@ -60,7 +62,7 @@ func (c *Client) loadRefresh() (*refreshCredential, bool, error) {
 // endpoint — is not ready, so submit keeps the idempotency key free for
 // the reauthorized retry instead of accepting a doomed row.
 func (c *Client) HasCredentials(ctx context.Context) (bool, error) {
-	rec, found, err := c.RegisteredClient()
+	rec, found, err := c.RegisteredClient(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -215,7 +217,7 @@ func (c *Client) Logout(ctx context.Context) error {
 		<-renewed
 	}()
 
-	_, slot, found, err := c.lease.ReadCredentialFence(ctx)
+	_, slot, found, err := c.lease.ReadCredentialFence(ctx, store.RefreshFenceName)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
@@ -230,13 +232,33 @@ func (c *Client) Logout(ctx context.Context) error {
 	if err := c.lease.MarkRefreshCredentialInvalidated(ctx); err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
-	cleared, err := c.lease.ClearCredentialFence(ctx, refreshLeaseName, c.owner, leaseGeneration, "")
+	cleared, err := c.lease.ClearCredentialFence(ctx, store.RefreshFenceName, refreshLeaseName, c.owner, leaseGeneration, "")
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
 	if !cleared {
 		return fmt.Errorf("%w: logout lost the refresh lease mid-cleanup; retry", ErrLeaseContention)
 	}
+	// The client registration fence follows the same protocol: the
+	// committed slot is deleted while the fence still references it, and
+	// the pointer is cleared against the claimed epoch, so a logout whose
+	// lease was lost mid-cleanup can never wipe a registration installed
+	// by the process that took over.
+	if _, clientSlot, clientFound, err := c.lease.ReadCredentialFence(ctx, store.ClientFenceName); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	} else if clientFound && clientSlot != "" {
+		if err := c.secrets.DeleteSecret(clientSlot); err != nil {
+			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+		}
+	}
+	if cleared, err := c.lease.ClearCredentialFence(ctx, store.ClientFenceName, refreshLeaseName, c.owner, leaseGeneration, ""); err != nil {
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	} else if !cleared {
+		return fmt.Errorf("%w: logout lost the refresh lease mid-cleanup; retry", ErrLeaseContention)
+	}
+	// The legacy single-label record is only live when no client fence
+	// exists; with a fence it is dead data, so the fixed-label delete is
+	// harmless either way.
 	if err := c.secrets.DeleteSecret(labelClient); err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}

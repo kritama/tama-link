@@ -70,9 +70,7 @@ func TestCompleteAuthorizationRejectsSupersededRegistration(t *testing.T) {
 	secrets := newFakeSecrets()
 	client := clientForServer(t, server, secrets, newFakeLease(), newTestClock(time.Unix(1_700_000_000, 0)))
 	rec := &ClientRecord{ClientID: "cid-old", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer}
-	if err := client.storeClient(rec); err != nil {
-		t.Fatalf("storeClient: %v", err)
-	}
+	storeTestClient(t, client, rec)
 	md := serverMetadata(server.ts.URL)
 	redirect := "http://127.0.0.1:51234/callback"
 	authReq, err := client.NewAuthorizationRequest(md, rec, redirect)
@@ -84,9 +82,7 @@ func TestCompleteAuthorizationRejectsSupersededRegistration(t *testing.T) {
 	replaced := *rec
 	replaced.ClientID = "cid-new"
 	replaced.ClientSecret = "shh-new"
-	if err := client.storeClient(&replaced); err != nil {
-		t.Fatalf("storeClient replacement: %v", err)
-	}
+	storeTestClient(t, client, &replaced)
 
 	if err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "code-1", redirect); err == nil {
 		t.Fatal("CompleteAuthorization accepted a superseded client record")
@@ -114,9 +110,7 @@ func TestCompleteAuthorizationRejectsExpiredSecret(t *testing.T) {
 		Issuer:          client.issuer,
 		SecretExpiresAt: 1_700_000_000 + 3600,
 	}
-	if err := client.storeClient(rec); err != nil {
-		t.Fatalf("storeClient: %v", err)
-	}
+	storeTestClient(t, client, rec)
 	md := serverMetadata(server.ts.URL)
 	redirect := "http://127.0.0.1:51234/callback"
 	authReq, err := client.NewAuthorizationRequest(md, rec, redirect)
@@ -143,9 +137,7 @@ func TestCompleteAuthorization(t *testing.T) {
 	lease := newFakeLease()
 	client := clientForServer(t, server, secrets, lease, clock)
 	rec := &ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer}
-	if err := client.storeClient(rec); err != nil {
-		t.Fatalf("storeClient: %v", err)
-	}
+	storeTestClient(t, client, rec)
 	md := serverMetadata(server.ts.URL)
 
 	// The listener port is selected before the authorization URL exists; the
@@ -213,9 +205,7 @@ func TestCompleteAuthorizationRejections(t *testing.T) {
 	clock := newTestClock(time.Now())
 	client := clientForServer(t, server, secrets, newFakeLease(), clock)
 	rec := &ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer}
-	if err := client.storeClient(rec); err != nil {
-		t.Fatalf("storeClient: %v", err)
-	}
+	storeTestClient(t, client, rec)
 	md := serverMetadata(server.ts.URL)
 	requestURI := "http://127.0.0.1:51234/callback"
 	authReq, err := client.NewAuthorizationRequest(md, rec, requestURI)

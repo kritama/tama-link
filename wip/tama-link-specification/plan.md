@@ -181,16 +181,19 @@ grant is then retired) or aborts, never pairing the new client with a grant
 issued under the old one. The registration mutation holds the local lock
 that orders completions, refreshes, and logouts — a same-owner lease claim
 never advances the epoch, so the lease alone cannot order in-process
-mutations — renews the epoch across the whole mutation, outliving caller
-cancellation because the final record write takes no context and cannot
-be aborted, and checks the epoch on both sides of that write: before it, and after
-it on a context that outlives the caller's, where a lost epoch removes
-the stale record the write may have stored — matched by a per-write
-nonce, so a winner whose registration landed in between keeps its own
-record — and a cancellation mid-write cannot skip the cleanup. Logout
-and rejected-grant invalidation renew their ownership outlives caller
-cancellation for the same reason: their fixed-label deletions take no
-context and cannot be aborted.
+mutations — and renews the epoch across the whole mutation. The client
+record is fenced like the refresh credential: it is written to a unique
+secure-backend slot and made live only by an atomic fence advance bound to
+the writer's live lease epoch; a writer that loses the lease or whose
+caller cancels before the commit observes it has its advance rejected and
+its own slot rolled back, so a stale registration can never be installed
+and a winner's committed record is never touched. Logout clears the
+client fence and removes its slot under the same epoch-bound protocol as
+the refresh fence, so a logout that loses its lease mid-cleanup fails
+retryably and can never wipe a registration installed by the process that
+took over. Logout and rejected-grant invalidation renew their
+ownership outliving caller cancellation for the same reason: their
+fixed-label deletions take no context and cannot be aborted.
 
 ### D6. Terminal results are captured immediately and owned locally
 

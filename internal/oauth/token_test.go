@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/kritama/tama-link/internal/store"
 )
 
 // tokenFixture wires one server, client, and logged-in profile together.
@@ -133,7 +135,7 @@ func TestRefreshInvalidGrantInvalidatesDurableCredential(t *testing.T) {
 	// The durable credential is gone: the fence is cleared, the slot and
 	// the legacy label are deleted, and readiness reports false so submit
 	// rejects new work instead of accepting doomed submissions.
-	if _, _, found, err := lease.ReadCredentialFence(ctx); err != nil || found {
+	if _, _, found, err := lease.ReadCredentialFence(ctx, store.RefreshFenceName); err != nil || found {
 		t.Fatalf("fence after invalid grant = found:%v err:%v, want cleared", found, err)
 	}
 	if ok, err := client.HasCredentials(ctx); err != nil || ok {
@@ -312,7 +314,7 @@ func TestInvalidGrantMasksUndeletableLegacyCredential(t *testing.T) {
 
 	// A reauthorization commits a fenced credential and retires the mask.
 	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
-	rec, found, err := client.RegisteredClient()
+	rec, found, err := client.RegisteredClient(context.Background())
 	if err != nil || !found {
 		t.Fatalf("client registration = found:%v err:%v, want present for reauthorization", found, err)
 	}
@@ -359,7 +361,7 @@ func TestInvalidGrantMasksLegacyGrantWhenSlotDeletionFails(t *testing.T) {
 	// grant instead of returning the cache.
 	clock.set(clock.current().Add(3601 * time.Second))
 
-	_, slot, found, err := lease.ReadCredentialFence(ctx)
+	_, slot, found, err := lease.ReadCredentialFence(ctx, store.RefreshFenceName)
 	if err != nil || !found || slot == "" {
 		t.Fatalf("fence after rotation = slot:%q found:%v err:%v, want a fenced slot", slot, found, err)
 	}
@@ -385,7 +387,7 @@ func TestInvalidGrantMasksLegacyGrantWhenSlotDeletionFails(t *testing.T) {
 	if _, found, _ := secrets.GetSecret(labelRefresh); !found {
 		t.Fatal("the legacy label is gone; the failed-deletion scenario is not exercised")
 	}
-	if _, _, found, _ := lease.ReadCredentialFence(ctx); found {
+	if _, _, found, _ := lease.ReadCredentialFence(ctx, store.RefreshFenceName); found {
 		t.Fatal("the fence is still present; the clear was not exercised")
 	}
 	if ok, err := client.HasCredentials(ctx); err != nil || ok {
@@ -449,7 +451,7 @@ func TestRefreshRetiresPreviousSlot(t *testing.T) {
 	if _, err := client.Token(ctx); err != nil {
 		t.Fatalf("first Token: %v", err)
 	}
-	_, slot1, found, err := client.lease.ReadCredentialFence(ctx)
+	_, slot1, found, err := client.lease.ReadCredentialFence(ctx, store.RefreshFenceName)
 	if err != nil || !found {
 		t.Fatalf("fence after first refresh: %v", err)
 	}
@@ -461,7 +463,7 @@ func TestRefreshRetiresPreviousSlot(t *testing.T) {
 	if _, err := client.Token(ctx); err != nil {
 		t.Fatalf("second Token: %v", err)
 	}
-	_, slot2, found, err := client.lease.ReadCredentialFence(ctx)
+	_, slot2, found, err := client.lease.ReadCredentialFence(ctx, store.RefreshFenceName)
 	if err != nil || !found || slot2 == slot1 {
 		t.Fatalf("fence after second refresh: slot=%q prev=%q found=%v err=%v", slot2, slot1, found, err)
 	}
@@ -635,7 +637,7 @@ func TestLogoutRetriesAfterBackendFailure(t *testing.T) {
 	if _, err := client.Token(context.Background()); err != nil {
 		t.Fatalf("Token: %v", err)
 	}
-	_, slot, found, err := lease.ReadCredentialFence(ctx)
+	_, slot, found, err := lease.ReadCredentialFence(ctx, store.RefreshFenceName)
 	if err != nil || !found {
 		t.Fatalf("fence after refresh: %v", err)
 	}
@@ -704,7 +706,7 @@ func TestRefreshRetiresPreviousSlotAfterBackendFailure(t *testing.T) {
 	if _, err := client.Token(ctx); err != nil {
 		t.Fatalf("first Token: %v", err)
 	}
-	_, slot1, found, err := lease.ReadCredentialFence(ctx)
+	_, slot1, found, err := lease.ReadCredentialFence(ctx, store.RefreshFenceName)
 	if err != nil || !found {
 		t.Fatalf("fence after first refresh: %v", err)
 	}
@@ -718,14 +720,14 @@ func TestRefreshRetiresPreviousSlotAfterBackendFailure(t *testing.T) {
 	// The new credential is live and the refresh succeeded; the old slot
 	// is no longer referenced but still present, and its deletion is
 	// durably recorded for retry.
-	_, slot2, found, err := lease.ReadCredentialFence(ctx)
+	_, slot2, found, err := lease.ReadCredentialFence(ctx, store.RefreshFenceName)
 	if err != nil || !found || slot2 == slot1 {
 		t.Fatalf("fence after second refresh: %q found:%v err:%v", slot2, found, err)
 	}
 	if _, ok, _ := secrets.GetSecret(slot1); !ok {
 		t.Fatal("the old slot vanished without its deletion succeeding")
 	}
-	pending, err := lease.RetiredCredentialSlots(ctx)
+	pending, err := lease.RetiredCredentialSlots(ctx, store.RefreshFenceName)
 	if err != nil || len(pending) != 1 || pending[0] != slot1 {
 		t.Fatalf("retirement backlog = %v err=%v, want [slot1]", pending, err)
 	}
@@ -740,7 +742,7 @@ func TestRefreshRetiresPreviousSlotAfterBackendFailure(t *testing.T) {
 	if _, ok, _ := secrets.GetSecret(slot1); ok {
 		t.Fatal("the drained refresh left the previous slot behind")
 	}
-	pending, err = lease.RetiredCredentialSlots(ctx)
+	pending, err = lease.RetiredCredentialSlots(ctx, store.RefreshFenceName)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("retirement backlog after drain = %v err=%v, want empty", pending, err)
 	}
@@ -768,7 +770,7 @@ func TestRefreshRenewsLeaseThroughPersistence(t *testing.T) {
 		t.Fatalf("Token with a write outliving the lease TTL: %v", err)
 	}
 	// The replacement is committed: the fence points at the new slot.
-	_, slot, found, err := lease.ReadCredentialFence(context.Background())
+	_, slot, found, err := lease.ReadCredentialFence(context.Background(), store.RefreshFenceName)
 	if err != nil || !found {
 		t.Fatalf("fence after slow write: %v", err)
 	}
@@ -789,7 +791,7 @@ func TestLogoutLostLeaseKeepsRetryableState(t *testing.T) {
 	if _, err := client.Token(context.Background()); err != nil {
 		t.Fatalf("Token: %v", err)
 	}
-	_, _, found, err := lease.ReadCredentialFence(ctx)
+	_, _, found, err := lease.ReadCredentialFence(ctx, store.RefreshFenceName)
 	if err != nil || !found {
 		t.Fatalf("fence after refresh: %v", err)
 	}
@@ -810,7 +812,7 @@ func TestLogoutLostLeaseKeepsRetryableState(t *testing.T) {
 	}
 	// The fence was not cleared by a lease it no longer owned: the slot
 	// record keeps the cleanup retryable.
-	if _, _, stillFound, ferr := lease.ReadCredentialFence(ctx); ferr != nil || !stillFound {
+	if _, _, stillFound, ferr := lease.ReadCredentialFence(ctx, store.RefreshFenceName); ferr != nil || !stillFound {
 		t.Fatalf("fence after lost-lease logout: found=%v err=%v, want still referenced", stillFound, ferr)
 	}
 	clock.set(clock.now.Add(time.Minute))
@@ -827,7 +829,7 @@ func TestRefreshInvalidGrantRecordsUndeletableSlot(t *testing.T) {
 	if _, err := client.Token(ctx); err != nil {
 		t.Fatalf("first Token: %v", err)
 	}
-	_, slot, found, err := lease.ReadCredentialFence(ctx)
+	_, slot, found, err := lease.ReadCredentialFence(ctx, store.RefreshFenceName)
 	if err != nil || !found {
 		t.Fatalf("fence after refresh: %v", err)
 	}
@@ -843,13 +845,13 @@ func TestRefreshInvalidGrantRecordsUndeletableSlot(t *testing.T) {
 	// The pointer is cleared, so readiness fails closed instead of
 	// reporting a dangling fence; the undeletable slot is durably recorded
 	// for cleanup.
-	if _, _, stillFound, ferr := lease.ReadCredentialFence(ctx); ferr != nil || stillFound {
+	if _, _, stillFound, ferr := lease.ReadCredentialFence(ctx, store.RefreshFenceName); ferr != nil || stillFound {
 		t.Fatalf("fence after invalid grant = found:%v err:%v, want cleared", stillFound, ferr)
 	}
 	if ok, err := client.HasCredentials(ctx); err != nil || ok {
 		t.Fatalf("HasCredentials after invalid grant = %v %v, want false without a backend error", ok, err)
 	}
-	pending, err := lease.RetiredCredentialSlots(ctx)
+	pending, err := lease.RetiredCredentialSlots(ctx, store.RefreshFenceName)
 	if err != nil || len(pending) != 1 || pending[0] != slot {
 		t.Fatalf("retirement backlog = %v err=%v, want [slot]", pending, err)
 	}
@@ -862,7 +864,7 @@ func TestRefreshInvalidGrantRecordsUndeletableSlot(t *testing.T) {
 	if _, ok, _ := secrets.GetSecret(slot); ok {
 		t.Fatal("the undrainable slot survived logout")
 	}
-	pending, err = lease.RetiredCredentialSlots(ctx)
+	pending, err = lease.RetiredCredentialSlots(ctx, store.RefreshFenceName)
 	if err != nil || len(pending) != 0 {
 		t.Fatalf("retirement backlog after logout = %v err=%v, want empty", pending, err)
 	}
@@ -1046,7 +1048,7 @@ func TestRefreshFenceRejectsStaleWriter(t *testing.T) {
 	server := (&metadataServer{}).start(t)
 	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
 	server.tokenDelay = 80 * time.Millisecond
-	store := newFakeSecrets()
+	shared := newFakeSecrets()
 	fence := newSharedFence()
 	clock := newTestClock(time.Unix(1_700_000_000, 0))
 
@@ -1054,9 +1056,9 @@ func TestRefreshFenceRejectsStaleWriter(t *testing.T) {
 	leaseA.fence = fence
 	leaseB := newFakeLease()
 	leaseB.fence = fence
-	clientA := clientForServer(t, server, &delayedSecrets{inner: store, delay: 150 * time.Millisecond}, leaseA, clock)
-	clientB := clientForServer(t, server, store, leaseB, clock)
-	seedCredentials(t, store, "cid-1", "shh", server.ts.URL+"/oauth/token", server.ts.URL+"/oauth", "rt-1")
+	clientA := clientForServer(t, server, &delayedSecrets{inner: shared, delay: 150 * time.Millisecond}, leaseA, clock)
+	clientB := clientForServer(t, server, shared, leaseB, clock)
+	seedCredentials(t, shared, "cid-1", "shh", server.ts.URL+"/oauth/token", server.ts.URL+"/oauth", "rt-1")
 
 	prev := refreshLeaseTTL
 	refreshLeaseTTL = 300 * time.Millisecond
@@ -1083,15 +1085,15 @@ func TestRefreshFenceRejectsStaleWriter(t *testing.T) {
 	}
 	// Exactly one credential slot survived: B's. A's orphan slot and the
 	// legacy label are gone.
-	_, slot, found, ferr := leaseA.ReadCredentialFence(context.Background())
+	_, slot, found, ferr := leaseA.ReadCredentialFence(context.Background(), store.RefreshFenceName)
 	if ferr != nil || !found {
 		t.Fatalf("fence = found:%v err:%v", found, ferr)
 	}
-	data, ok, serr := store.GetSecret(slot)
+	data, ok, serr := clientB.secrets.GetSecret(slot)
 	if serr != nil || !ok || !strings.Contains(string(data), "rt-2") {
 		t.Fatalf("live credential = %s ok:%v err:%v", data, ok, serr)
 	}
-	for _, label := range store.secretLabels() {
+	for _, label := range shared.secretLabels() {
 		if label != slot && label != labelClient {
 			t.Errorf("orphan credential entry %q survived", label)
 		}

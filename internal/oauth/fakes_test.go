@@ -176,9 +176,10 @@ type fakeLease struct {
 
 	fence          *sharedFence
 	fenceCommitErr error
-	// retired records the retirement backlog: slots whose deletion failed
-	// and that a later refresh or logout must retry.
-	retired map[string]struct{}
+	// retired records the retirement backlog per fenced stream: slots
+	// whose deletion failed and that a later refresh or logout must
+	// retry.
+	retired map[string]map[string]struct{}
 }
 
 func newFakeLease() *fakeLease {
@@ -191,26 +192,60 @@ func newFakeLease() *fakeLease {
 }
 
 // sharedFence models the durable state two simulated processes share: the
-// credential fence, and the refresh-lease holder the fence commit is bound
+// fenced streams and the refresh-lease holder the fence commits are bound
 // to. Each process keeps its own fakeLease claim view, but a claim by
 // either process replaces the shared holder, which is what a lease-bound
 // fence commit checks. The fake models ownership only; the generation
 // arithmetic is covered by the store's own tests.
 type sharedFence struct {
-	mu         sync.Mutex
-	generation int64
-	slot       string
-	found      bool
+	mu sync.Mutex
+	// per fenced stream: the refresh credential and the client record.
+	states map[string]*fenceState
 	// lease ownership the fence commit verifies.
 	leaseHolder string
 }
 
-func newSharedFence() *sharedFence { return &sharedFence{} }
+type fenceState struct {
+	generation int64
+	slot       string
+	found      bool
+}
 
-func (f *sharedFence) read() (int64, string, bool) {
+func newSharedFence() *sharedFence {
+	return &sharedFence{states: map[string]*fenceState{}}
+}
+
+// storeTestClient stores one client registration for a test: it claims
+// the refresh lease (the store commit is fenced to the claimed epoch) and
+// runs the production store path, so tests exercise the same protocol as
+// Register without running the full DCR flow.
+func storeTestClient(t *testing.T, c *Client, rec *ClientRecord) {
+	t.Helper()
+	if _, err := c.lease.ClaimLease(context.Background(), refreshLeaseName, c.owner, time.Minute); err != nil {
+		t.Fatalf("claim lease: %v", err)
+	}
+	if err := c.storeClient(context.Background(), rec, 0); err != nil {
+		t.Fatalf("storeClient: %v", err)
+	}
+}
+
+func (f *sharedFence) state(name string) *fenceState {
+	if st, ok := f.states[name]; ok {
+		return st
+	}
+	st := &fenceState{}
+	f.states[name] = st
+	return st
+}
+
+func (f *sharedFence) read(name string) (int64, string, bool) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return f.generation, f.slot, f.found
+	st := f.states[name]
+	if st == nil {
+		return 0, "", false
+	}
+	return st.generation, st.slot, st.found
 }
 
 // claimLease records one claim on the shared lease table: the last
@@ -230,32 +265,31 @@ func (f *sharedFence) releaseLease(owner string) {
 	}
 }
 
-func (f *sharedFence) commit(generation int64, slot, leaseOwner string) bool {
+func (f *sharedFence) commit(name string, generation int64, slot, leaseOwner string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.leaseHolder != leaseOwner {
 		return false
 	}
-	if generation <= f.generation {
+	st := f.state(name)
+	if generation <= st.generation {
 		return false
 	}
-	f.generation = generation
-	f.slot = slot
-	f.found = true
+	st.generation = generation
+	st.slot = slot
+	st.found = true
 	return true
 }
 
-// clearIfOwned clears the fence only when leaseOwner still owns the
+// clearIfOwned clears the named fence only when leaseOwner still owns the
 // shared lease. Returns whether it cleared.
-func (f *sharedFence) clearIfOwned(leaseOwner string) bool {
+func (f *sharedFence) clearIfOwned(name, leaseOwner string) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.leaseHolder != leaseOwner {
 		return false
 	}
-	f.generation = 0
-	f.slot = ""
-	f.found = false
+	f.states[name] = &fenceState{}
 	return true
 }
 
@@ -320,11 +354,16 @@ func (f *fakeLease) CommitLease(_ context.Context, name, owner string, generatio
 	return f.holder == owner && int64(f.generation) == generation, nil
 }
 
-func (f *fakeLease) ReadCredentialFence(_ context.Context) (int64, string, bool, error) {
+func (f *fakeLease) ReadCredentialFence(ctx context.Context, fenceName string) (int64, string, bool, error) {
+	// The production SQLite read observes the context; a canceled caller
+	// surfaces as an error rather than a lookup result.
+	if err := ctx.Err(); err != nil {
+		return 0, "", false, err
+	}
 	if f.fence == nil {
 		return 0, "", false, nil
 	}
-	gen, slot, found := f.fence.read()
+	gen, slot, found := f.fence.read(fenceName)
 	return gen, slot, found, nil
 }
 
@@ -332,42 +371,49 @@ func (f *fakeLease) ReadCredentialFence(_ context.Context) (int64, string, bool,
 // compare-and-swap plus the shared lease holder the commit must still own.
 // The fake checks ownership only; the epoch arithmetic is covered by the
 // store's own tests.
-func (f *fakeLease) CommitCredentialFence(_ context.Context, commit store.CredentialFenceCommit) (bool, error) {
+func (f *fakeLease) CommitCredentialFence(ctx context.Context, commit store.CredentialFenceCommit) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 	if commit.LeaseName != refreshLeaseName {
 		return false, fmt.Errorf("unexpected lease name %q", commit.LeaseName)
 	}
 	if f.fenceCommitErr != nil {
 		return false, f.fenceCommitErr
 	}
-	if !f.fence.commit(commit.FenceGeneration, commit.Slot, commit.LeaseOwner) {
+	if f.fence == nil {
+		// No shared durable state: the commit trivially lands.
+		return true, nil
+	}
+	if !f.fence.commit(commit.FenceName, commit.FenceGeneration, commit.Slot, commit.LeaseOwner) {
 		return false, nil
 	}
 	// The previous slot is atomically enqueued for retirement retry with
 	// the advance, mirroring the production transaction.
 	if commit.PreviousSlot != "" {
-		f.retire(commit.PreviousSlot)
+		f.retire(commit.FenceName, commit.PreviousSlot)
 	}
 	return true, nil
 }
 
-func (f *fakeLease) ClearCredentialFence(_ context.Context, leaseName, leaseOwner string, leaseGeneration int64, retiredSlot string) (bool, error) {
+func (f *fakeLease) ClearCredentialFence(_ context.Context, fenceName, leaseName, leaseOwner string, leaseGeneration int64, retiredSlot string) (bool, error) {
 	if leaseName != refreshLeaseName {
 		return false, fmt.Errorf("unexpected lease name %q", leaseName)
 	}
 	if f.fence == nil {
 		// An absent fence is successfully cleared.
-		f.retire(retiredSlot)
+		f.retire(fenceName, retiredSlot)
 		return true, nil
 	}
 	if f.leaseGen() != leaseGeneration {
 		return false, nil
 	}
-	if !f.fence.clearIfOwned(leaseOwner) {
+	if !f.fence.clearIfOwned(fenceName, leaseOwner) {
 		return false, nil
 	}
 	// The retired slot is atomically enqueued with the clear, mirroring
 	// the production transaction.
-	f.retire(retiredSlot)
+	f.retire(fenceName, retiredSlot)
 	return true, nil
 }
 
@@ -378,38 +424,43 @@ func (f *fakeLease) leaseGen() int64 { return 0 }
 // retire records one slot for retirement retry; the empty slot is a no-op,
 // matching the store, where a clear or commit with nothing to retire
 // enqueues nothing.
-func (f *fakeLease) retire(slot string) {
+func (f *fakeLease) retire(fenceName, slot string) {
 	if slot == "" {
 		return
 	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if f.retired == nil {
-		f.retired = map[string]struct{}{}
+		f.retired = map[string]map[string]struct{}{}
 	}
-	f.retired[slot] = struct{}{}
+	if f.retired[fenceName] == nil {
+		f.retired[fenceName] = map[string]struct{}{}
+	}
+	f.retired[fenceName][slot] = struct{}{}
 }
 
-func (f *fakeLease) RetiredCredentialSlots(_ context.Context) ([]string, error) {
+func (f *fakeLease) RetiredCredentialSlots(_ context.Context, fenceName string) ([]string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	slots := make([]string, 0, len(f.retired))
-	for slot := range f.retired {
+	slots := make([]string, 0, len(f.retired[fenceName]))
+	for slot := range f.retired[fenceName] {
 		slots = append(slots, slot)
 	}
 	sort.Strings(slots)
 	return slots, nil
 }
 
-func (f *fakeLease) ClearRetiredCredentialSlot(_ context.Context, slot string) error {
+func (f *fakeLease) ClearRetiredCredentialSlot(_ context.Context, fenceName, slot string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	delete(f.retired, slot)
+	if f.retired[fenceName] != nil {
+		delete(f.retired[fenceName], slot)
+	}
 	return nil
 }
 
-func (f *fakeLease) RecordRetiredCredentialSlot(_ context.Context, slot string) error {
-	f.retire(slot)
+func (f *fakeLease) RecordRetiredCredentialSlot(_ context.Context, fenceName, slot string) error {
+	f.retire(fenceName, slot)
 	return nil
 }
 
@@ -694,7 +745,7 @@ func serverAS(serverURL string) string {
 // label when no fence has been committed), for test assertions.
 func liveCredential(t *testing.T, lease *fakeLease, secrets *fakeSecrets) string {
 	t.Helper()
-	_, slot, found, err := lease.ReadCredentialFence(context.Background())
+	_, slot, found, err := lease.ReadCredentialFence(context.Background(), store.RefreshFenceName)
 	if err != nil {
 		t.Fatalf("ReadCredentialFence: %v", err)
 	}

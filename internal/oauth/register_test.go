@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/kritama/tama-link/internal/store"
 )
 
 // registerServer serves one dynamic client registration endpoint.
@@ -85,12 +87,8 @@ func TestRegisterDCR(t *testing.T) {
 	if rec.Issuer != testIssuer || rec.AuthMethod != "client_secret_basic" {
 		t.Errorf("record issuer/auth = %q/%q", rec.Issuer, rec.AuthMethod)
 	}
-	stored, found, err := secrets.GetSecret(labelClient)
-	if err != nil || !found {
-		t.Fatalf("stored = %q found=%v err=%v", stored, found, err)
-	}
-	if !strings.Contains(string(stored), "cid-1") {
-		t.Errorf("stored record = %s", stored)
+	if stored, found, err := client.RegisteredClient(context.Background()); err != nil || !found || !strings.Contains(stored.ClientID, "cid-1") {
+		t.Fatalf("stored = %+v found=%v err=%v", stored, found, err)
 	}
 
 	// A second registration reuses the stored record without a new request.
@@ -139,7 +137,7 @@ func TestRegisteredClientTreatsLegacySecretlessRecordAsAbsent(t *testing.T) {
 		t.Fatalf("store legacy record: %v", err)
 	}
 
-	if _, found, err := client.RegisteredClient(); err != nil || found {
+	if _, found, err := client.RegisteredClient(context.Background()); err != nil || found {
 		t.Fatalf("RegisteredClient = found:%v err:%v, want absent without an error", found, err)
 	}
 
@@ -154,18 +152,17 @@ func TestRegisteredClientTreatsLegacySecretlessRecordAsAbsent(t *testing.T) {
 	if rec.ClientID != "cid-2" || rec.ClientSecret != "shh" {
 		t.Fatalf("Register reused or corrupted the record: %+v", rec)
 	}
-	if got, found, _ := client.RegisteredClient(); !found || got.ClientID != "cid-2" {
+	if got, found, _ := client.RegisteredClient(context.Background()); !found || got.ClientID != "cid-2" {
 		t.Fatalf("stored record after re-registration = %q found:%v, want the fresh record", got.ClientID, found)
 	}
 }
 
-// TestRegisterCompletesWriteAfterCallerCancellation pins the
-// uninterruptible final write: the record write takes no context, so a
-// caller cancellation that lands while the secure backend is busy must
-// not abort the write — and must not stop the lease renewal that keeps
-// the epoch alive while the write blocks past the TTL. The write
-// completes and the record is stored.
-func TestRegisterCompletesWriteAfterCallerCancellation(t *testing.T) {
+// TestRegisterRollsBackSlotAfterCallerCancellation pins the fenced
+// commit under a canceled caller: the slot write itself is
+// uninterruptible, so it completes, but the fence commit observes the
+// caller context and fails — the uncommitted slot is rolled back and no
+// registration is installed, so the retry re-runs cleanly.
+func TestRegisterRollsBackSlotAfterCallerCancellation(t *testing.T) {
 	secrets := newFakeSecrets()
 	secrets.setDelay = 100 * time.Millisecond
 	client := newStaticClient(t, secrets, newFakeLease(), newTestClock(time.Unix(1_700_000_000, 0)))
@@ -173,32 +170,26 @@ func TestRegisterCompletesWriteAfterCallerCancellation(t *testing.T) {
 	var calls int32
 	ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
 	ctx, cancel := context.WithCancel(context.Background())
-	// Cancel the caller at the moment the record write starts.
+	// Cancel the caller at the moment the slot write starts.
 	secrets.setHook = func(label string) {
-		if label == labelClient {
+		if strings.HasPrefix(label, store.ClientFenceName+"@") {
 			cancel()
 		}
 	}
 
-	rec, err := client.Register(ctx, regMetadata(ts, testIssuer))
-	if err != nil {
-		t.Fatalf("Register with a caller cancellation during the write: %v", err)
+	if _, err := client.Register(ctx, regMetadata(ts, testIssuer)); err == nil {
+		t.Fatal("Register succeeded after the caller canceled mid-commit")
 	}
-	if rec.ClientID != "cid-1" {
-		t.Fatalf("Register = %+v, want the registered record", rec)
-	}
-	if _, found, _ := secrets.GetSecret(labelClient); !found {
-		t.Fatal("the record write did not complete after the caller cancellation")
-	}
+	assertNoClientRecord(context.Background(), t, secrets, client.lease)
 }
 
-// TestRegisterRemovesStaleRecordAfterLostEpochDuringWrite pins the
-// optimistic epoch check on the commit: the record write is
-// uninterruptible, so if the lease is taken over while it is in flight
-// and the write completes after the takeover, the stale record it may
-// have written over the winner's registration is removed again — the
-// replacement can never be read as a ready pair.
-func TestRegisterRemovesStaleRecordAfterLostEpochDuringWrite(t *testing.T) {
+// TestRegisterRollsBackSlotAfterLostEpochDuringWrite pins the
+// lease-bound fence commit: the slot write is uninterruptible, so if a
+// foreign process takes over the lease while the write is in flight, the
+// commit is rejected and the uncommitted slot is removed again — the
+// stale writer can never install a record, and the winner's registration
+// is never touched.
+func TestRegisterRollsBackSlotAfterLostEpochDuringWrite(t *testing.T) {
 	secrets := newFakeSecrets()
 	secrets.setDelay = 50 * time.Millisecond
 	lease := newFakeLease()
@@ -206,10 +197,10 @@ func TestRegisterRemovesStaleRecordAfterLostEpochDuringWrite(t *testing.T) {
 
 	var calls int32
 	ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
-	// A foreign process takes over the lease the moment the record
-	// write starts, i.e. after the pre-write epoch gate has passed.
+	// A foreign process takes over the lease the moment the slot write
+	// starts.
 	secrets.setHook = func(label string) {
-		if label == labelClient {
+		if strings.HasPrefix(label, store.ClientFenceName+"@") {
 			lease.holdOther()
 		}
 	}
@@ -217,49 +208,33 @@ func TestRegisterRemovesStaleRecordAfterLostEpochDuringWrite(t *testing.T) {
 	if _, err := client.Register(context.Background(), regMetadata(ts, testIssuer)); !errors.Is(err, ErrLeaseContention) {
 		t.Fatalf("Register = %v, want ErrLeaseContention for the lost epoch", err)
 	}
-	if _, found, _ := secrets.GetSecret(labelClient); found {
-		t.Fatal("the stale record survived the lost epoch: it could pair with the winner's grant")
-	}
+	assertNoClientRecord(context.Background(), t, secrets, client.lease)
 }
 
-// TestRegisterRemovesStaleRecordAfterCanceledCallerAndTakeover pins the
-// cancellation-independent post-write check: the caller cancels and a
-// foreign process takes over the lease while the record write is in
-// flight. The production epoch read observes the caller context, so a
-// check on the caller context would return context.Canceled and skip the
-// stale-record cleanup; the check must run on the cancellation-
-// independent context so the cleanup still happens.
-func TestRegisterRemovesStaleRecordAfterCanceledCallerAndTakeover(t *testing.T) {
-	secrets := newFakeSecrets()
-	secrets.setDelay = 50 * time.Millisecond
-	lease := newFakeLease()
-	client := newStaticClient(t, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
-
-	var calls int32
-	ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
-	ctx, cancel := context.WithCancel(context.Background())
-	// Both the caller cancellation and the foreign takeover land while
-	// the record write is in flight.
-	secrets.setHook = func(label string) {
-		if label == labelClient {
-			cancel()
-			lease.holdOther()
+// assertNoClientRecord pins the absence of any client registration:
+// neither the legacy label nor a fenced slot is live, and no uncommitted
+// slot leaked into the credential backend.
+func assertNoClientRecord(ctx context.Context, t *testing.T, secrets *fakeSecrets, lease Leaser) {
+	t.Helper()
+	if _, found, err := secrets.GetSecret(labelClient); err != nil || found {
+		t.Fatalf("legacy client label = found:%v err:%v, want absent", found, err)
+	}
+	gen, slot, found, err := lease.ReadCredentialFence(ctx, store.ClientFenceName)
+	_ = gen
+	if err != nil || found {
+		t.Fatalf("client fence = gen:%d slot:%q found:%v err:%v, want absent", gen, slot, found, err)
+	}
+	for _, label := range secrets.secretLabels() {
+		if strings.HasPrefix(label, store.ClientFenceName+"@") {
+			t.Fatalf("uncommitted client slot %q leaked into the credential backend", label)
 		}
 	}
-
-	if _, err := client.Register(ctx, regMetadata(ts, testIssuer)); !errors.Is(err, ErrLeaseContention) {
-		t.Fatalf("Register = %v, want ErrLeaseContention for the lost epoch", err)
-	}
-	if _, found, _ := secrets.GetSecret(labelClient); found {
-		t.Fatal("the stale record survived the canceled caller and the lost epoch")
-	}
 }
 
-// TestRegisterKeepsWinnerRecordAfterLostEpochDuringWrite pins the
-// versioned cleanup: a winning process that took over the lease may
-// store its own registration after the stale writer's write returns but
-// before the cleanup runs. The cleanup removes only the record the stale
-// write itself stored (matched by write nonce), so the winner's record
+// TestRegisterKeepsWinnerRecordAfterLostEpochDuringWrite pins the fence
+// isolation: a winning process that took over the lease commits its own
+// registration after the stale writer's slot lands. The stale writer's
+// commit is rejected and rolls back its own slot, so the winner's record
 // survives and its authorization flow can complete.
 func TestRegisterKeepsWinnerRecordAfterLostEpochDuringWrite(t *testing.T) {
 	secrets := newFakeSecrets()
@@ -269,40 +244,42 @@ func TestRegisterKeepsWinnerRecordAfterLostEpochDuringWrite(t *testing.T) {
 
 	var calls int32
 	ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
-	// The foreign takeover lands when the write starts; the winner's own
-	// registration lands immediately after the stale write is applied.
-	winner := &ClientRecord{ClientID: "cid-winner", ClientSecret: "sw", AuthMethod: "client_secret_basic", Issuer: testIssuer, RegisteredAt: time.Now().UTC(), WriteNonce: "winner-nonce"}
+	// The foreign takeover lands when the slot write starts; the winner's
+	// own registration commits immediately after the stale slot is
+	// applied.
+	winner := &ClientRecord{ClientID: "cid-winner", ClientSecret: "sw", AuthMethod: "client_secret_basic", Issuer: testIssuer, RegisteredAt: time.Now().UTC()}
 	winnerData, err := json.Marshal(winner)
 	if err != nil {
 		t.Fatalf("marshal winner record: %v", err)
 	}
 	secrets.setHook = func(label string) {
-		if label == labelClient {
+		if strings.HasPrefix(label, store.ClientFenceName+"@") {
 			lease.holdOther()
 		}
 	}
 	secrets.setDoneHook = func(label string) {
-		if label == labelClient {
-			secrets.mu.Lock()
-			secrets.items[labelClient] = winnerData
-			secrets.mu.Unlock()
+		if strings.HasPrefix(label, store.ClientFenceName+"@") && label != "oauth-client@winner" {
+			if err := secrets.SetSecret("oauth-client@winner", winnerData); err != nil {
+				t.Errorf("store winner slot: %v", err)
+				return
+			}
+			// The winner holds the lease: its fence commit succeeds.
+			if !lease.fence.commit(store.ClientFenceName, 1, "oauth-client@winner", "other-process") {
+				t.Error("the winner's fence commit was rejected")
+			}
 		}
 	}
 
 	if _, err := client.Register(context.Background(), regMetadata(ts, testIssuer)); !errors.Is(err, ErrLeaseContention) {
 		t.Fatalf("Register = %v, want ErrLeaseContention for the lost epoch", err)
 	}
-	// The winner's registration survived the stale cleanup.
-	data, found, err := secrets.GetSecret(labelClient)
+	// The winner's registration survived the stale writer's rollback.
+	stored, found, err := client.RegisteredClient(context.Background())
 	if err != nil || !found {
 		t.Fatalf("stored record = found:%v err:%v, want the winner's registration", found, err)
 	}
-	var stored ClientRecord
-	if err := json.Unmarshal(data, &stored); err != nil {
-		t.Fatalf("decode stored record: %v", err)
-	}
-	if stored.ClientID != "cid-winner" || stored.WriteNonce != "winner-nonce" {
-		t.Fatalf("stored record = %+v, want the winner's registration", &stored)
+	if stored.ClientID != "cid-winner" {
+		t.Fatalf("stored record = %+v, want the winner's registration", stored)
 	}
 }
 
@@ -415,7 +392,7 @@ func TestRegisterSerializesWithCompletion(t *testing.T) {
 	// wait behind A's completion, so the stored record is still A's
 	// while the exchange is in flight.
 	time.Sleep(150 * time.Millisecond)
-	if stored, found, _ := client.RegisteredClient(); !found || stored.ClientID != "cid-a" {
+	if stored, found, _ := client.RegisteredClient(context.Background()); !found || stored.ClientID != "cid-a" {
 		t.Fatalf("stored record while A exchanges = %+v found:%v, want cid-a: B stored before A's completion finished", stored, found)
 	}
 	if err := <-done; err != nil {
@@ -430,7 +407,7 @@ func TestRegisterSerializesWithCompletion(t *testing.T) {
 	if _, found, _ := secrets.GetSecret(labelRefresh); found {
 		t.Fatal("A's grant survived B's re-registration")
 	}
-	if stored, found, _ := client.RegisteredClient(); !found || stored.ClientID != "cid-b" {
+	if stored, found, _ := client.RegisteredClient(context.Background()); !found || stored.ClientID != "cid-b" {
 		t.Fatalf("stored record = %+v found:%v, want B's registration", stored, found)
 	}
 }
@@ -508,12 +485,12 @@ func TestRegisteredClientHonorsSecretExpiry(t *testing.T) {
 		t.Fatalf("store record: %v", err)
 	}
 
-	if _, found, err := client.RegisteredClient(); err != nil || !found {
+	if _, found, err := client.RegisteredClient(context.Background()); err != nil || !found {
 		t.Fatalf("unexpired RegisteredClient = found:%v err:%v, want present", found, err)
 	}
 
 	clock.set(time.Unix(1_700_000_000+3601, 0))
-	if _, found, err := client.RegisteredClient(); err != nil || found {
+	if _, found, err := client.RegisteredClient(context.Background()); err != nil || found {
 		t.Fatalf("expired RegisteredClient = found:%v err:%v, want absent without an error", found, err)
 	}
 	if ok, err := client.HasCredentials(context.Background()); err != nil || ok {

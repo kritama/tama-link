@@ -56,39 +56,40 @@ type Leaser interface {
 	// gate: a lease lost to a foreign claim blocks the stale write.
 	CommitLease(ctx context.Context, name, owner string, generation int64) (bool, error)
 	// ReadCredentialFence returns the generation and secure-backend slot
-	// the fence currently points at, or found=false when no fenced
-	// credential has been committed yet.
-	ReadCredentialFence(ctx context.Context) (generation int64, slot string, found bool, err error)
-	// CommitCredentialFence atomically advances the fence to commit.Slot
-	// and enqueues commit.PreviousSlot for retirement retry when, and only
-	// when, the fence has not advanced past commit.FenceGeneration and the
-	// caller still holds the lease epoch in the commit. It is the
-	// credential-side compare-and-swap that a stale writer cannot pass;
-	// the enqueue is one transaction with the advance, so a committed
-	// fence always carries a durable retirement record for the slot it
-	// replaced.
+	// the named fence currently points at, or found=false when nothing
+	// has been committed to it yet. The streams are store.RefreshFenceName
+	// (refresh credential) and store.ClientFenceName (client
+	// registration).
+	ReadCredentialFence(ctx context.Context, fenceName string) (generation int64, slot string, found bool, err error)
+	// CommitCredentialFence atomically advances commit.FenceName's fence
+	// to commit.Slot and enqueues commit.PreviousSlot for retirement
+	// retry when, and only when, the fence has not advanced past
+	// commit.FenceGeneration and the caller still holds the lease epoch in
+	// the commit. It is the credential-side compare-and-swap that a stale
+	// writer cannot pass; the enqueue is one transaction with the
+	// advance, so a committed fence always carries a durable retirement
+	// record for the slot it replaced.
 	CommitCredentialFence(ctx context.Context, commit store.CredentialFenceCommit) (bool, error)
-	// ClearCredentialFence removes the credential fence when, and only
-	// when, leaseOwner still holds leaseName unexpired in the lease
-	// ownership epoch leaseGeneration, and when retiredSlot is non-empty,
-	// enqueues it for retirement retry in the same transaction, so a
-	// pointer that is cleared always leaves a durable reference to the
-	// slot it pointed at. An absent fence is successfully cleared. It
-	// reports cleared=false for a lost epoch, so a logout whose lease was
-	// lost mid-cleanup can never wipe a newer fence installed by the
-	// process that took over.
-	ClearCredentialFence(ctx context.Context, leaseName, leaseOwner string, leaseGeneration int64, retiredSlot string) (bool, error)
-	// RetiredCredentialSlots lists the credential slots recorded for
-	// retirement retry.
-	RetiredCredentialSlots(ctx context.Context) ([]string, error)
+	// ClearCredentialFence removes the named fence when, and only when,
+	// leaseOwner still holds leaseName unexpired in the lease ownership
+	// epoch leaseGeneration, and when retiredSlot is non-empty, enqueues
+	// it for retirement retry in the same transaction, so a pointer that
+	// is cleared always leaves a durable reference to the slot it pointed
+	// at. An absent fence is successfully cleared. It reports cleared=false
+	// for a lost epoch, so a logout whose lease was lost mid-cleanup can
+	// never wipe a newer fence installed by the process that took over.
+	ClearCredentialFence(ctx context.Context, fenceName, leaseName, leaseOwner string, leaseGeneration int64, retiredSlot string) (bool, error)
+	// RetiredCredentialSlots lists the slots of the named fence recorded
+	// for retirement retry.
+	RetiredCredentialSlots(ctx context.Context, fenceName string) ([]string, error)
 	// ClearRetiredCredentialSlot removes the retirement record for one
-	// slot after its deletion succeeded.
-	ClearRetiredCredentialSlot(ctx context.Context, slot string) error
-	// RecordRetiredCredentialSlot durably records one credential slot
-	// whose secure-backend deletion failed, so a later refresh or logout
-	// can retry the deletion. Cleanup paths that delete without a commit
-	// use it; the fence-advance path enqueues atomically instead.
-	RecordRetiredCredentialSlot(ctx context.Context, slot string) error
+	// slot of the named fence after its deletion succeeded.
+	ClearRetiredCredentialSlot(ctx context.Context, fenceName, slot string) error
+	// RecordRetiredCredentialSlot durably records one slot of the named
+	// fence whose secure-backend deletion failed, so a later refresh or
+	// logout can retry the deletion. Cleanup paths that delete without a
+	// commit use it; the fence-advance path enqueues atomically instead.
+	RecordRetiredCredentialSlot(ctx context.Context, fenceName, slot string) error
 	// MarkRefreshCredentialInvalidated durably records that the profile's
 	// legacy refresh credential is a known-invalid grant, so the legacy
 	// label is never treated as live even if its deletion fails.
