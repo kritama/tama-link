@@ -591,9 +591,9 @@ recursive JSON Schema instance equality for `const` and `enum`.
   bounds and count constraints; instance-validation error whenever a bound,
   `const`, `enum`, or `integer` type assertion must evaluate the value. In
   every case the result is a validation error, never a panic.
-- `isExactInteger` decides integrality from the decimal's exponent and
-  coefficient (divisibility of the coefficient by 10^scale), without
-  rounding or context operations.
+- `isExactInteger` decides integrality by reducing trailing coefficient zeros
+  and inspecting the resulting exponent, without rounding, constructing
+  `10^scale`, or doing exponent-proportional work.
 
 ### 3. Controlled saturation regression
 
@@ -650,3 +650,53 @@ On the remediation head:
 
 Issue #6 remains open pending re-review; live acceptance stays with issue
 #8.
+
+## Resolution of final Phase 2.4 re-review findings
+
+Status: remediated and locally verified; pending independent final re-review.
+
+The review of `3acb5d9` found two remaining catalog defects despite the green
+repository gates:
+
+1. Profile validation accepted exponent-form count constraints, but runtime
+   `schemaView` decoded `minLength`, `maxLength`, `minItems`, and `maxItems`
+   directly into `*int`. Consequently, an approved constraint such as
+   `minItems: 1e2` failed schema decoding instead of enforcing the value 100.
+2. `isExactInteger` constructed `10^(-exponent)` and took a large integer
+   modulus. A diagnostic benchmark of the short literal `1e-100000` measured
+   approximately 1.7–2.6 milliseconds and 95 KiB allocated per check, contrary
+   to the documented allocation-safety guarantee.
+
+The remediation keeps profile validation and runtime decoding on one numeric
+path:
+
+- `countValue.UnmarshalJSON` calls the shared `parseCountValue`, which applies
+  JSON number grammar validation, `apd/v3` exponent checking, exact integrality,
+  the non-negative rule, and the 1,000,000 count bound before converting the
+  reduced decimal to a machine integer. Exponent-form counts therefore retain
+  the same mathematical value at profile load and runtime, including inside
+  nested schemas.
+- `requireCount` delegates to the same parser, eliminating the previous split
+  between profile-load acceptance and runtime representation.
+- `isExactInteger` now uses `apd.Decimal.Reduce` and checks the reduced
+  exponent. It no longer materializes a power of ten. On the same host, five
+  post-change benchmark samples for `1e-100000` measured 48 bytes, two
+  allocations, and approximately 0.50–0.62 microseconds per check.
+- `TestValidateAgainstSchemaCountExponentForm` covers all four count keywords,
+  nested decoding, and zero at the ±100000 exponent boundary.
+- `TestParseCountValueExponentForm` covers exact conversion and rejection
+  cases, while `TestIsIntegerLiteralDoesNotAllocateByExponent` guards against
+  allocation-count growth at the exponent boundary.
+
+Final verification on the resulting worktree:
+
+- the three focused count/integrality regressions passed 100 ordinary
+  repetitions and 10 race-enabled repetitions;
+- `make check` passed: formatting, the full unit suite, the full race suite,
+  `go vet`, golangci-lint with zero issues, and the trimmed binary build;
+- uncached `go test -count=1 ./...` and
+  `go test -race -count=1 ./...` passed; and
+- `go mod verify` and `git diff --check` passed.
+
+Issue #6 should remain open until an independent re-review confirms this final
+remediation. Migrated-Tama live acceptance remains separate under issue #8.

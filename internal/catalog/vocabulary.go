@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"regexp"
-
-	"github.com/cockroachdb/apd/v3"
 )
 
 // enforcedKeywords is the complete set of assertion keywords the runtime
@@ -350,28 +348,8 @@ func requireUniqueStrings(raw json.RawMessage, path, what string) ([]string, err
 // count bounds: non-negative, at most maxCountBound, and within the
 // reviewed decimal exponent range.
 func requireCount(raw json.RawMessage, path, what string) error {
-	if isNullRaw(raw) {
-		return fmt.Errorf("%s.%s must be an integer, not null", path, what)
-	}
-	trimmed := trimJSON(raw)
-	if !isJSONNumber(trimmed) {
-		return fmt.Errorf("%s.%s must be a JSON number", path, what)
-	}
-	dec, err := parseJSONNumber(trimmed)
-	if err != nil {
-		return fmt.Errorf("%s.%s: %v", path, what, err)
-	}
-	if !isExactInteger(dec) {
-		return fmt.Errorf("%s.%s must be a non-negative integer", path, what)
-	}
-	var zero, bound apd.Decimal
-	zero.SetInt64(0)
-	bound.SetInt64(maxCountBound)
-	if dec.Cmp(&zero) < 0 {
-		return fmt.Errorf("%s.%s must be a non-negative integer", path, what)
-	}
-	if dec.Cmp(&bound) > 0 {
-		return fmt.Errorf("%s.%s exceeds the bound of %d", path, what, maxCountBound)
+	if _, err := parseCountValue(raw); err != nil {
+		return fmt.Errorf("%s.%s: %w", path, what, err)
 	}
 	return nil
 }

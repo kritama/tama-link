@@ -3,7 +3,6 @@ package catalog
 import (
 	"encoding/json"
 	"fmt"
-	"math/big"
 	"regexp"
 	"unicode/utf8"
 
@@ -17,8 +16,8 @@ import (
 // pattern (Go RE2). Pinned schemas may only use this vocabulary with
 // well-formed values: CheckSchemaVocabulary enforces both at profile load,
 // so nothing unenforced or malformed can reach runtime. Numbers are compared
-// through their exact normalized decimal digits — exponent form included —
-// never through float64.
+// through exact arbitrary-precision decimals — exponent form included — never
+// through float64.
 func ValidateAgainstSchema(schema, value json.RawMessage) error {
 	var s schemaView
 	if err := json.Unmarshal(schema, &s); err != nil {
@@ -38,10 +37,10 @@ type schemaView struct {
 	Const                json.RawMessage            `json:"const"`
 	Minimum              *numberText                `json:"minimum"`
 	Maximum              *numberText                `json:"maximum"`
-	MinLength            *int                       `json:"minLength"`
-	MaxLength            *int                       `json:"maxLength"`
-	MinItems             *int                       `json:"minItems"`
-	MaxItems             *int                       `json:"maxItems"`
+	MinLength            *countValue                `json:"minLength"`
+	MaxLength            *countValue                `json:"maxLength"`
+	MinItems             *countValue                `json:"minItems"`
+	MaxItems             *countValue                `json:"maxItems"`
 	Pattern              string                     `json:"pattern"`
 }
 
@@ -211,10 +210,10 @@ func (s *schemaView) validateArray(value json.RawMessage, path string) error {
 	if err := json.Unmarshal(value, &items); err != nil {
 		return fmt.Errorf("%s is not a JSON array: %w", path, err)
 	}
-	if s.MinItems != nil && len(items) < *s.MinItems {
+	if s.MinItems != nil && len(items) < int(*s.MinItems) {
 		return fmt.Errorf("%s has fewer than %d items", path, *s.MinItems)
 	}
-	if s.MaxItems != nil && len(items) > *s.MaxItems {
+	if s.MaxItems != nil && len(items) > int(*s.MaxItems) {
 		return fmt.Errorf("%s has more than %d items", path, *s.MaxItems)
 	}
 	if s.Items == nil {
@@ -239,10 +238,10 @@ func (s *schemaView) validateString(value json.RawMessage, path string) error {
 	}
 	// JSON Schema string lengths count Unicode code points, not UTF-8 bytes.
 	length := utf8.RuneCountInString(text)
-	if s.MinLength != nil && length < *s.MinLength {
+	if s.MinLength != nil && length < int(*s.MinLength) {
 		return fmt.Errorf("%s is shorter than %d characters", path, *s.MinLength)
 	}
-	if s.MaxLength != nil && length > *s.MaxLength {
+	if s.MaxLength != nil && length > int(*s.MaxLength) {
 		return fmt.Errorf("%s is longer than %d characters", path, *s.MaxLength)
 	}
 	if s.Pattern != "" {
@@ -341,21 +340,16 @@ func isIntegerLiteral(value []byte) bool {
 	return isExactInteger(dec)
 }
 
-// isExactInteger reports whether one exact decimal denotes an integer value:
-// a non-negative exponent is always integral, and a negative exponent is
-// integral exactly when the coefficient is divisible by 10 to that scale.
+// isExactInteger reports whether one exact decimal denotes an integer value.
+// Reducing trailing coefficient zeros avoids constructing 10^scale, so work
+// depends on the supplied coefficient rather than the exponent magnitude.
 func isExactInteger(dec *apd.Decimal) bool {
-	if dec.Form != apd.Finite || dec.Exponent >= 0 {
-		return dec.Form == apd.Finite
-	}
-	divisor := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(-dec.Exponent)), nil)
-	coeff, ok := new(big.Int).SetString(dec.Coeff.String(), 10)
-	if !ok {
+	if dec.Form != apd.Finite {
 		return false
 	}
-	mod := new(big.Int).Abs(coeff)
-	mod.Mod(mod, divisor)
-	return mod.Sign() == 0
+	var reduced apd.Decimal
+	reduced.Reduce(dec)
+	return reduced.Exponent >= 0
 }
 
 func trimJSON(b []byte) []byte {

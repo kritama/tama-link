@@ -574,6 +574,11 @@ cases as a validation error rather than a panic. `const` and `enum` use
 JSON Schema instance equality recursively: numbers compare by exact
 mathematical value (`1`, `1.0`, and `1e0` are equal), strings by decoded
 code points, arrays positionally, and objects independently of key order.
+Count constraints use the same checked decimal conversion during profile
+validation and runtime schema decoding, so an exponent-form integer such as
+`1e2` is enforced as 100 in both paths. Integer checks reduce trailing
+coefficient zeros and inspect the resulting exponent; they never construct
+`10^scale` or perform work proportional to an exponent's magnitude.
 
 `required` follows the standard JSON Schema semantics: it applies only to
 object instances (a non-object value is constrained only by an independent

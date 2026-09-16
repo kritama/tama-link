@@ -30,6 +30,52 @@ func parseJSONNumber(text json.RawMessage) (*apd.Decimal, error) {
 	return dec, nil
 }
 
+// countValue is a JSON Schema count constraint in the runtime representation.
+// Its custom decoder preserves mathematically integral exponent forms such as
+// 1e2 instead of asking encoding/json to decode them directly into an int.
+type countValue int
+
+func (c *countValue) UnmarshalJSON(raw []byte) error {
+	value, err := parseCountValue(raw)
+	if err != nil {
+		return err
+	}
+	*c = countValue(value)
+	return nil
+}
+
+// parseCountValue validates and converts one count constraint. The decimal is
+// reduced before Int64 conversion, so a zero or another small count written
+// with a large in-range exponent never causes exponent-proportional work.
+func parseCountValue(raw json.RawMessage) (int, error) {
+	if isNullRaw(raw) {
+		return 0, fmt.Errorf("must be an integer, not null")
+	}
+	trimmed := trimJSON(raw)
+	if !isJSONNumber(trimmed) {
+		return 0, fmt.Errorf("must be a JSON number")
+	}
+	dec, err := parseJSONNumber(trimmed)
+	if err != nil {
+		return 0, err
+	}
+	if !isExactInteger(dec) || dec.Sign() < 0 {
+		return 0, fmt.Errorf("must be a non-negative integer")
+	}
+	var bound apd.Decimal
+	bound.SetInt64(maxCountBound)
+	if dec.Cmp(&bound) > 0 {
+		return 0, fmt.Errorf("exceeds the bound of %d", maxCountBound)
+	}
+	var reduced apd.Decimal
+	reduced.Reduce(dec)
+	value, err := reduced.Int64()
+	if err != nil {
+		return 0, fmt.Errorf("cannot represent the validated count: %w", err)
+	}
+	return int(value), nil
+}
+
 // jsonInstanceEqual reports whether two JSON literals are the same instance
 // value under JSON Schema instance equality: numbers compare by exact
 // mathematical value (1, 1.0, and 1e0 are equal), strings by decoded code

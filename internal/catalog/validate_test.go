@@ -405,6 +405,27 @@ func TestCheckSchemaVocabularyAcceptsExponentBounds(t *testing.T) {
 	}
 }
 
+func TestValidateAgainstSchemaCountExponentForm(t *testing.T) {
+	for _, tc := range []struct {
+		name                   string
+		schema, value, wantErr string
+	}{
+		{name: "min length", schema: `{"type":"string","minLength":1e0}`, value: `""`, wantErr: "shorter than 1"},
+		{name: "max length", schema: `{"type":"string","maxLength":2e0}`, value: `"abc"`, wantErr: "longer than 2"},
+		{name: "min items", schema: `{"type":"array","minItems":1e2}`, value: `[]`, wantErr: "fewer than 100"},
+		{name: "max items", schema: `{"type":"array","maxItems":2e0}`, value: `[1,2,3]`, wantErr: "more than 2"},
+		{name: "nested count", schema: `{"type":"object","properties":{"a":{"type":"string","maxLength":1e0}}}`, value: `{"a":"ab"}`, wantErr: "longer than 1"},
+		{name: "zero at exponent boundary", schema: `{"type":"array","minItems":0e100000}`, value: `[]`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := CheckSchemaVocabulary(json.RawMessage(tc.schema)); err != nil {
+				t.Fatalf("profile validation rejected schema: %v", err)
+			}
+			validateTable(t, tc.schema, tc.value, tc.wantErr)
+		})
+	}
+}
+
 // TestValidateAgainstSchemaStringLengthCountsCodePoints pins the JSON
 // Schema string-length semantics: lengths count Unicode code points, not
 // UTF-8 bytes.
