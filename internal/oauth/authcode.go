@@ -69,8 +69,11 @@ func (c *Client) NewAuthorizationRequest(md *Metadata, rec *ClientRecord, redire
 // authorization-code grant requires the token request's redirect_uri to
 // equal the value sent in the authorization request, so observedRedirectURI
 // must equal req.RedirectURI exactly; a mismatch is rejected before any
-// token request is sent. The exchanged access token is held in memory; the
-// refresh credential is persisted.
+// token request is sent. The refresh lease is claimed and renewed across
+// the redemption and the fenced persistence — the code is single-use, so a
+// lease contention must never burn it: the exchange never runs unless the
+// epoch is held. The exchanged access token is held in memory; the refresh
+// credential is persisted.
 func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *ClientRecord, req *AuthorizationRequest, code, observedRedirectURI string) error {
 	if code == "" {
 		return fmt.Errorf("authorization code is required")
@@ -90,7 +93,19 @@ func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *C
 	form.Set("redirect_uri", req.RedirectURI)
 	form.Set("code_verifier", req.Verifier)
 	form.Set("resource", c.endpoint)
-	tok, err := c.postToken(ctx, md.AS.TokenEndpoint, rec, form)
+
+	leaseGeneration, claimed, err := c.claimRefreshLease(ctx)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return fmt.Errorf("%w: another process is refreshing the credential; retry the authorization", ErrLeaseContention)
+	}
+	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
+
+	tok, err := c.leasedExchange(ctx, leaseGeneration, func(ectx context.Context) (*tokenResponse, error) {
+		return c.postToken(ectx, md.AS.TokenEndpoint, rec, form)
+	})
 	if err != nil {
 		return err
 	}
@@ -103,17 +118,6 @@ func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *C
 		Issuer:        md.AS.Issuer,
 		Updated:       c.clock().UTC(),
 	}
-	// The authorization write is a credential rotation: it claims the same
-	// refresh lease and commits the fence under its epoch, so it is
-	// ordered against concurrent refreshes instead of clobbering them.
-	leaseGeneration, claimed, err := c.claimRefreshLease(ctx)
-	if err != nil {
-		return err
-	}
-	if !claimed {
-		return fmt.Errorf("%w: another process is refreshing the credential", ErrLeaseContention)
-	}
-	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
 	// The authorization commits its credential through the same fence as
 	// every refresh, so a concurrent rotation is detected by the commit,
 	// never clobbered.

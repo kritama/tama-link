@@ -739,12 +739,24 @@ ownership epoch — with a provider that permits overlapping rotations, a
 writer that lost the lease while its secret-store write was blocked can
 never make its value live, not even before the winner commits its own
 generation. A successful commit leaves the new slot as the only live
-credential and retires both the legacy label and the previous live slot, so
-at most one slot ever holds the grant. The authorization-code exchange is a
-credential rotation too: it claims the same refresh lease and commits its
-credential through the same fence under its own epoch. Logout clears the
-fence before deleting the committed slot and the legacy labels, so readers
-see no credential at all and a later login starts from a clean fence. The
+credential. Retirement of the replaced credentials — the legacy label and
+the previous live slot — happens before the commit: the commit is the
+single decision point, so a retirement failure aborts with rollback of the
+new slot while the still-referenced previous slot is retried by the next
+refresh, and a failure can never silently strand a still-valid grant. The
+authorization-code exchange is a credential rotation too: it claims the
+same refresh lease before redeeming the single-use code and renews the
+lease across both the exchange and the fenced persistence, so a lease
+contention can never burn the code, and it commits its credential through
+the same fence under its own epoch. Logout holds the local refresh lock
+and claims the cross-process refresh lease before touching credentials, so
+no concurrent writer can reinstall a fence and slot behind the logout: the
+claim advances the epoch and every in-flight writer's commit fails and
+rolls back its own slot. A contended claim fails logout with a retryable
+error. The committed slot is deleted while the fence still references it —
+a failed deletion keeps the slot discoverable, so a retried logout
+finishes the cleanup — and the fence is cleared once its slot is gone; a
+later login starts from a clean fence. The
 fence subsumes post-write ownership checks, which
 cannot repair an unfenced external write. Refresh transactions are also
 serialized inside one process, and a burst of concurrent token requests

@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -14,10 +15,13 @@ import (
 
 // fakeSecrets is an in-memory SecretStore for tests. setDelay blocks
 // SetSecret so a test can hold the credential write open past a lease TTL.
+// failDelete makes DeleteSecret fail for one label so a test can prove a
+// deletion failure stays recoverable.
 type fakeSecrets struct {
-	mu       sync.Mutex
-	items    map[string][]byte
-	setDelay time.Duration
+	mu         sync.Mutex
+	items      map[string][]byte
+	setDelay   time.Duration
+	failDelete map[string]error
 }
 
 func newFakeSecrets() *fakeSecrets {
@@ -89,8 +93,33 @@ func (f *fakeSecrets) SetSecret(label string, data []byte) error {
 func (f *fakeSecrets) DeleteSecret(label string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if err, ok := f.failDelete[label]; ok {
+		return err
+	}
 	delete(f.items, label)
 	return nil
+}
+
+// failDeletes makes the next DeleteSecret calls fail for the labels until
+// allowDeletes clears them.
+func (f *fakeSecrets) failDeletes(labels ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failDelete == nil {
+		f.failDelete = map[string]error{}
+	}
+	for _, label := range labels {
+		f.failDelete[label] = errors.New("backend write failure")
+	}
+}
+
+// allowDeletes clears the deletion failures for the labels.
+func (f *fakeSecrets) allowDeletes(labels ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, label := range labels {
+		delete(f.failDelete, label)
+	}
 }
 
 // recordingSecrets counts SetSecret calls so a test can prove a gated

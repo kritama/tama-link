@@ -82,46 +82,16 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 
 	// The exchange is a network call and the credential write follows it,
 	// so the lease is renewed on a third of its TTL for the whole critical
-	// section, including the write. Losing the lease aborts before any
-	// replacement token is persisted: another process is now responsible
-	// for the credential, and a double rotation would invalidate its
-	// replacement.
-	execCtx, cancelExec := context.WithCancel(ctx)
-	renewed := make(chan struct{})
-	go c.renewLease(execCtx, cancelExec, renewed)
-	defer func() {
-		cancelExec()
-		<-renewed
-	}()
-	tok, err := c.postToken(execCtx, cred.TokenEndpoint, rec, form)
-	leaseLost := false
-	select {
-	case <-execCtx.Done():
-		// The renewal loop only cancels execCtx when the lease was lost; a
-		// plain caller cancellation leaves the exchange error intact.
-		leaseLost = ctx.Err() == nil
-	default:
-	}
+	// section, including the write, and persistence is gated on the
+	// captured epoch.
+	tok, err := c.leasedExchange(ctx, leaseGeneration, func(ectx context.Context) (*tokenResponse, error) {
+		return c.postToken(ectx, cred.TokenEndpoint, rec, form)
+	})
 	if err != nil {
 		if errors.Is(err, ErrGrantInvalid) {
 			c.clearToken()
 		}
-		if leaseLost {
-			return "", fmt.Errorf("refresh lease lost during the token exchange: %w", err)
-		}
 		return "", err
-	}
-	// Pre-write gate: the renewal loop keeps the lease alive, and this
-	// atomic commit fails when a foreign claim has already taken the
-	// ownership epoch captured at claim time, so the stale exchange never
-	// reaches the credential write.
-	if leaseLost {
-		return "", errors.New("refresh lease lost before the credential write")
-	}
-	if committed, cerr := c.lease.CommitLease(ctx, refreshLeaseName, c.owner, leaseGeneration); ctx.Err() != nil {
-		return "", ctx.Err()
-	} else if cerr != nil || !committed {
-		return "", errors.New("refresh lease lost before the credential write")
 	}
 	// The fenced store is the persistence fence: the slot write plus the
 	// atomic fence commit decide the outcome. The commit is bound to the
@@ -137,6 +107,52 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 		return "", err
 	}
 	return tok.AccessToken, nil
+}
+
+// leasedExchange renews the claimed refresh lease on a third of its TTL
+// across one token exchange and verifies ownership immediately before
+// persistence: a renewal that fails or reports lost ownership cancels the
+// exchange context, and the atomic commit gate fails for a foreign claim
+// on the captured epoch. The caller has claimed the lease (epoch
+// leaseGeneration) and owns its release. A plain caller cancellation
+// surfaces the exchange error unchanged; the renewal loop only cancels its
+// own context.
+func (c *Client) leasedExchange(
+	ctx context.Context,
+	leaseGeneration int64,
+	exchange func(context.Context) (*tokenResponse, error),
+) (*tokenResponse, error) {
+	execCtx, cancelExec := context.WithCancel(ctx)
+	renewed := make(chan struct{})
+	go c.renewLease(execCtx, cancelExec, renewed)
+	defer func() {
+		cancelExec()
+		<-renewed
+	}()
+	tok, err := exchange(execCtx)
+	leaseLost := false
+	select {
+	case <-execCtx.Done():
+		// The renewal loop only cancels execCtx when the lease was lost; a
+		// plain caller cancellation leaves the exchange error intact.
+		leaseLost = ctx.Err() == nil
+	default:
+	}
+	if err != nil {
+		if leaseLost {
+			return nil, fmt.Errorf("refresh lease lost during the token exchange: %w", err)
+		}
+		return nil, err
+	}
+	if leaseLost {
+		return nil, errors.New("refresh lease lost before the credential write")
+	}
+	if committed, cerr := c.lease.CommitLease(ctx, refreshLeaseName, c.owner, leaseGeneration); ctx.Err() != nil {
+		return nil, ctx.Err()
+	} else if cerr != nil || !committed {
+		return nil, errors.New("refresh lease lost before the credential write")
+	}
+	return tok, nil
 }
 
 // renewLease renews the refresh lease every third of its TTL until the

@@ -139,26 +139,44 @@ func (c *Client) Expiry() (expiry time.Time, ok bool) {
 }
 
 // Logout removes every OAuth credential for the profile from the secure
-// backend and clears the in-memory token. It clears the credential fence
-// before deleting slots, so concurrent readers see no credential instead
-// of following the fence to a deleted slot and failing with a backend
-// error; a later login then starts from a clean fence. It never touches
+// backend and clears the in-memory token. It holds the local refresh lock
+// and claims the cross-process refresh lease before touching anything: a
+// credential writer commits its fence and slot only under a live lease
+// epoch, so the claim makes every in-flight writer's commit fail and roll
+// back its own slot, and no writer can reinstall a credential behind the
+// logout. A contended claim fails with ErrLeaseContention so the caller
+// can retry once the other process's refresh completes. The committed slot
+// is deleted while the fence still references it: a failed deletion keeps
+// the slot discoverable, so a retried logout finishes the cleanup. The
+// fence is cleared once its slot is gone, then the legacy labels are
+// deleted; a later login starts from a clean fence. Logout never touches
 // the state encryption key or the state database.
 func (c *Client) Logout(ctx context.Context) error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+	_, claimed, err := c.claimRefreshLease(ctx)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return fmt.Errorf("%w: another process is refreshing the credential; retry logout", ErrLeaseContention)
+	}
+	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
+
 	_, slot, found, err := c.lease.ReadCredentialFence(ctx)
 	if err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+	}
+	if found && slot != "" {
+		if err := c.secrets.DeleteSecret(slot); err != nil {
+			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+		}
 	}
 	if err := c.lease.ClearCredentialFence(ctx); err != nil {
 		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 	}
 	for _, label := range []string{labelClient, labelRefresh} {
 		if err := c.secrets.DeleteSecret(label); err != nil {
-			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
-		}
-	}
-	if found && slot != "" {
-		if err := c.secrets.DeleteSecret(slot); err != nil {
 			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
 	}

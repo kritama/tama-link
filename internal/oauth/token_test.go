@@ -272,6 +272,178 @@ func TestRefreshCancellation(t *testing.T) {
 	}
 }
 
+// TestLogoutInvalidatesConcurrentRefresh proves a logout that overlaps a
+// credential write in another process leaves nothing behind: logout claims
+// the refresh lease first, so the in-flight writer's fence commit fails
+// under the advanced epoch and its own slot is rolled back — no usable
+// credential survives a successful logout.
+func TestLogoutInvalidatesConcurrentRefresh(t *testing.T) {
+	server := (&metadataServer{}).start(t)
+	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+	server.tokenDelay = 80 * time.Millisecond
+	shared := newFakeSecrets()
+	clock := newTestClock(time.Unix(1_700_000_000, 0))
+
+	leaseA := newFakeLease()
+	leaseB := newFakeLease()
+	leaseB.fence = leaseA.fence
+	clientA := clientForServer(t, server, &delayedSecrets{inner: shared, delay: 150 * time.Millisecond}, leaseA, clock)
+	clientB := clientForServer(t, server, shared, leaseB, clock)
+	seedCredentials(t, shared, "cid-1", "shh", server.ts.URL+"/oauth/token", server.ts.URL+"/oauth", "rt-1")
+
+	refreshed := make(chan error, 1)
+	go func() {
+		_, err := clientA.Token(context.Background())
+		refreshed <- err
+	}()
+	// Logout lands while A's exchange and write are in flight: the claim
+	// advances the epoch, A's commit is rejected, and A rolls back its own
+	// orphan slot.
+	time.Sleep(120 * time.Millisecond)
+	if err := clientB.Logout(context.Background()); err != nil {
+		t.Fatalf("Logout: %v", err)
+	}
+	if err := <-refreshed; err == nil {
+		t.Fatal("the overlapping refresh succeeded behind the logout")
+	}
+	// No credential survives: every slot is rolled back or deleted, the
+	// fence is cleared, and the probe reports no credentials.
+	for _, label := range shared.secretLabels() {
+		if _, ok, _ := shared.GetSecret(label); ok {
+			t.Errorf("credential %q survived the logout", label)
+		}
+	}
+	if ok, err := clientB.HasCredentials(context.Background()); err != nil || ok {
+		t.Fatalf("HasCredentials after logout = %v %v, want false", ok, err)
+	}
+	clock.set(clock.now.Add(time.Minute))
+}
+
+// TestLogoutContendedFailsRetryable pins that logout never proceeds while
+// another process holds the refresh lease: it fails with contention
+// without touching any credential, so a retried logout completes the
+// cleanup.
+func TestLogoutContendedFailsRetryable(t *testing.T) {
+	_, client, secrets, lease, _ := tokenFixture(t, "rt-1")
+	lease.holdOther()
+	if err := client.Logout(context.Background()); !errors.Is(err, ErrLeaseContention) {
+		t.Fatalf("Logout = %v, want ErrLeaseContention", err)
+	}
+	if _, found, _ := secrets.GetSecret(labelRefresh); !found {
+		t.Fatal("a contended logout deleted credentials")
+	}
+}
+
+// TestLogoutRetriesAfterBackendFailure pins the recoverable cleanup order:
+// the committed slot is deleted while the fence still references it, so a
+// failed deletion leaves the slot discoverable and a retried logout
+// finishes the cleanup instead of stranding the credential.
+func TestLogoutRetriesAfterBackendFailure(t *testing.T) {
+	_, client, secrets, lease, _ := tokenFixture(t, "rt-1")
+	ctx := context.Background()
+	if _, err := client.Token(context.Background()); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+	_, slot, found, err := lease.ReadCredentialFence(ctx)
+	if err != nil || !found {
+		t.Fatalf("fence after refresh: %v", err)
+	}
+	secrets.failDeletes(slot)
+	if err := client.Logout(ctx); err == nil {
+		t.Fatal("Logout succeeded despite the backend failure")
+	}
+	// The fence still references the slot, so the credential is not
+	// stranded: the retried logout discovers and deletes it.
+	if _, ok, _ := secrets.GetSecret(slot); !ok {
+		t.Fatal("the failed deletion lost the slot; the credential is stranded")
+	}
+	secrets.allowDeletes(slot)
+	if err := client.Logout(ctx); err != nil {
+		t.Fatalf("retried Logout: %v", err)
+	}
+	if _, ok, _ := secrets.GetSecret(slot); ok {
+		t.Fatal("the retried logout left the credential behind")
+	}
+	if ok, err := client.HasCredentials(ctx); err != nil || ok {
+		t.Fatalf("HasCredentials after retried logout = %v %v", ok, err)
+	}
+}
+
+// TestCompleteAuthorizationContentionDoesNotBurnCode pins the claim order:
+// the refresh lease is claimed before the single-use authorization code is
+// redeemed, so a lease contention fails the login before any token request
+// and a retried callback can still complete.
+func TestCompleteAuthorizationContentionDoesNotBurnCode(t *testing.T) {
+	server := (&metadataServer{}).start(t)
+	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
+	secrets := newFakeSecrets()
+	clock := newTestClock(time.Unix(1_700_000_000, 0))
+	lease := newFakeLease()
+	client := clientForServer(t, server, secrets, lease, clock)
+	rec := &ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer}
+	md := serverMetadata(server.ts.URL)
+	observed := "http://127.0.0.1:51234/callback"
+	authReq, err := client.NewAuthorizationRequest(md, rec, observed)
+	if err != nil {
+		t.Fatalf("NewAuthorizationRequest: %v", err)
+	}
+
+	lease.holdOther()
+	if err := client.CompleteAuthorization(context.Background(), md, rec, authReq, "code-1", observed); !errors.Is(err, ErrLeaseContention) {
+		t.Fatalf("CompleteAuthorization = %v, want ErrLeaseContention", err)
+	}
+	server.tokenReqMu.Lock()
+	calls := server.tokenCalls
+	server.tokenReqMu.Unlock()
+	if calls != 0 {
+		t.Fatalf("token endpoint consumed the single-use code %d times under contention", calls)
+	}
+	clock.set(clock.now.Add(time.Minute))
+}
+
+// TestRefreshRetriesPreviousSlotAfterBackendFailure pins that a previous-
+// slot retirement failure aborts the refresh while the old slot is still
+// fence-referenced, so the next refresh retries the retirement instead of
+// silently stranding a still-valid grant.
+func TestRefreshRetriesPreviousSlotAfterBackendFailure(t *testing.T) {
+	server, client, secrets, lease, clock := tokenFixture(t, "rt-1")
+	ctx := context.Background()
+	if _, err := client.Token(ctx); err != nil {
+		t.Fatalf("first Token: %v", err)
+	}
+	_, slot1, found, err := lease.ReadCredentialFence(ctx)
+	if err != nil || !found {
+		t.Fatalf("fence after first refresh: %v", err)
+	}
+
+	clock.set(clock.now.Add(2 * time.Hour))
+	server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+	secrets.failDeletes(slot1)
+	if _, err := client.Token(ctx); err == nil {
+		t.Fatal("refresh succeeded despite the retirement failure")
+	}
+	// The old slot is still live and fence-referenced: the grant is not
+	// stranded.
+	if _, ok, _ := secrets.GetSecret(slot1); !ok {
+		t.Fatal("the failed retirement stranded the previous slot")
+	}
+	generation, slot, found, ferr := lease.ReadCredentialFence(ctx)
+	if ferr != nil || !found || slot != slot1 {
+		t.Fatalf("fence after failed retirement = %d %s found:%v err:%v, want slot1", generation, slot, found, ferr)
+	}
+
+	// With the backend healthy again, the next refresh retires the old
+	// slot and leaves exactly one live credential.
+	secrets.allowDeletes(slot1)
+	if _, err := client.Token(ctx); err != nil {
+		t.Fatalf("retried Token: %v", err)
+	}
+	if _, ok, _ := secrets.GetSecret(slot1); ok {
+		t.Fatal("the retried refresh left the previous slot behind")
+	}
+	clock.set(clock.now.Add(time.Minute))
+}
+
 func TestNewValidation(t *testing.T) {
 	cases := []struct {
 		name string
