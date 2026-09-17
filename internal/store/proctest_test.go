@@ -36,6 +36,7 @@ const (
 	envTTLMS    = "STORE_PROCTEST_TTLMS"
 	envLockMS   = "STORE_PROCTEST_LOCKMS"
 	envGCSweeps = "STORE_PROCTEST_GC"
+	envPhaseDir = "STORE_PROCTEST_PHASE"
 )
 
 const scenarioArgPrefix = "--tama-link-store-scenario="
@@ -166,10 +167,14 @@ func runScenario(scenario string) int {
 
 	case "append-events-once":
 		id := os.Getenv(envSubID)
-		// Open first, then pause so a concurrent writer (the locker
-		// process) can be live while this process's read-then-write
-		// transaction runs. The overlap is the regression under test.
-		time.Sleep(500 * time.Millisecond)
+		// Signal open completion, then wait for the concurrent writer
+		// (the locker process) to signal that it holds the write lock.
+		// The explicit phase handoff pins the intended overlap: this
+		// process's read-then-write transaction runs while another
+		// process owns the write lock, instead of hoping fixed delays
+		// line the phases up.
+		signalPhase(os.Getenv(envPhaseDir), "opened", "wait for opened: %v\n")
+		waitForPhase(os.Getenv(envPhaseDir), "locked", "wait for locked: %v\n")
 		event := contract.Event{
 			SubmissionID: id,
 			Sequence:     1,
@@ -195,6 +200,7 @@ func runScenario(scenario string) int {
 			fmt.Fprintf(os.Stderr, "begin: %v\n", err)
 			return 1
 		}
+		signalPhase(os.Getenv(envPhaseDir), "locked", "signal locked: %v\n")
 		hold := 1500 * time.Millisecond
 		if ms, perr := time.ParseDuration(os.Getenv(envLockMS) + "ms"); perr == nil && ms > 0 {
 			hold = ms
@@ -470,16 +476,18 @@ func TestProctestWriteAfterReadWaitsForLock(t *testing.T) {
 		t.Fatalf("create submission: %v", err)
 	}
 
-	// Start the appender first so its open completes unblocked; the locker
-	// then holds the write lock across the appender's read-then-write
-	// transaction.
+	// Start the appender first so its open completes unblocked; the
+	// phase markers synchronize the rest: the locker starts only after
+	// the appender opened, and the appender appends only after the
+	// locker signaled its held write lock.
+	phaseDir := t.TempDir()
 	appenderDone := make(chan string, 1)
 	go func() {
-		code, out := runProctest(t, "append-events-once", withProctestEnv(st.db, st.key, envSubID+"="+created.ID))
+		code, out := runProctest(t, "append-events-once", withProctestEnv(st.db, st.key, envSubID+"="+created.ID, envPhaseDir+"="+phaseDir))
 		appenderDone <- out + fmt.Sprintf("(exit %d)", code)
 	}()
-	time.Sleep(100 * time.Millisecond)
-	lockerCode, out := runProctest(t, "lock", withProctestEnv(st.db, st.key, envLockMS+"=4000"))
+	waitForTestPhase(t, phaseDir, "opened")
+	lockerCode, out := runProctest(t, "lock", withProctestEnv(st.db, st.key, envLockMS+"=4000", envPhaseDir+"="+phaseDir))
 	if lockerCode != 0 {
 		t.Fatalf("locker exited %d: %s", lockerCode, out)
 	}
@@ -615,5 +623,53 @@ func TestProctestIntegrityCheck(t *testing.T) {
 	code, out := runProctest(t, "integrity", withProctestEnv(st.db, st.key))
 	if code != 0 || strings.TrimSpace(out) != "ok" {
 		t.Fatalf("integrity scenario = %q (exit %d), want ok", out, code)
+	}
+}
+
+// signalPhase creates the named phase marker so the parent test can
+// synchronize child processes without fixed delays.
+func signalPhase(dir, name, failFormat string) {
+	if dir == "" {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, failFormat, err)
+		os.Exit(1)
+	}
+}
+
+// waitForPhase polls for the named phase marker; a missing marker past the
+// deadline fails the scenario rather than racing blind.
+func waitForPhase(dir, name, failFormat string) {
+	if dir == "" {
+		return
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintf(os.Stderr, failFormat, fmt.Errorf("phase %q never appeared", name))
+			os.Exit(1)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// waitForTestPhase polls for a child process's phase marker from the
+// parent test, replacing fixed inter-process delays with an explicit
+// handoff.
+func waitForTestPhase(t *testing.T, dir, name string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("phase %q never appeared in %s", name, dir)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

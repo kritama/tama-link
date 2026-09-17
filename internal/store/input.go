@@ -8,6 +8,12 @@ import (
 	"fmt"
 )
 
+// Input-response ciphertexts are bound to the submission and the input
+// request: the AEAD additional data carries
+// "input-response:<requestID>", so a ciphertext copied to another
+// request row of the same submission fails authentication instead of
+// handing the destination request the wrong durable response.
+
 // GetInputResponse returns the canonical response previously recorded for one
 // input-request ID, or found=false. The recorded response is the idempotency
 // baseline: an exact replay is a no-op, a different response is a conflict.
@@ -26,7 +32,7 @@ func (s *Store) GetInputResponse(ctx context.Context, submissionID, requestID st
 	if err != nil {
 		return nil, false, fmt.Errorf("read input response: %w", err)
 	}
-	decoded, err := s.cipher.open(enc, submissionID, "input-response")
+	decoded, err := s.cipher.open(enc, submissionID, "input-response:"+requestID)
 	if err != nil {
 		return nil, false, unreadableSubmissionPayload(submissionID, "input response "+requestID, err)
 	}
@@ -51,7 +57,7 @@ func (s *Store) SetInputResponse(ctx context.Context, submissionID, requestID st
 	if len(response) == 0 {
 		return errors.New("input response is required")
 	}
-	sealed, err := s.cipher.seal(response, submissionID, "input-response")
+	sealed, err := s.cipher.seal(response, submissionID, "input-response:"+requestID)
 	if err != nil {
 		return fmt.Errorf("seal input response: %w", err)
 	}
@@ -81,19 +87,43 @@ func (s *Store) SetInputResponse(ctx context.Context, submissionID, requestID st
 	return ErrInputResponseConflict
 }
 
+// ErrTaskIDConflict reports that the submission already carries a different
+// upstream task ID: the first attachment wins and the caller must reconcile
+// against the durable owner.
+var ErrTaskIDConflict = errors.New("submission already carries a different upstream task id")
+
 // AttachTaskID records the owner-bound upstream task ID on a submission whose
 // task ID is still empty. It is first-write-wins and idempotent for an
 // identical value, so concurrent awaits and restarts never duplicate or
-// overwrite the attachment.
+// overwrite the attachment. A zero-row update is an error, never a silent
+// success: either the submission is missing or its task is already bound to
+// a different ID.
 func (s *Store) AttachTaskID(ctx context.Context, submissionID, taskID string) error {
 	if submissionID == "" || taskID == "" {
 		return errors.New("submission id and task id are required")
 	}
-	if _, err := s.exec(ctx, `
+	res, err := s.exec(ctx, `
 		UPDATE submissions SET task_id = ?, updated_at = ?
 		WHERE submission_id = ? AND (task_id IS NULL OR task_id = '' OR task_id = ?)`,
-		taskID, s.now().UnixMilli(), submissionID, taskID); err != nil {
+		taskID, s.now().UnixMilli(), submissionID, taskID)
+	if err != nil {
 		return fmt.Errorf("attach task id: %w", err)
+	}
+	if n, rerr := res.RowsAffected(); rerr == nil && n > 0 {
+		return nil
+	}
+	var existing string
+	qerr := s.db.QueryRowContext(ctx,
+		"SELECT task_id FROM submissions WHERE submission_id = ?", submissionID).
+		Scan(&existing)
+	if errors.Is(qerr, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %s", ErrNotFound, submissionID)
+	}
+	if qerr != nil {
+		return fmt.Errorf("attach task id: %w", qerr)
+	}
+	if existing != taskID {
+		return fmt.Errorf("%w: submission %s carries task %q", ErrTaskIDConflict, submissionID, existing)
 	}
 	return nil
 }

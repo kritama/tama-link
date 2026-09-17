@@ -232,7 +232,14 @@ func (c *Client) scanSSE(r io.Reader, perRequest int64, dispatch func(msg jsonrp
 		if isContextError(err) {
 			return err
 		}
-		return newError(KindTooLarge, 0, fmt.Errorf("SSE frame exceeds bound: %w", err))
+		// Token overflow means one event exceeded the bound; every other
+		// scanner failure is a body read failure and must not be reported
+		// as an oversized response — classify.go maps the two kinds to
+		// different stable codes.
+		if errors.Is(err, bufio.ErrTooLong) {
+			return newError(KindTooLarge, 0, fmt.Errorf("SSE frame exceeds bound: %w", err))
+		}
+		return newError(KindTransport, 0, fmt.Errorf("read SSE stream: %w", err))
 	}
 	// A final event without its blank-line delimiter is dropped by design.
 	return nil

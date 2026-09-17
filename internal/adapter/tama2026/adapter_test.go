@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -69,16 +70,19 @@ func newTamaServer(t *testing.T) *tamaServer {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
-		body := make([]byte, 4096)
-		n, _ := r.Body.Read(body)
-		id := extractID(body[:n])
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
+		id := extractID(body)
 		switch r.URL.Path {
 		case "/mcp/app":
 			// Distinguish by method: the body carries it.
 			var envelope struct {
 				Method string `json:"method"`
 			}
-			_ = json.Unmarshal(body[:n], &envelope)
+			_ = json.Unmarshal(body, &envelope)
 			switch envelope.Method {
 			case "server/discover":
 				replyJSON(t, w, id, s.discoverDoc)
@@ -86,7 +90,7 @@ func newTamaServer(t *testing.T) *tamaServer {
 				replyJSON(t, w, id, fmt.Sprintf(`{"resultType":"complete","tools":[%s]}`, strings.Join(s.tools, ",")))
 			case "tools/call":
 				s.callReqMu.Lock()
-				s.callRaw = append([]byte(nil), body[:n]...)
+				s.callRaw = append([]byte(nil), body...)
 				s.callReqMu.Unlock()
 				w.Header().Set("Content-Type", s.callContentType)
 				replyJSON(t, w, id, s.callResultDoc)

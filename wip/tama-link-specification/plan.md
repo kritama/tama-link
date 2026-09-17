@@ -620,7 +620,7 @@ Tama-owned adapters and endpoint migration beginning with `upmaru/tama#123`.
   one stable `client_context.thread_id` per conversation and never falls back to
   a profile-global value.
 
-Exit: acceptance criteria #1–#22 of the spec are demonstrated by automated and
+Exit: acceptance criteria #1–#23 of the spec are demonstrated by automated and
 live tests.
 
 ## Phase 4 — production release and migration closure

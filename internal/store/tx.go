@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"fmt"
 	"strings"
 )
@@ -66,22 +67,40 @@ func (w *writeTx) QueryRowContext(ctx context.Context, query string, args ...any
 }
 
 // Commit finishes the transaction and returns the connection to the pool.
+// The pinned SQLite driver executes COMMIT as raw SQL and never reaches the
+// driver.Tx path that rolls back automatically after a failed COMMIT, so a
+// failed commit rolls back explicitly; if that rollback also fails, the
+// connection is marked bad so database/sql discards it instead of returning
+// an active transaction to the pool.
 func (w *writeTx) Commit() error {
-	w.done = true
 	_, err := w.conn.ExecContext(context.Background(), "COMMIT")
-	_ = w.conn.Close()
+	if err == nil {
+		w.done = true
+		return w.conn.Close()
+	}
+	if rbErr := w.Rollback(); rbErr != nil {
+		// The connection still owns an active transaction the rollback
+		// could not clear: mark it bad before releasing it.
+		_ = w.conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	w.done = true
 	return err
 }
 
 // Rollback undoes the transaction and returns the connection to the pool.
 // A rollback after commit is a no-op, matching sql.Tx semantics at the
-// deferred call sites.
+// deferred call sites. A failed ROLLBACK marks the connection bad so
+// database/sql discards it instead of returning an active transaction to
+// the pool.
 func (w *writeTx) Rollback() error {
 	if w.done {
 		return nil
 	}
-	w.done = true
 	_, err := w.conn.ExecContext(context.Background(), "ROLLBACK")
+	if err != nil {
+		_ = w.conn.Raw(func(any) error { return driver.ErrBadConn })
+	}
+	w.done = true
 	_ = w.conn.Close()
 	return err
 }

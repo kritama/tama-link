@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -37,13 +38,20 @@ func newSubClient(t *testing.T, url string) *Client {
 func subServer(t *testing.T, events func(requestID string) []string) *httptest.Server {
 	t.Helper()
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body := make([]byte, 4096)
-		n, _ := r.Body.Read(body)
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			// The handler runs on the server's goroutine: report and
+			// stop serving instead of Fatal, which cannot stop the test
+			// from here and would leave the client blocked.
+			t.Errorf("read request body: %v", err)
+			return
+		}
 		var envelope struct {
 			ID string `json:"id"`
 		}
-		if err := json.Unmarshal(body[:n], &envelope); err != nil {
-			t.Fatalf("decode request: %v", err)
+		if err := json.Unmarshal(body, &envelope); err != nil {
+			t.Errorf("decode request: %v", err)
+			return
 		}
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Header().Set("Cache-Control", "no-cache")

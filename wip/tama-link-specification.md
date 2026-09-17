@@ -509,7 +509,10 @@ platform credential store or another explicitly selected secure backend.
 Canonical arguments, results, progress messages, and other sensitive state
 blobs must be encrypted at rest with a profile-scoped key held in the platform
 credential store. Non-sensitive indexes, digests, state labels, and timestamps
-may remain plaintext.
+may remain plaintext. Each ciphertext is authenticated against its durable
+row identity and semantic kind: a blob copied to another row — including
+another input request of the same submission — fails authentication instead
+of decrypting successfully.
 
 A new empty profile database may generate its random state-encryption key in
 the configured secure credential backend. An existing database whose key is
@@ -756,7 +759,10 @@ closed. Link declares the Tasks extension on each applicable request; it does
 not infer capabilities from discovery or an earlier call.
 
 Task creation is server-directed. A task-backed `tools/call` returns an opaque,
-globally unique, owner-bound task ID. `tasks/get` returns the complete detailed
+globally unique, owner-bound task ID; attaching it to the durable submission
+is first-write-wins, idempotent for an identical value, and reports a
+conflict when the submission already carries a different task ID rather than
+succeeding silently. `tasks/get` returns the complete detailed
 task state and includes the terminal `CallToolResult` or failure payload.
 `tasks/update` carries responses while a task is `input_required`, and
 `tasks/cancel` records cooperative cancellation intent. Downstream `await`
@@ -1243,26 +1249,26 @@ The first complete implementation is not done until automated tests prove:
     with a different value, the loser gets `idempotency_conflict` and
     reconciles against the durable winner instead of silently assuming its
     value was stored. An exact replay of the recorded value is a no-op.
-13. Requested MCP progress notifications are rate limited and correlated.
-14. Credentials and plaintext sensitive inputs do not appear in SQLite
+14. Requested MCP progress notifications are rate limited and correlated.
+15. Credentials and plaintext sensitive inputs do not appear in SQLite
     metadata, JSON output, logs, panic output, or test snapshots; encrypted
     state blobs fail closed when their key is unavailable.
-15. Unsupported protocol, capability, profile, and Tama versions fail closed;
+16. Unsupported protocol, capability, profile, and Tama versions fail closed;
     legacy upstream initialization, session IDs, `tasks/result`, and
     `tasks/list` are rejected rather than used as fallbacks.
-16. Separate App and System registrations expose isolated catalogs,
+17. Separate App and System registrations expose isolated catalogs,
     instructions, credentials, and state while retaining the same two-tool
     contract.
-17. App restart recovery retrieves the same owner-bound durable task; an
+18. App restart recovery retrieves the same owner-bound durable task; an
     ambiguous initial call replay does not duplicate graph work.
-18. System read-only restart recovery safely replays unfinished local work.
-19. Subscription acknowledgement, authorized task snapshots, stream loss, and
+19. System read-only restart recovery safely replays unfinished local work.
+20. Subscription acknowledgement, authorized task snapshots, stream loss, and
     credential-expiry recovery preserve correctness through `tasks/get`.
-20. Multiple processes sharing one profile cannot duplicate claimed work, lose
+21. Multiple processes sharing one profile cannot duplicate claimed work, lose
     a replacement refresh token, or corrupt credential coordination.
-21. Codex, OpenCode, and at least one plain MCP inspector complete the
+22. Codex, OpenCode, and at least one plain MCP inspector complete the
     `submit`/repeated-`await` workflow for both profile types.
-22. Race tests, static analysis, lint, cross-builds, TamaMCP conformance
+23. Race tests, static analysis, lint, cross-builds, TamaMCP conformance
     fixtures, and live migrated-Tama acceptance pass.
 
 ## Implementation phases

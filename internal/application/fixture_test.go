@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -55,14 +56,17 @@ func newFakeTama(t *testing.T) *fakeTama {
 	t.Helper()
 	f := &fakeTama{}
 	f.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body := make([]byte, 65536)
-		n, _ := r.Body.Read(body)
+		body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+		if err != nil {
+			t.Errorf("read request body: %v", err)
+			return
+		}
 		var envelope struct {
 			ID     string          `json:"id"`
 			Method string          `json:"method"`
 			Params json.RawMessage `json:"params"`
 		}
-		_ = json.Unmarshal(body[:n], &envelope)
+		_ = json.Unmarshal(body, &envelope)
 		id := `"` + envelope.ID + `"`
 
 		switch envelope.Method {
@@ -84,7 +88,7 @@ func newFakeTama(t *testing.T) *fakeTama {
 		case "tools/call":
 			f.calls.Add(1)
 			f.mu.Lock()
-			f.lastCallDoc = string(body[:n])
+			f.lastCallDoc = string(body)
 			f.mu.Unlock()
 			if f.fail.Load() {
 				w.Header().Set("Content-Type", "application/json")

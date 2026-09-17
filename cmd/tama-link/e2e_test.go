@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -159,7 +160,18 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	// process.
 	hermetic := os.Getenv(e2eKeyringEnv) == ""
 	if hermetic {
-		t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+filepath.Join(t.TempDir(), "no-such-bus"))
+		// The dead-bus environment only constrains the SecretService
+		// backend: darwin selects Keychain and windows selects the
+		// Windows credential store, where the pinned address changes
+		// nothing and the spawned serve can complete its probe. Skip the
+		// platforms the hermetic branch cannot control instead of failing
+		// its exit-code assertions.
+		switch runtime.GOOS {
+		case "linux":
+			t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+filepath.Join(t.TempDir(), "no-such-bus"))
+		default:
+			t.Skipf("hermetic credential failure is only controllable on linux (D-Bus); %s selects a different platform backend", runtime.GOOS)
+		}
 	}
 	bin := buildBinary(t)
 

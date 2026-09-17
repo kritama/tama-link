@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -31,9 +32,12 @@ func registerServer(t *testing.T, body string, status int, calls *int32) *httpte
 				ResponseTypes []string `json:"response_types"`
 				AuthMethod    string   `json:"token_endpoint_auth_method"`
 			}
-			raw := make([]byte, 4096)
-			n, _ := r.Body.Read(raw)
-			if err := json.Unmarshal(raw[:n], &body); err != nil {
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Errorf("read registration body: %v", err)
+				return
+			}
+			if err := json.Unmarshal(raw, &body); err != nil {
 				t.Errorf("decode registration body: %v", err)
 			}
 			if body.ClientName != "Tama Link" {
