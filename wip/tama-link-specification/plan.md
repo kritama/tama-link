@@ -189,7 +189,9 @@ caller cancels before the commit observes it has its advance rejected and
 its own slot rolled back; a failed rollback deletion is durably enqueued on
 the client retirement backlog for a later refresh or logout to retry. A stale
 registration can therefore never be installed or silently orphaned, and a
-winner's committed record is never touched. Logout clears the
+winner's committed record is never touched. The first successful commit also
+retires the legacy single-label record — dead data once a fence exists —
+and durably records a failed deletion so the retirement sweep retries it. Logout clears the
 client fence and removes its slot under the same epoch-bound protocol as
 the refresh fence, so a logout that loses its lease mid-cleanup fails
 retryably and can never wipe a registration installed by the process that

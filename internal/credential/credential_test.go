@@ -203,6 +203,8 @@ func (b *blockingKeyring) Reset() error            { panic("unused") }
 func (b *blockingKeyring) Keys() ([]string, error) { panic("unused") }
 
 func TestProbeTimesOutOnBlockingBackend(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
 	blocking := &blockingKeyring{started: make(chan struct{})}
 	probeTimeout = 200 * time.Millisecond
 	t.Cleanup(func() { probeTimeout = 5 * time.Second })
@@ -223,6 +225,8 @@ func TestProbeTimesOutOnBlockingBackend(t *testing.T) {
 }
 
 func TestProbeSucceedsAndCleansUp(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
 	backend := newFakeKeyring()
 	if err := probeBackend("demo", backend); err != nil {
 		t.Fatalf("probe: %v", err)
@@ -262,36 +266,33 @@ func (s *slowKeyring) Set(item keyring.Item) error {
 func (s *slowKeyring) Remove(key string) error { return s.inner.Remove(key) }
 func (s *slowKeyring) Keys() ([]string, error) { return s.inner.Keys() }
 
-// TestProbeWorkerServesNextProbeAfterTimeout pins the owned probe
-// worker: a timed-out probe abandons its request, not the worker, so the
-// worker that survives the deadline serves a follow-up probe instead of
-// every retry spawning another abandoned goroutine that keeps mutating
-// the backend.
-func TestProbeWorkerServesNextProbeAfterTimeout(t *testing.T) {
+// TestProbeRetryReusesWorkerAfterTimeout pins the shared probe worker at
+// the retry lifecycle: a backend whose probe blocks past the deadline
+// pins exactly one worker, and a retry through probeBackend — the same
+// path New retries take — reuses that worker once the blocking call
+// returns instead of spawning a replacement per attempt.
+func TestProbeRetryReusesWorkerAfterTimeout(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
 	backend := newFakeKeyring()
 	slow := &slowKeyring{
 		started: make(chan struct{}),
 		release: make(chan struct{}),
 		inner:   backend,
 	}
-	runner := newProbeRunner()
-	t.Cleanup(runner.close)
 	probeTimeout = 150 * time.Millisecond
 	t.Cleanup(func() { probeTimeout = 5 * time.Second })
 
-	errs := make(chan error, 1)
-	go func() { errs <- runner.probe(slow, "demo/__probe_slow") }()
-	<-slow.started
-	if err := <-errs; err == nil {
+	// The first attempt blocks in Set and times out.
+	if err := probeBackend("demo", slow); err == nil {
 		t.Fatal("probe succeeded, want timeout error")
 	}
 	close(slow.release)
 
-	// The same worker serves the follow-up probe once the slow call
-	// completes, and both probes' Set/Get/Remove cycles cleaned up their
-	// disposable entries.
-	if err := runner.probe(backend, "demo/__probe_next"); err != nil {
-		t.Fatalf("follow-up probe: %v", err)
+	// The retry reuses the same worker and succeeds, and both probes'
+	// Set/Get/Remove cycles cleaned up their disposable entries.
+	if err := probeBackend("demo", backend); err != nil {
+		t.Fatalf("retry probe: %v", err)
 	}
 	backend.mu.Lock()
 	defer backend.mu.Unlock()
@@ -305,6 +306,8 @@ func TestProbeWorkerServesNextProbeAfterTimeout(t *testing.T) {
 // probe uses its own unguessable key, and a probe that sees another
 // probe's Remove between its Set and Get still succeeds on its own key.
 func TestProbeKeysAreUniquePerInvocation(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
 	seen := make(chan string, 8)
 	backend := newFakeKeyring()
 	racy := &spyKeyring{inner: backend, seen: seen}

@@ -585,6 +585,88 @@ func TestRegisterRetiresOrphanedCredential(t *testing.T) {
 	}
 }
 
+// TestRegisterRetiresLegacyRecordAbsentOnLoad pins the legacy-record
+// retirement on the fenced commit: a registration replacing a legacy
+// single-label record treated as absent on load (an expired client
+// secret) deletes the legacy label after its fence commits, so the old
+// client secret does not linger in the backend; a failed deletion is
+// durably recorded for the retirement sweep.
+func TestRegisterRetiresLegacyRecordAbsentOnLoad(t *testing.T) {
+	tests := []struct {
+		name       string
+		failDelete bool
+	}{
+		{name: "legacy label deleted"},
+		{name: "failed deletion durably recorded", failDelete: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			secrets := newFakeSecrets()
+			lease := newFakeLease()
+			client := newStaticClient(t, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
+
+			// A legacy record whose client secret expired: readiness and
+			// the reuse path treat it as absent, so Register re-registers.
+			legacy := ClientRecord{
+				ClientID: "cid-old", ClientSecret: "shh-old",
+				AuthMethod: "client_secret_basic", Issuer: testIssuer,
+				RegisteredAt: time.Now().UTC(), SecretExpiresAt: 1_699_999_999,
+			}
+			legacyData, err := json.Marshal(legacy)
+			if err != nil {
+				t.Fatalf("marshal legacy record: %v", err)
+			}
+			if err := secrets.SetSecret(labelClient, legacyData); err != nil {
+				t.Fatalf("store legacy record: %v", err)
+			}
+			if tt.failDelete {
+				secrets.failDeletes(labelClient)
+			}
+
+			var calls int32
+			ts := registerServer(t, `{"client_id":"cid-new","client_secret":"shh"}`, http.StatusCreated, &calls)
+			rec, err := client.Register(ctx, regMetadata(ts, testIssuer))
+			if err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+			if rec.ClientID != "cid-new" {
+				t.Fatalf("Register = %+v, want the fresh registration", rec)
+			}
+
+			// The fenced record is live either way: the commit is durable
+			// before the legacy cleanup runs.
+			stored, found, err := client.RegisteredClient(ctx)
+			if err != nil || !found || stored.ClientID != "cid-new" {
+				t.Fatalf("stored record = %+v found:%v err:%v, want the fresh registration", stored, found, err)
+			}
+			_, found, err = secrets.GetSecret(labelClient)
+			if tt.failDelete {
+				if err != nil || !found {
+					t.Fatalf("legacy label = found:%v err:%v, want retained until the sweep retries", found, err)
+				}
+				retired, err := lease.RetiredCredentialSlots(ctx, store.ClientFenceName)
+				if err != nil || len(retired) != 1 || retired[0] != labelClient {
+					t.Fatalf("retired client slots = %v err:%v, want %q", retired, err, labelClient)
+				}
+				secrets.allowDeletes(labelClient)
+				client.retireFailedSlots(ctx)
+				if _, found, err := secrets.GetSecret(labelClient); err != nil || found {
+					t.Fatalf("legacy label after sweep = found:%v err:%v, want deleted", found, err)
+				}
+				retired, err = lease.RetiredCredentialSlots(ctx, store.ClientFenceName)
+				if err != nil || len(retired) != 0 {
+					t.Fatalf("retirement backlog after sweep = %v err:%v, want empty", retired, err)
+				}
+				return
+			}
+			if err != nil || found {
+				t.Fatalf("legacy label = found:%v err:%v, want deleted by the commit", found, err)
+			}
+		})
+	}
+}
+
 // TestRegisteredClientHonorsSecretExpiry pins the RFC 7591
 // client_secret_expires_at: an expiring registration stops being a usable
 // client at its expiry, and the DCR response's field is persisted.

@@ -2,6 +2,7 @@ package credential
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/99designs/keyring"
@@ -30,6 +31,33 @@ func newProbeRunner() *probeRunner {
 	r := &probeRunner{requests: make(chan probeRequest)}
 	go r.run()
 	return r
+}
+
+var (
+	runnerOnce sync.Once
+	runner     *probeRunner
+)
+
+// sharedRunner returns the process-wide probe worker: exactly one
+// goroutine serves every availability probe New makes, so retrying an
+// unavailable backend cannot accumulate blocked workers. The runner's
+// lifetime is the process's; its close remains the shutdown path for
+// tests. A probe that blocks forever pins only this one worker — later
+// probes fail fast at the deadline without spawning replacements.
+func sharedRunner() *probeRunner {
+	runnerOnce.Do(func() { runner = newProbeRunner() })
+	return runner
+}
+
+// resetRunner discards the shared runner so the next probe spawns a fresh
+// worker. Tests use it to isolate backends whose probes block or fail;
+// production never resets.
+func resetRunner() {
+	runnerOnce = sync.Once{}
+	if runner != nil {
+		runner.close()
+		runner = nil
+	}
 }
 
 // run is the single probe worker. It exits when its owner closes the

@@ -80,10 +80,10 @@ func New(profile string) (*Keyring, error) {
 // connection while still being unable to complete a write, so connect
 // success alone is not availability.
 //
-// The probe runs through an owned probe worker instead of an abandoned
-// goroutine: a backend that blocks indefinitely leaves one worker parked
-// on its own keyring call — no goroutine is added per retry — and that
-// worker exits as soon as the uninterruptible call returns.
+// The probe runs through the process-wide probe worker instead of an
+// abandoned goroutine per attempt: a backend that blocks indefinitely
+// pins exactly one worker, and retries through New fail fast at the
+// deadline without adding workers.
 func probeBackend(profile string, kr keyring.Keyring) error {
 	// The probe key is unique per invocation: two Tama Link processes for
 	// the same profile can start concurrently, and a shared probe key lets
@@ -93,9 +93,7 @@ func probeBackend(profile string, kr keyring.Keyring) error {
 	if err != nil {
 		return err
 	}
-	runner := newProbeRunner()
-	defer runner.close()
-	return runner.probe(kr, key)
+	return sharedRunner().probe(kr, key)
 }
 
 // probeKey returns one unguessable per-invocation probe key inside the

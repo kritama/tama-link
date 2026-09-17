@@ -300,6 +300,18 @@ func (c *Client) storeClient(ctx context.Context, rec *ClientRecord, leaseGenera
 		}
 		return fmt.Errorf("%w: the client record commit was rejected", ErrLeaseContention)
 	}
+	// The legacy single-label record is dead data once a client fence
+	// exists — reads take the fenced slot and fall back only when no
+	// fence has been committed. Retire it so a record treated as absent
+	// on load (an expired or missing secret) does not linger in the
+	// backend. Best effort: the commit is already durable, so a deletion
+	// failure is durably recorded for the retirement sweep instead of
+	// failing the registration it follows.
+	if err := c.secrets.DeleteSecret(labelClient); err != nil {
+		_ = c.lease.RecordRetiredCredentialSlot(
+			context.WithoutCancel(ctx), store.ClientFenceName, labelClient,
+		)
+	}
 	return nil
 }
 

@@ -502,11 +502,13 @@ bounded startup probe: a complete set/read/remove cycle on one disposable
 entry with a unique unguessable per-invocation key must finish within a short
 fixed window, or Tama Link fails fast with a
 clear unavailable error. The window is fixed in the binary and cannot be
-extended at runtime. The probe runs through one owned worker goroutine
-rather than an abandoned one per attempt: the keyring API takes no context,
-so an in-flight call cannot be interrupted, but a timed-out probe abandons
-only its request — the worker stays owned, serves the next probe once the
-blocking call returns, and exits on shutdown. A backend that accepts a
+extended at runtime. The probe runs through one process-wide worker
+goroutine rather than an abandoned one per attempt: the keyring API takes
+no context, so an in-flight call cannot be interrupted, but a timed-out
+probe abandons only its request — the same worker serves every probe New
+makes, so retrying an unavailable backend cannot accumulate blocked
+workers, and a backend that blocks forever pins exactly that one worker
+while later probes fail fast at the deadline. A backend that accepts a
 connection but blocks on user
 interaction for writes (for example a headless Secret Service) is
 unavailable; an interactive unlock prompt is not a supported serve-startup
@@ -1035,7 +1037,13 @@ install a stale registration, and a winner whose registration commits in
 between keeps its own fenced record untouched. If that rollback deletion
 fails, the uncommitted slot is durably added to the client retirement backlog
 on a cancellation-independent context so a later refresh or logout retries it
-instead of orphaning a client secret. The fence pointer and its
+instead of orphaning a client secret. A successful commit also retires the
+legacy single-label record: once a client fence exists the legacy label is
+dead data — reads take the fenced slot and fall back only when no fence has
+been committed — so it is deleted after the commit, and a failed deletion is
+durably recorded for the retirement sweep, so a legacy record treated as
+absent on load (an expired or missing secret) cannot linger in the backend.
+The fence pointer and its
 clear are therefore the only authority for which registration is live:
 reads take the fenced slot when a client fence has been committed and
 fall back to the legacy single-label record only when no fence exists, a
