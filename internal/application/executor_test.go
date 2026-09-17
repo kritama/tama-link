@@ -107,3 +107,33 @@ func TestExecuteHonorsAcceptedResponseBound(t *testing.T) {
 		t.Fatalf("Execute under the lowered client bound = %v, want the accepted bound to govern", err)
 	}
 }
+
+// TestExecuteConnectsUnderLoweredProfileBound pins that connection
+// establishment is not constrained by the profile's current response bound:
+// the bootstrap discover and tools/list reads are bounded by the
+// implementation hard ceiling, so a submission accepted before a limit
+// lowering still connects and executes under its accepted bound instead of
+// being irreversibly failed as result_too_large before its tools/call.
+func TestExecuteConnectsUnderLoweredProfileBound(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	cfgBig := fixtureConfigFor(t, f, limits.Default())
+	svc, st, _ := appFromConfig(t, cfgBig)
+	id := submitStatus(t, svc, "lowered-connect-1")
+	sub, err := st.GetSubmission(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetSubmission: %v", err)
+	}
+
+	// A restart with a one-byte profile response bound: the bootstrap
+	// reads ignore it, and the accepted bound (16 MiB) governs the
+	// tools/call response.
+	lowered := limits.Default()
+	lowered.ResponseBytes = 1
+	cfgLowered := fixtureConfigFor(t, f, lowered)
+	ex := NewExecutor(cfgLowered.Connect)
+	if _, err := ex.Execute(context.Background(), sub); err != nil {
+		t.Fatalf("Execute under a one-byte profile bound = %v, want the bootstrap at the hard ceiling and the accepted bound to govern", err)
+	}
+}

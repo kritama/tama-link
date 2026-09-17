@@ -28,7 +28,7 @@ func TestDiscover(t *testing.T) {
 		return 200, "application/json", jsonReply(rec.BodyID, discoverFixture)
 	})
 	client := newTestClient(t, ts)
-	result, err := client.Discover(context.Background())
+	result, err := client.Discover(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestDiscoverNoTaskExtension(t *testing.T) {
 		}`)
 	})
 	client := newTestClient(t, ts)
-	result, err := client.Discover(context.Background())
+	result, err := client.Discover(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
@@ -82,7 +82,7 @@ func TestDiscoverUnusableResults(t *testing.T) {
 				return 200, "application/json", jsonReply(rec.BodyID, tc.result)
 			})
 			client := newTestClient(t, ts)
-			if _, err := client.Discover(context.Background()); err == nil {
+			if _, err := client.Discover(context.Background(), 0); err == nil {
 				t.Fatal("unusable discovery result accepted")
 			}
 		})
@@ -125,7 +125,7 @@ func TestListTools(t *testing.T) {
 		return 200, "application/json", jsonReply(rec.BodyID, toolsFixture)
 	})
 	client := newTestClient(t, ts)
-	tools, err := client.ListAllTools(context.Background())
+	tools, err := client.ListAllTools(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("ListAllTools: %v", err)
 	}
@@ -161,7 +161,7 @@ func TestListToolsPagination(t *testing.T) {
 		return 200, "application/json", jsonReply(rec.BodyID, `{"tools":[]}`)
 	})
 	client := newTestClient(t, ts)
-	tools, err := client.ListAllTools(context.Background())
+	tools, err := client.ListAllTools(context.Background(), 0)
 	if err != nil {
 		t.Fatalf("ListAllTools: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestListToolsPagination(t *testing.T) {
 		return 200, "application/json", jsonReply(rec.BodyID, `{"tools":[],"nextCursor":"loop"}`)
 	})
 	loopClient := newTestClient(t, loop)
-	if _, err := loopClient.ListAllTools(context.Background()); err == nil {
+	if _, err := loopClient.ListAllTools(context.Background(), 0); err == nil {
 		t.Fatal("cursor loop was not bounded")
 	}
 }

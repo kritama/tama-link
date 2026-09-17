@@ -49,9 +49,11 @@ func (r *DiscoverResult) HasTaskExtension() bool {
 
 // Discover performs server/discover. The client never sends initialize; this
 // is the only handshake, and any failure is terminal for the connection
-// attempt.
-func (c *Client) Discover(ctx context.Context) (*DiscoverResult, error) {
-	raw, err := c.call(ctx, MethodDiscover, "", json.RawMessage("{}"))
+// attempt. maxResponseBytes bounds the response; bootstrap callers pass the
+// implementation hard ceiling so a later, lower profile bound can never
+// constrain connection establishment.
+func (c *Client) Discover(ctx context.Context, maxResponseBytes int64) (*DiscoverResult, error) {
+	raw, err := c.call(ctx, MethodDiscover, "", json.RawMessage("{}"), maxResponseBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -118,12 +120,12 @@ type ListToolsResult struct {
 }
 
 // ListTools reads one tools/list page.
-func (c *Client) ListTools(ctx context.Context, cursor string) (*ListToolsResult, error) {
+func (c *Client) ListTools(ctx context.Context, cursor string, maxResponseBytes int64) (*ListToolsResult, error) {
 	wire, err := json.Marshal(wireListTools{Cursor: cursor})
 	if err != nil {
 		return nil, fmt.Errorf("encode tools/list params: %w", err)
 	}
-	raw, err := c.call(ctx, MethodListTools, "", wire)
+	raw, err := c.call(ctx, MethodListTools, "", wire, maxResponseBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +134,7 @@ func (c *Client) ListTools(ctx context.Context, cursor string) (*ListToolsResult
 
 // ListAllTools follows NextCursor until the listing is exhausted, bounded by
 // a hard page ceiling so a hostile cursor loop cannot run forever.
-func (c *Client) ListAllTools(ctx context.Context) ([]*LiveTool, error) {
+func (c *Client) ListAllTools(ctx context.Context, maxResponseBytes int64) ([]*LiveTool, error) {
 	const maxPages = 32
 	var all []*LiveTool
 	cursor := ""
@@ -140,7 +142,7 @@ func (c *Client) ListAllTools(ctx context.Context) ([]*LiveTool, error) {
 		if page >= maxPages {
 			return nil, newError(KindProtocol, 0, fmt.Errorf("tools/list exceeds %d pages", maxPages))
 		}
-		result, err := c.ListTools(ctx, cursor)
+		result, err := c.ListTools(ctx, cursor, maxResponseBytes)
 		if err != nil {
 			return nil, err
 		}

@@ -208,7 +208,10 @@ TamaMCP includes the complete state-specific payload, including a terminal
 terminal result into the local store **the moment it is observed** through
 either path, so the result survives Tama Link restarts, upstream retention, and
 client disconnects. Repeated `await` after terminal capture is served entirely
-from local state.
+from local state. The final state read after a caller cancellation or budget
+expiry runs on an independent context with its own short deadline, so a
+contended or stalled store cannot hold the handler beyond the wait contract;
+if the refresh does not complete in time, the last snapshot is returned.
 
 ### D7. One profile means one endpoint, process identity, and state namespace
 
@@ -236,7 +239,11 @@ bindings, and digest.
 
 At runtime Tama Link authenticates, calls `server/discover`, reads the complete
 `tools/list` result, and verifies the pinned descriptors against the live
-catalog. The effective catalog is always the live catalog intersected with the
+catalog. The bootstrap reads are bounded by the implementation hard response
+ceiling, not the profile's current bound: the catalog is profile
+infrastructure, so a later, lowered profile limit can never constrain
+connection establishment or fail an accepted submission before its
+tools/call. The effective catalog is always the live catalog intersected with the
 profile allowlist. New upstream tools are never exposed automatically, and
 security-relevant drift fails closed with `operation_contract_mismatch`.
 

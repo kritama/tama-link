@@ -249,7 +249,7 @@ func TestRedirectsAreRejected(t *testing.T) {
 			if err != nil {
 				t.Fatalf("New: %v", err)
 			}
-			if _, err := client.Discover(context.Background()); err == nil {
+			if _, err := client.Discover(context.Background(), 0); err == nil {
 				t.Fatal("redirected request succeeded")
 			}
 			if got := atomic.LoadInt32(hits); got != 0 {
@@ -300,7 +300,7 @@ func TestDefaultClientRefusesRedirects(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	if _, err := client.Discover(context.Background()); err == nil {
+	if _, err := client.Discover(context.Background(), 0); err == nil {
 		t.Fatal("default client followed a redirect")
 	}
 	if got := atomic.LoadInt32(hits); got != 0 {
@@ -330,7 +330,7 @@ func TestCallerCancellation(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err = client.Discover(ctx)
+	_, err = client.Discover(ctx, 0)
 	if !errors.Is(err, context.Canceled) && !isUpstreamError(err) {
 		t.Fatalf("err = %v, want cancellation", err)
 	}
@@ -357,7 +357,7 @@ func TestTokenFailureClassifiesAsAuth(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = client.Discover(context.Background())
+	_, err = client.Discover(context.Background(), 0)
 	if !IsAuth(err) {
 		t.Fatalf("err = %v, want auth kind", err)
 	}
@@ -386,7 +386,7 @@ func TestTokenContentionClassifiesAsTransport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	_, err = client.Discover(context.Background())
+	_, err = client.Discover(context.Background(), 0)
 	if !IsTokenContended(err) {
 		t.Fatalf("err = %v, want token contention", err)
 	}
@@ -406,7 +406,7 @@ func TestResponseBounds(t *testing.T) {
 		})
 		client := newTestClient(t, ts)
 		client.maxBytes = 1024
-		_, err := client.Discover(context.Background())
+		_, err := client.Discover(context.Background(), 0)
 		var uerr *Error
 		if !errors.As(err, &uerr) || uerr.Kind != KindTooLarge {
 			t.Fatalf("err = %v, want too-large kind", err)
@@ -418,7 +418,7 @@ func TestResponseBounds(t *testing.T) {
 		})
 		client := newTestClient(t, ts)
 		client.maxBytes = 1024
-		_, err := client.Discover(context.Background())
+		_, err := client.Discover(context.Background(), 0)
 		var uerr *Error
 		if !errors.As(err, &uerr) || uerr.Kind != KindTooLarge {
 			t.Fatalf("err = %v, want too-large kind", err)
@@ -448,7 +448,7 @@ func TestProtocolErrorClassification(t *testing.T) {
 				return tc.status, "application/json", jsonErrorReply(rec.BodyID, tc.code, "classified")
 			})
 			client := newTestClient(t, ts)
-			_, err := client.Discover(context.Background())
+			_, err := client.Discover(context.Background(), 0)
 			var uerr *Error
 			if !errors.As(err, &uerr) {
 				t.Fatalf("err = %v, want upstream error", err)
@@ -466,7 +466,7 @@ func TestHTTPFailureClassification(t *testing.T) {
 		return 503, "text/plain", "unavailable"
 	})
 	client := newTestClient(t, ts)
-	_, err := client.Discover(context.Background())
+	_, err := client.Discover(context.Background(), 0)
 	var uerr *Error
 	if !errors.As(err, &uerr) || uerr.Kind != KindHTTP || uerr.Code != 503 {
 		t.Fatalf("err = %+v, want http 503", err)
@@ -480,7 +480,7 @@ func TestMalformedResponses(t *testing.T) {
 			return 200, "application/json", `{not json`
 		})
 		client := newTestClient(t, ts)
-		_, err := client.Discover(context.Background())
+		_, err := client.Discover(context.Background(), 0)
 		var uerr *Error
 		if !errors.As(err, &uerr) || uerr.Kind != KindTransport {
 			t.Fatalf("err = %v, want transport kind", err)
@@ -491,7 +491,7 @@ func TestMalformedResponses(t *testing.T) {
 			return 200, "application/json", jsonReply("other-id", `{}`)
 		})
 		client := newTestClient(t, ts)
-		_, err := client.Discover(context.Background())
+		_, err := client.Discover(context.Background(), 0)
 		var uerr *Error
 		if !errors.As(err, &uerr) || uerr.Kind != KindTransport {
 			t.Fatalf("err = %v, want transport kind", err)
@@ -502,7 +502,7 @@ func TestMalformedResponses(t *testing.T) {
 			return 200, "text/html", "<html>"
 		})
 		client := newTestClient(t, ts)
-		_, err := client.Discover(context.Background())
+		_, err := client.Discover(context.Background(), 0)
 		var uerr *Error
 		if !errors.As(err, &uerr) || uerr.Kind != KindTransport {
 			t.Fatalf("err = %v, want transport kind", err)
@@ -536,7 +536,7 @@ func TestFiniteCallHonorsRequestTimeout(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	start := time.Now()
-	_, err = client.Discover(context.Background())
+	_, err = client.Discover(context.Background(), 0)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want context deadline", err)
 	}

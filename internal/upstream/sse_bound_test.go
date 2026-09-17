@@ -85,7 +85,7 @@ func TestSSEEventBound(t *testing.T) {
 				return sseReply(padTo(t, id, tc.payloadLen))
 			})
 			client := newBoundClient(t, ts.URL, bound)
-			_, err := client.Discover(context.Background())
+			_, err := client.Discover(context.Background(), 0)
 			if tc.wantErr {
 				var uerr *Error
 				if !errors.As(err, &uerr) || uerr.Kind != KindTooLarge {
@@ -118,7 +118,7 @@ func TestSSEEventBound(t *testing.T) {
 			return data.String()
 		})
 		client := newBoundClient(t, ts.URL, bound)
-		_, err := client.Discover(context.Background())
+		_, err := client.Discover(context.Background(), 0)
 		var uerr *Error
 		if !errors.As(err, &uerr) || uerr.Kind != KindTooLarge {
 			t.Fatalf("err = %v, want too-large kind for multi-line accumulation", err)
@@ -133,7 +133,7 @@ func TestSSEEventBound(t *testing.T) {
 			return "data: " + padTo(t, id, 200) // no trailing blank line
 		})
 		client := newBoundClient(t, ts.URL, 4096)
-		_, err := client.Discover(context.Background())
+		_, err := client.Discover(context.Background(), 0)
 		var uerr *Error
 		if !errors.As(err, &uerr) || uerr.Kind != KindTransport {
 			t.Fatalf("err = %v, want transport (closed without a response)", err)
@@ -184,7 +184,7 @@ func TestFiniteResponseStopsScanImmediately(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	start := time.Now()
-	if _, err := client.Discover(context.Background()); err != nil {
+	if _, err := client.Discover(context.Background(), 0); err != nil {
 		t.Fatalf("Discover: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 300*time.Millisecond {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/kritama/tama-link/internal/limits"
 	"github.com/kritama/tama-link/internal/profile"
 	"github.com/kritama/tama-link/internal/upstream"
 )
@@ -65,16 +66,23 @@ func New(cfg Config) (*Adapter, error) {
 
 // Connect authenticates, discovers, and verifies the pinned catalog. The
 // returned connection is the only path to upstream execution for this
-// profile; every verification below fails closed.
+// profile; every verification below fails closed. The bootstrap reads are
+// bounded by the implementation hard ceiling rather than the profile's
+// current response bound: the catalog is profile infrastructure, not a
+// submission's response, so a later, lower profile limit can never
+// constrain connection establishment or fail an already accepted
+// submission whose catalog no longer fits the lowered bound. A hostile
+// upstream is still bounded by the ceiling.
 func (a *Adapter) Connect(ctx context.Context) (*Connection, error) {
-	disc, err := a.upstream.Discover(ctx)
+	bootstrapBound := int64(limits.HardCeiling().ResponseBytes)
+	disc, err := a.upstream.Discover(ctx, bootstrapBound)
 	if err != nil {
 		return nil, classify(err)
 	}
 	if err := a.verifyDiscovery(disc); err != nil {
 		return nil, err
 	}
-	live, err := a.upstream.ListAllTools(ctx)
+	live, err := a.upstream.ListAllTools(ctx, bootstrapBound)
 	if err != nil {
 		return nil, classify(err)
 	}

@@ -103,11 +103,10 @@ func (s *Service) waitForState(ctx context.Context, sub *store.Submission, budge
 	for !submission.Terminal(sub.Status) {
 		select {
 		case <-ctx.Done():
-			// The caller gave up on waiting; the final state read must not
-			// be cancelled with it.
-			return s.reload(context.WithoutCancel(ctx), sub.ID)
+			// The caller gave up on waiting; report the freshest state.
+			return s.finalState(sub)
 		case <-deadline.C:
-			return s.reload(context.WithoutCancel(ctx), sub.ID)
+			return s.finalState(sub)
 		case <-time.After(awaitPollInterval):
 		}
 		reloaded, err := s.store.GetSubmission(ctx, sub.ID)
@@ -121,6 +120,27 @@ func (s *Service) waitForState(ctx context.Context, sub *store.Submission, budge
 		sub = reloaded
 	}
 	return sub, nil
+}
+
+// finalReadTimeout bounds the one final state read after the caller gave up
+// or the budget expired. The read must not be cancelled with the caller — a
+// fresh terminal state is more useful than the last snapshot — but it also
+// must not hold the MCP handler beyond the wait contract while SQLite is
+// contended or stalled. Tests shorten it through the variable.
+var finalReadTimeout = 2 * time.Second
+
+// finalState performs that final fresh read on an independent context with
+// its own short deadline. If the refresh does not complete in time, the
+// last snapshot is returned: it is at most one poll interval stale, and
+// the caller can await again.
+func (s *Service) finalState(sub *store.Submission) (*store.Submission, *contract.Error) {
+	ctx, cancel := context.WithTimeout(context.Background(), finalReadTimeout)
+	defer cancel()
+	reloaded, cerr := s.reload(ctx, sub.ID)
+	if cerr != nil {
+		return sub, nil
+	}
+	return reloaded, nil
 }
 
 func (s *Service) reload(ctx context.Context, id string) (*store.Submission, *contract.Error) {

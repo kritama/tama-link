@@ -311,6 +311,12 @@ Requirements:
   20 seconds and the maximum is 30 seconds.
 - Returning because the wait budget elapsed is a successful pending response,
   not a tool error.
+- Cancellation and budget expiry each trigger one final fresh state read on
+  an independent context with its own short deadline, so a contended or
+  stalled store cannot hold the handler beyond the wait contract after the
+  caller disconnected; if that refresh does not complete in time, the last
+  snapshot — at most one poll interval stale — is returned and the caller
+  can await again.
 - `cursor` is opaque and allows the caller to request only progress events
   after the last observed sequence.
 - A client may call `await` repeatedly until `terminal` is true.
@@ -605,7 +611,12 @@ descriptor digest
 The catalog snapshot allows Tama Link to advertise useful tools before
 interactive OAuth is available. On an authenticated upstream connection, Tama
 Link performs `server/discover` and reads the complete `tools/list`, then
-intersects the live catalog with the profile allowlist. A live tool that is not
+intersects the live catalog with the profile allowlist. The bootstrap reads
+are bounded by the implementation hard response ceiling rather than the
+profile's current response bound: the catalog is profile infrastructure, not
+a submission's response, so a later, lowered profile limit can never
+constrain connection establishment or irreversibly fail an already accepted
+submission whose catalog no longer fits the lowered bound. A live tool that is not
 in the profile is never exposed automatically. A pinned operation whose
 security-relevant descriptor has drifted fails closed with
 `operation_contract_mismatch` until the profile is reconciled.

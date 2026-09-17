@@ -130,8 +130,10 @@ func (c *Client) Endpoint() string { return c.endpoint.String() }
 
 // call performs one stateless request and returns the raw JSON-RPC result
 // value with the client's default capabilities and response bound.
-func (c *Client) call(ctx context.Context, method, name string, params json.RawMessage) (json.RawMessage, error) {
-	return c.callWithMeta(ctx, method, name, params, nil, 0)
+// maxResponseBytes bounds the response: zero uses the client's configured
+// bound.
+func (c *Client) call(ctx context.Context, method, name string, params json.RawMessage, maxResponseBytes int64) (json.RawMessage, error) {
+	return c.callWithMeta(ctx, method, name, params, nil, maxResponseBytes)
 }
 
 // callWithMeta performs one stateless finite request. metaOverride, when
