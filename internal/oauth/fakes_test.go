@@ -1,0 +1,774 @@
+package oauth
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sort"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/kritama/tama-link/internal/store"
+)
+
+// fakeSecrets is an in-memory SecretStore for tests. setDelay blocks
+// SetSecret so a test can hold the credential write open past a lease TTL;
+// deleteDelay blocks DeleteSecret the same way for the cleanup path.
+// failDelete makes DeleteSecret fail for one label so a test can prove a
+// deletion failure stays recoverable.
+type fakeSecrets struct {
+	mu          sync.Mutex
+	items       map[string][]byte
+	setDelay    time.Duration
+	deleteDelay time.Duration
+	failDelete  map[string]error
+	// setHook runs just before a set is applied, letting a test cancel
+	// the caller at the moment an uninterruptible write starts.
+	setHook func(label string)
+	// setDoneHook runs just after a set is applied, letting a test model
+	// a writer that lands between this write and its caller's follow-up.
+	setDoneHook func(label string)
+}
+
+func newFakeSecrets() *fakeSecrets {
+	return &fakeSecrets{items: map[string][]byte{}}
+}
+
+// secretLabels lists the stored labels, for slot-leak assertions.
+func (f *fakeSecrets) secretLabels() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]string, 0, len(f.items))
+	for label := range f.items {
+		out = append(out, label)
+	}
+	return out
+}
+
+// delayedSecrets fronts a shared fake store with one writer's own set delay,
+// so two fake processes can share the durable store while one write blocks.
+type delayedSecrets struct {
+	inner *fakeSecrets
+	delay time.Duration
+}
+
+func (d *delayedSecrets) GetSecret(label string) ([]byte, bool, error) {
+	return d.inner.GetSecret(label)
+}
+
+func (d *delayedSecrets) SetSecret(label string, data []byte) error {
+	if d.delay > 0 {
+		time.Sleep(d.delay)
+	}
+	d.inner.mu.Lock()
+	defer d.inner.mu.Unlock()
+	out := make([]byte, len(data))
+	copy(out, data)
+	d.inner.items[label] = out
+	return nil
+}
+
+func (d *delayedSecrets) DeleteSecret(label string) error {
+	return d.inner.DeleteSecret(label)
+}
+
+func (f *fakeSecrets) GetSecret(label string) ([]byte, bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	data, ok := f.items[label]
+	if !ok {
+		return nil, false, nil
+	}
+	out := make([]byte, len(data))
+	copy(out, data)
+	return out, true, nil
+}
+
+func (f *fakeSecrets) SetSecret(label string, data []byte) error {
+	if f.setHook != nil {
+		f.setHook(label)
+	}
+	if f.setDelay > 0 {
+		time.Sleep(f.setDelay)
+	}
+	f.mu.Lock()
+	out := make([]byte, len(data))
+	copy(out, data)
+	f.items[label] = out
+	f.mu.Unlock()
+	if f.setDoneHook != nil {
+		f.setDoneHook(label)
+	}
+	return nil
+}
+
+func (f *fakeSecrets) DeleteSecret(label string) error {
+	f.mu.Lock()
+	if f.deleteDelay > 0 {
+		d := f.deleteDelay
+		f.mu.Unlock()
+		time.Sleep(d)
+		f.mu.Lock()
+	}
+	defer f.mu.Unlock()
+	if err, ok := f.failDelete[label]; ok {
+		return err
+	}
+	delete(f.items, label)
+	return nil
+}
+
+// failDeletes makes the next DeleteSecret calls fail for the labels until
+// allowDeletes clears them.
+func (f *fakeSecrets) failDeletes(labels ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.failDelete == nil {
+		f.failDelete = map[string]error{}
+	}
+	for _, label := range labels {
+		f.failDelete[label] = errors.New("backend write failure")
+	}
+}
+
+// allowDeletes clears the deletion failures for the labels.
+func (f *fakeSecrets) allowDeletes(labels ...string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, label := range labels {
+		delete(f.failDelete, label)
+	}
+}
+
+// recordingSecrets counts SetSecret calls so a test can prove a gated
+// refresh never reached the credential write.
+type recordingSecrets struct {
+	*fakeSecrets
+	sets int
+}
+
+func (r *recordingSecrets) SetSecret(label string, data []byte) error {
+	r.sets++
+	return r.fakeSecrets.SetSecret(label, data)
+}
+
+// fakeLease is an in-memory Leaser. holdOther simulates another process
+// holding the lease; onClaim runs just before a claim succeeds, letting a
+// test write a replacement credential while the claimant waits.
+type fakeLease struct {
+	mu         sync.Mutex
+	holder     string
+	onClaim    func()
+	claims     int
+	released   int
+	renewals   int
+	loseRenew  bool
+	loseAfter  int
+	generation int
+	// invalidated is the durable invalidation marker: a known-invalid
+	// legacy grant that must not count as live.
+	invalidated bool
+
+	fence          *sharedFence
+	fenceCommitErr error
+	// retired records the retirement backlog per fenced stream: slots
+	// whose deletion failed and that a later refresh or logout must
+	// retry.
+	retired map[string]map[string]struct{}
+}
+
+func newFakeLease() *fakeLease {
+	f := &fakeLease{}
+	// The shared state always exists: in production the lease table and
+	// the credential fence live in the same SQLite store. Two simulated
+	// processes share it by pointing one lease's fence at the other's.
+	f.fence = newSharedFence()
+	return f
+}
+
+// sharedFence models the durable state two simulated processes share: the
+// fenced streams and the refresh-lease holder the fence commits are bound
+// to. Each process keeps its own fakeLease claim view, but a claim by
+// either process replaces the shared holder, which is what a lease-bound
+// fence commit checks. The fake models ownership only; the generation
+// arithmetic is covered by the store's own tests.
+type sharedFence struct {
+	mu sync.Mutex
+	// per fenced stream: the refresh credential and the client record.
+	states map[string]*fenceState
+	// lease ownership the fence commit verifies.
+	leaseHolder string
+}
+
+type fenceState struct {
+	generation int64
+	slot       string
+	found      bool
+}
+
+func newSharedFence() *sharedFence {
+	return &sharedFence{states: map[string]*fenceState{}}
+}
+
+// storeTestClient stores one client registration for a test: it claims
+// the refresh lease (the store commit is fenced to the claimed epoch) and
+// runs the production store path, so tests exercise the same protocol as
+// Register without running the full DCR flow.
+func storeTestClient(t *testing.T, c *Client, rec *ClientRecord) {
+	t.Helper()
+	if _, err := c.lease.ClaimLease(context.Background(), refreshLeaseName, c.owner, time.Minute); err != nil {
+		t.Fatalf("claim lease: %v", err)
+	}
+	if err := c.storeClient(context.Background(), rec, 0); err != nil {
+		t.Fatalf("storeClient: %v", err)
+	}
+}
+
+func (f *sharedFence) state(name string) *fenceState {
+	if st, ok := f.states[name]; ok {
+		return st
+	}
+	st := &fenceState{}
+	f.states[name] = st
+	return st
+}
+
+func (f *sharedFence) read(name string) (int64, string, bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.states[name]
+	if st == nil {
+		return 0, "", false
+	}
+	return st.generation, st.slot, st.found
+}
+
+// claimLease records one claim on the shared lease table: the last
+// claimer owns the lease, matching the test scenarios where a foreign
+// process takes over after the first holder's lease lapsed.
+func (f *sharedFence) claimLease(owner string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.leaseHolder = owner
+}
+
+func (f *sharedFence) releaseLease(owner string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.leaseHolder == owner {
+		f.leaseHolder = ""
+	}
+}
+
+func (f *sharedFence) commit(name string, generation int64, slot, leaseOwner string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.leaseHolder != leaseOwner {
+		return false
+	}
+	st := f.state(name)
+	if generation <= st.generation {
+		return false
+	}
+	st.generation = generation
+	st.slot = slot
+	st.found = true
+	return true
+}
+
+// clearIfOwned clears the named fence only when leaseOwner still owns the
+// shared lease. Returns whether it cleared.
+func (f *sharedFence) clearIfOwned(name, leaseOwner string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.leaseHolder != leaseOwner {
+		return false
+	}
+	f.states[name] = &fenceState{}
+	return true
+}
+
+func (f *fakeLease) holdOther() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.holder = "other-process"
+	if f.fence != nil {
+		f.fence.claimLease("other-process")
+	}
+}
+
+func (f *fakeLease) ClaimLease(_ context.Context, name, owner string, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	if name != refreshLeaseName || ttl <= 0 {
+		f.mu.Unlock()
+		return false, fmt.Errorf("unexpected lease name %q ttl %s", name, ttl)
+	}
+	if f.holder != "" && f.holder != owner {
+		f.claims++
+		f.mu.Unlock()
+		return false, nil
+	}
+	f.claims++
+	f.holder = owner
+	if f.fence != nil {
+		f.fence.claimLease(owner)
+	}
+	hook := f.onClaim
+	f.mu.Unlock()
+	if hook != nil {
+		// Runs with the claim recorded, so a hook can model a foreign
+		// takeover immediately after this claim wins.
+		hook()
+	}
+	return true, nil
+}
+
+func (f *fakeLease) LeaseGeneration(ctx context.Context, name, owner string) (int64, bool, error) {
+	// The production SQLite read observes the context; a canceled caller
+	// surfaces as an error rather than a lookup result.
+	if err := ctx.Err(); err != nil {
+		return 0, false, err
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if name != refreshLeaseName {
+		return 0, false, fmt.Errorf("unexpected lease name %q", name)
+	}
+	if f.holder == owner {
+		return int64(f.generation), true, nil
+	}
+	return 0, false, nil
+}
+
+func (f *fakeLease) CommitLease(_ context.Context, name, owner string, generation int64) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if name != refreshLeaseName {
+		return false, fmt.Errorf("unexpected lease name %q", name)
+	}
+	return f.holder == owner && int64(f.generation) == generation, nil
+}
+
+func (f *fakeLease) ReadCredentialFence(ctx context.Context, fenceName string) (int64, string, bool, error) {
+	// The production SQLite read observes the context; a canceled caller
+	// surfaces as an error rather than a lookup result.
+	if err := ctx.Err(); err != nil {
+		return 0, "", false, err
+	}
+	if f.fence == nil {
+		return 0, "", false, nil
+	}
+	gen, slot, found := f.fence.read(fenceName)
+	return gen, slot, found, nil
+}
+
+// CommitCredentialFence models the production gate: the fence generation
+// compare-and-swap plus the shared lease holder the commit must still own.
+// The fake checks ownership only; the epoch arithmetic is covered by the
+// store's own tests.
+func (f *fakeLease) CommitCredentialFence(ctx context.Context, commit store.CredentialFenceCommit) (bool, error) {
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if commit.LeaseName != refreshLeaseName {
+		return false, fmt.Errorf("unexpected lease name %q", commit.LeaseName)
+	}
+	if f.fenceCommitErr != nil {
+		return false, f.fenceCommitErr
+	}
+	if f.fence == nil {
+		// No shared durable state: the commit trivially lands.
+		return true, nil
+	}
+	if !f.fence.commit(commit.FenceName, commit.FenceGeneration, commit.Slot, commit.LeaseOwner) {
+		return false, nil
+	}
+	// Replaced slots are atomically enqueued for retirement retry with
+	// the advance, mirroring the production transaction.
+	if commit.PreviousSlot != "" {
+		f.retire(commit.FenceName, commit.PreviousSlot)
+	}
+	for _, label := range commit.RetiredLabels {
+		if label == "" || label == commit.PreviousSlot || label == commit.Slot {
+			continue
+		}
+		f.retire(commit.FenceName, label)
+	}
+	return true, nil
+}
+
+func (f *fakeLease) ClearCredentialFence(_ context.Context, fenceName, leaseName, leaseOwner string, leaseGeneration int64, retiredSlot string) (bool, error) {
+	if leaseName != refreshLeaseName {
+		return false, fmt.Errorf("unexpected lease name %q", leaseName)
+	}
+	if f.fence == nil {
+		// An absent fence is successfully cleared.
+		f.retire(fenceName, retiredSlot)
+		return true, nil
+	}
+	if f.leaseGen() != leaseGeneration {
+		return false, nil
+	}
+	if !f.fence.clearIfOwned(fenceName, leaseOwner) {
+		return false, nil
+	}
+	// The retired slot is atomically enqueued with the clear, mirroring
+	// the production transaction.
+	f.retire(fenceName, retiredSlot)
+	return true, nil
+}
+
+// leaseGen reports the caller's captured ownership epoch. The fake's
+// per-process generation is always zero, matching the captured value.
+func (f *fakeLease) leaseGen() int64 { return 0 }
+
+// retire records one slot for retirement retry; the empty slot is a no-op,
+// matching the store, where a clear or commit with nothing to retire
+// enqueues nothing.
+func (f *fakeLease) retire(fenceName, slot string) {
+	if slot == "" {
+		return
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.retired == nil {
+		f.retired = map[string]map[string]struct{}{}
+	}
+	if f.retired[fenceName] == nil {
+		f.retired[fenceName] = map[string]struct{}{}
+	}
+	f.retired[fenceName][slot] = struct{}{}
+}
+
+func (f *fakeLease) RetiredCredentialSlots(_ context.Context, fenceName string) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	slots := make([]string, 0, len(f.retired[fenceName]))
+	for slot := range f.retired[fenceName] {
+		slots = append(slots, slot)
+	}
+	sort.Strings(slots)
+	return slots, nil
+}
+
+func (f *fakeLease) ClearRetiredCredentialSlot(_ context.Context, fenceName, slot string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.retired[fenceName] != nil {
+		delete(f.retired[fenceName], slot)
+	}
+	return nil
+}
+
+func (f *fakeLease) RecordRetiredCredentialSlot(_ context.Context, fenceName, slot string) error {
+	f.retire(fenceName, slot)
+	return nil
+}
+
+func (f *fakeLease) MarkRefreshCredentialInvalidated(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.invalidated = true
+	return nil
+}
+
+func (f *fakeLease) RefreshCredentialInvalidated(context.Context) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.invalidated, nil
+}
+
+func (f *fakeLease) ClearRefreshCredentialInvalidation(context.Context) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.invalidated = false
+	return nil
+}
+
+// renewLease makes the next renewal report lost ownership, so the test can
+// prove a refresh aborts when it loses the lease mid-exchange.
+func (f *fakeLease) loseOnRenew() {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.loseRenew = true
+}
+
+func (f *fakeLease) RenewLease(_ context.Context, name, owner string, ttl time.Duration) (bool, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if name != refreshLeaseName || ttl <= 0 {
+		return false, fmt.Errorf("unexpected lease name %q ttl %s", name, ttl)
+	}
+	f.renewals++
+	if f.loseRenew {
+		f.holder = ""
+		if f.fence != nil {
+			f.fence.releaseLease(owner)
+		}
+		return false, nil
+	}
+	if f.loseAfter > 0 && f.renewals >= f.loseAfter {
+		f.holder = ""
+		if f.fence != nil {
+			f.fence.releaseLease(owner)
+		}
+		return false, nil
+	}
+	if f.holder == owner {
+		return true, nil
+	}
+	return false, nil
+}
+
+func (f *fakeLease) ReleaseLease(_ context.Context, name, owner string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if name != refreshLeaseName {
+		return fmt.Errorf("unexpected lease name %q", name)
+	}
+	if f.holder == owner {
+		f.holder = ""
+		f.released++
+		if f.fence != nil {
+			f.fence.releaseLease(owner)
+		}
+	}
+	return nil
+}
+
+// testClock is a mutable clock for deterministic expiry tests.
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func newTestClock(start time.Time) *testClock {
+	return &testClock{now: start}
+}
+
+func (c *testClock) nowFn() func() time.Time {
+	return func() time.Time {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		return c.now
+	}
+}
+
+func (c *testClock) set(t time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = t
+}
+
+func (c *testClock) current() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+// testBase is the canonical profile endpoint used by static tests.
+const (
+	testBase     = "https://tama.example"
+	testEndpoint = testBase + "/mcp/app"
+	testIssuer   = testBase + "/oauth"
+)
+
+// newStaticClient builds an OAuth client for the canonical static profile.
+func newStaticClient(t *testing.T, secrets *fakeSecrets, lease *fakeLease, clock *testClock) *Client {
+	t.Helper()
+	client, err := New(Config{
+		Endpoint:   testEndpoint,
+		Issuer:     testIssuer,
+		Secrets:    secrets,
+		Lease:      lease,
+		Clock:      clock.nowFn(),
+		HTTPClient: &http.Client{},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return client
+}
+
+// metadataServer serves protected-resource and authorization-server metadata
+// plus a token endpoint for one fixture pair.
+type metadataServer struct {
+	t         *testing.T
+	ts        *httptest.Server
+	prm       string
+	as        string
+	tokenBody string
+	// tokenStatus is the token endpoint's HTTP status; zero means 200.
+	tokenStatus    int
+	tokenDelay     time.Duration
+	tokenReq       *http.Request
+	tokenRaw       []byte
+	tokenCalls     int
+	tokenConcur    int
+	tokenMaxConcur int
+	tokenReqMu     sync.Mutex
+}
+
+func (s *metadataServer) start(t *testing.T) *metadataServer {
+	t.Helper()
+	s.t = t
+	s.ts = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/.well-known/oauth-protected-resource/mcp/app":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, s.prm)
+		case "/.well-known/oauth-authorization-server/oauth":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprint(w, s.as)
+		case "/oauth/token":
+			// Track the maximum concurrent in-flight token requests so a
+			// test can prove one process never rotates a refresh grant
+			// twice at once.
+			s.tokenReqMu.Lock()
+			s.tokenConcur++
+			if s.tokenConcur > s.tokenMaxConcur {
+				s.tokenMaxConcur = s.tokenConcur
+			}
+			s.tokenReqMu.Unlock()
+			defer func() {
+				s.tokenReqMu.Lock()
+				s.tokenConcur--
+				s.tokenReqMu.Unlock()
+			}()
+			if s.tokenDelay > 0 {
+				select {
+				case <-time.After(s.tokenDelay):
+				case <-r.Context().Done():
+					return
+				}
+			}
+			raw, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read token body: %v", err)
+			}
+			s.tokenReqMu.Lock()
+			s.tokenReq = r.Clone(context.Background())
+			s.tokenRaw = raw
+			s.tokenCalls++
+			s.tokenReqMu.Unlock()
+			w.Header().Set("Content-Type", "application/json")
+			status := s.tokenStatus
+			if status == 0 {
+				status = http.StatusOK
+			}
+			w.WriteHeader(status)
+			_, _ = fmt.Fprint(w, s.tokenBody)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(s.ts.Close)
+	return s
+}
+
+// clientForServer builds the test client against one metadata server so the
+// endpoint and issuer point at the fixture.
+func clientForServer(t *testing.T, server *metadataServer, secrets SecretStore, lease *fakeLease, clock *testClock) *Client {
+	t.Helper()
+	client, err := New(Config{
+		Endpoint:   server.ts.URL + "/mcp/app",
+		Issuer:     server.ts.URL + "/oauth",
+		Secrets:    secrets,
+		Lease:      lease,
+		Clock:      clock.nowFn(),
+		HTTPClient: &http.Client{},
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	return client
+}
+
+// serverMetadata is a validated Metadata value for one test server, used
+// directly by exchange and refresh tests.
+func serverMetadata(base string) *Metadata {
+	return &Metadata{
+		PRM: ProtectedResource{
+			Issuer:               base,
+			AuthorizationServers: []string{base + "/oauth"},
+			Resource:             base + "/mcp/app",
+		},
+		AS: AuthorizationServer{
+			Issuer:                   base + "/oauth",
+			AuthorizationEndpoint:    base + "/oauth/authorize",
+			TokenEndpoint:            base + "/oauth/token",
+			RegistrationEndpoint:     base + "/oauth/register",
+			CodeChallengeMethods:     []string{"S256"},
+			GrantTypes:               []string{"authorization_code", "refresh_token"},
+			TokenEndpointAuthMethods: []string{"client_secret_basic"},
+		},
+		ASURL: base + "/oauth",
+	}
+}
+
+// seedCredentials stores one client registration and one refresh credential
+// so exchange and refresh tests can start from a logged-in profile.
+func seedCredentials(t *testing.T, secrets *fakeSecrets, clientID, clientSecret, tokenEndpoint, issuer, refreshToken string) {
+	t.Helper()
+	rec := ClientRecord{ClientID: clientID, ClientSecret: clientSecret, AuthMethod: "client_secret_basic", Issuer: issuer, RegisteredAt: time.Now().UTC()}
+	recData, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal client record: %v", err)
+	}
+	if err := secrets.SetSecret(labelClient, recData); err != nil {
+		t.Fatalf("store client: %v", err)
+	}
+	cred := refreshCredential{RefreshToken: refreshToken, TokenEndpoint: tokenEndpoint, Issuer: issuer, Updated: time.Now().UTC()}
+	credData, err := json.Marshal(cred)
+	if err != nil {
+		t.Fatalf("marshal credential: %v", err)
+	}
+	if err := secrets.SetSecret(labelRefresh, credData); err != nil {
+		t.Fatalf("store credential: %v", err)
+	}
+}
+
+// serverPRM is a valid protected-resource document for one server.
+func serverPRM(serverURL string) string {
+	endpoint := serverURL + "/mcp/app"
+	return fmt.Sprintf(`{"issuer":%q,"authorization_servers":[%q],"resource":%q}`, serverURL, serverURL+"/oauth", endpoint)
+}
+
+// serverAS is a valid authorization-server document for one server.
+func serverAS(serverURL string) string {
+	issuer := serverURL + "/oauth"
+	return fmt.Sprintf(`{
+		"issuer": %q,
+		"authorization_endpoint": %q,
+		"token_endpoint": %q,
+		"registration_endpoint": %q,
+		"code_challenge_methods_supported": ["S256"],
+		"grant_types_supported": ["authorization_code", "refresh_token"],
+		"response_types_supported": ["code"],
+		"token_endpoint_auth_methods_supported": ["client_secret_basic"]
+	}`, issuer, serverURL+"/oauth/authorize", serverURL+"/oauth/token", serverURL+"/oauth/register")
+}
+
+// liveCredential reads the credential the fence points at (or the legacy
+// label when no fence has been committed), for test assertions.
+func liveCredential(t *testing.T, lease *fakeLease, secrets *fakeSecrets) string {
+	t.Helper()
+	_, slot, found, err := lease.ReadCredentialFence(context.Background(), store.RefreshFenceName)
+	if err != nil {
+		t.Fatalf("ReadCredentialFence: %v", err)
+	}
+	label := labelRefresh
+	if found {
+		label = slot
+	}
+	data, ok, err := secrets.GetSecret(label)
+	if err != nil || !ok {
+		t.Fatalf("credential at %s: found=%v err=%v", label, ok, err)
+	}
+	return string(data)
+}

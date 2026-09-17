@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strings"
 	"testing"
@@ -17,10 +18,8 @@ import (
 	"github.com/kritama/tama-link/internal/profile"
 )
 
-// demoProfileJSON renders one valid minimal profile for the e2e tests.
-func demoProfileJSON(t *testing.T) []byte {
-	t.Helper()
-
+// demoProfileForWrite builds the demo profile without test helpers.
+func demoProfileForWrite() profile.Profile {
 	op := catalog.Descriptor{
 		Name:        "message",
 		Title:       "Message",
@@ -31,7 +30,7 @@ func demoProfileJSON(t *testing.T) []byte {
 	}
 	digest, err := op.ComputeDigest()
 	if err != nil {
-		t.Fatalf("compute descriptor digest: %v", err)
+		panic(err)
 	}
 	op.Digest = digest
 
@@ -42,18 +41,27 @@ func demoProfileJSON(t *testing.T) []byte {
 		Endpoint:     "https://tama.example/mcp/app",
 		Issuer:       "https://auth.example",
 		Instructions: "Pinned upstream instructions.",
-		Bounds:       profile.Bounds{ProtocolMin: "2025-03-26", ProtocolMax: "2025-11-25"},
+		Bounds:       profile.Bounds{ProtocolMin: "2026-07-28", ProtocolMax: "2026-07-28"},
 		State:        profile.StateRefs{Database: "default", Credentials: "default"},
 		Operations:   []catalog.Descriptor{op},
 	}
 	if err := p.Validate("demo"); err != nil {
-		t.Fatalf("validate demo profile: %v", err)
+		panic(err)
 	}
-	data, err := json.Marshal(p)
+	return p
+}
+
+// writeDemoProfile installs the demo profile under configDir.
+func writeDemoProfile(configDir string) error {
+	profilesDir := filepath.Join(configDir, "profiles")
+	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
+		return err
+	}
+	data, err := json.Marshal(demoProfileForWrite())
 	if err != nil {
-		t.Fatalf("marshal demo profile: %v", err)
+		return err
 	}
-	return data
+	return os.WriteFile(filepath.Join(profilesDir, "demo.json"), data, 0o600)
 }
 
 // buildBinary compiles the real command so the tests exercise the same
@@ -95,19 +103,85 @@ func TestServeBinaryFailsCleanlyWithoutProfile(t *testing.T) {
 	}
 }
 
-// TestServeBinaryStdioHandshake proves the Phase 0 exit criterion end to end:
-// serve starts the two-tool STDIO MCP server for an existing profile.
-func TestServeBinaryStdioHandshake(t *testing.T) {
-	t.Parallel()
+// serveCredentialFailure runs serve with no reachable credential backend
+// and asserts the fail-closed contract: fast exit 2, empty stdout, and the
+// stable unavailable message on stderr.
+func serveCredentialFailure(t *testing.T, bin string) {
+	t.Helper()
+	configDir := t.TempDir()
+	if err := writeDemoProfile(configDir); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	cmd := exec.Command(bin, "serve", "--profile", "demo", "--config-dir", configDir)
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	done := make(chan error, 1)
+	go func() { done <- cmd.Run() }()
+	select {
+	case err := <-done:
+		exitErr, ok := err.(*exec.ExitError)
+		if !ok || exitErr.ExitCode() != 2 {
+			t.Fatalf("exit = %v, want code 2", err)
+		}
+	case <-time.After(25 * time.Second):
+		t.Fatal("serve did not fail fast without a credential backend")
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), "credential backend unavailable") {
+		t.Fatalf("stderr = %q, want credential backend unavailable", stderr.String())
+	}
+}
 
+// e2eKeyringEnv opts the handshake test into the real platform keyring.
+// Unset, the test is hermetic and headless-safe: the spawned serve process
+// starts with no D-Bus session behind it, so the keyring library registers
+// no secure backend at its init and the test can never trigger an
+// interactive unlock prompt.
+const e2eKeyringEnv = "TAMA_LINK_E2E_KEYRING"
+
+// TestServeBinaryStdioHandshake proves the Phase 0 exit criterion end to end:
+// serve starts the two-tool STDIO MCP server for an existing profile. When
+// the environment has no usable credential backend, the same command must
+// fail fast and cleanly instead of hanging.
+//
+// The branch is chosen by TAMA_LINK_E2E_KEYRING, never by probing the test
+// process's own keyring: the keyring library registers its backends in init
+// from the live environment and caches the session bus, so an in-process
+// probe would answer for the desktop, not for the headless serve process.
+// Unset (the CI default), the spawned serve sees a dead D-Bus socket and
+// must fail cleanly. Set to 1, the test runs the full handshake against the
+// real platform keyring; an interactive unlock prompt may appear and must
+// be answered within the probe bound.
+func TestServeBinaryStdioHandshake(t *testing.T) {
+	// Not parallel: the test pins environment for the spawned serve
+	// process.
+	hermetic := os.Getenv(e2eKeyringEnv) == ""
+	if hermetic {
+		// The dead-bus environment only constrains the SecretService
+		// backend: darwin selects Keychain and windows selects the
+		// Windows credential store, where the pinned address changes
+		// nothing and the spawned serve can complete its probe. Skip the
+		// platforms the hermetic branch cannot control instead of failing
+		// its exit-code assertions.
+		switch runtime.GOOS {
+		case "linux":
+			t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+filepath.Join(t.TempDir(), "no-such-bus"))
+		default:
+			t.Skipf("hermetic credential failure is only controllable on linux (D-Bus); %s selects a different platform backend", runtime.GOOS)
+		}
+	}
 	bin := buildBinary(t)
 
-	configDir := t.TempDir()
-	profilesDir := filepath.Join(configDir, "profiles")
-	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
-		t.Fatalf("create profiles dir: %v", err)
+	if hermetic {
+		serveCredentialFailure(t, bin)
+		return
 	}
-	if err := os.WriteFile(filepath.Join(profilesDir, "demo.json"), demoProfileJSON(t), 0o600); err != nil {
+
+	configDir := t.TempDir()
+	if err := writeDemoProfile(configDir); err != nil {
 		t.Fatalf("write profile: %v", err)
 	}
 

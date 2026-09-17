@@ -3,7 +3,6 @@ package server
 
 import (
 	"context"
-	"sort"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -26,9 +25,18 @@ const (
 	notImplementedMessage = "Tama Link's upstream adapter is not implemented in the repository foundation"
 )
 
+// App is the application service behind the two downstream tools. Handlers
+// only validate and translate: persistence, upstream transport, OAuth, and
+// scheduling live in the service and its dependencies.
+type App interface {
+	Submit(ctx context.Context, in contract.SubmitInput) (contract.SubmitOutput, *contract.Error)
+	Await(ctx context.Context, in contract.AwaitInput) (contract.AwaitOutput, *contract.Error)
+}
+
 // New creates a client-facing MCP server for one validated profile with
-// exactly the submit and await tools.
-func New(p *profile.Profile, buildVersion string) *mcp.Server {
+// exactly the submit and await tools. When app is nil the tools fail with
+// not_implemented, which is the repository-foundation behavior.
+func New(p *profile.Profile, buildVersion string, app App) *mcp.Server {
 	ops := p.Catalog().Callable()
 
 	instance := mcp.NewServer(
@@ -36,18 +44,75 @@ func New(p *profile.Profile, buildVersion string) *mcp.Server {
 		&mcp.ServerOptions{Instructions: composeInstructions(p.Instructions)},
 	)
 
+	var submitOp submitOperation = submit
+	var awaitOp awaitOperation = await
+	if app != nil {
+		submitOp = appSubmitOperation(app)
+		awaitOp = appAwaitOperation(app)
+	}
+
 	instance.AddTool(&mcp.Tool{
 		Name:        contract.ToolSubmit,
 		Description: composeSubmitDescription(ops),
-		InputSchema: submitInputSchema(ops.Names()),
-	}, submitHandler(ops.Names(), submit))
+		InputSchema: submitInputSchema(),
+	}, submitHandler(submitOp))
 
-	mcp.AddTool(instance, &mcp.Tool{
+	instance.AddTool(&mcp.Tool{
 		Name:        contract.ToolAwait,
 		Description: awaitDescription,
-	}, await)
+		InputSchema: awaitInputSchema(),
+	}, awaitHandler(awaitOp))
 
 	return instance
+}
+
+// awaitInputSchema describes the stable await fields. input_responses is a
+// free-form object keyed by outstanding input-request identifiers; its values
+// are validated against the request schema at the application boundary.
+func awaitInputSchema() map[string]any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"submission_id": map[string]any{
+				"type":        "string",
+				"description": "identifier returned by submit",
+			},
+			"timeout_ms": map[string]any{
+				"type":        "integer",
+				"minimum":     0,
+				"description": "maximum wait for this call; zero uses the profile default",
+			},
+			"cursor": map[string]any{
+				"type":        "string",
+				"description": "opaque progress cursor from a previous await; replay from this cursor",
+			},
+			"input_responses": map[string]any{
+				"type":        "object",
+				"description": "responses to outstanding input_required requests, keyed by input request identifier",
+			},
+		},
+		"required": []string{"submission_id"},
+	}
+}
+
+func appSubmitOperation(app App) submitOperation {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in contract.SubmitInput) (*mcp.CallToolResult, any, error) {
+		out, appErr := app.Submit(ctx, in)
+		if appErr != nil {
+			return &mcp.CallToolResult{IsError: true}, contract.ErrorOutput{Error: appErr}, nil
+		}
+		return nil, out, nil
+	}
+}
+
+func appAwaitOperation(app App) awaitOperation {
+	return func(ctx context.Context, _ *mcp.CallToolRequest, in contract.AwaitInput) (*mcp.CallToolResult, any, error) {
+		out, appErr := app.Await(ctx, in)
+		if appErr != nil {
+			return &mcp.CallToolResult{IsError: true}, contract.ErrorOutput{Error: appErr}, nil
+		}
+		return nil, out, nil
+	}
 }
 
 // composeInstructions joins Tama Link's workflow with the profile's pinned
@@ -69,18 +134,19 @@ func composeSubmitDescription(ops catalog.Catalog) string {
 	return submitBaseDescription + "\n\n" + signatures
 }
 
-// submitInputSchema constrains tool to the approved operation names.
-func submitInputSchema(names []string) map[string]any {
-	sorted := append([]string(nil), names...)
-	sort.Strings(sorted)
-
+// submitInputSchema describes the stable submit fields. The tool name is
+// deliberately not constrained to the current catalog: an exact retry of
+// an accepted request must reach the application, where idempotency
+// reconciliation runs before the catalog check, and the catalog check
+// enforces the profile only for genuinely new work. The approved
+// operations stay advertised in the tool description.
+func submitInputSchema() map[string]any {
 	return map[string]any{
 		"type": "object",
 		"properties": map[string]any{
 			"tool": map[string]any{
 				"type":        "string",
-				"enum":        sorted,
-				"description": "upstream Tama tool name allowed by the selected profile",
+				"description": "upstream Tama tool name submitted against the selected profile",
 			},
 			"arguments": map[string]any{
 				"type":        "object",

@@ -1,7 +1,10 @@
 package contract
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"io"
 	"time"
 )
 
@@ -10,6 +13,33 @@ type AwaitInput struct {
 	SubmissionID string `json:"submission_id" jsonschema:"opaque Tama Link submission identifier"`
 	Cursor       string `json:"cursor,omitempty" jsonschema:"opaque progress cursor returned by an earlier await call"`
 	TimeoutMS    int    `json:"timeout_ms,omitempty" jsonschema:"bounded long-poll duration in milliseconds"`
+	// InputResponses answers outstanding input requests while the state is
+	// input_required. Keys are outstanding input-request IDs and values are
+	// the validated protocol response for that request. Partial maps are
+	// allowed; at most one upstream update is sent per await call.
+	InputResponses map[string]json.RawMessage `json:"input_responses,omitempty" jsonschema:"responses keyed by outstanding input-request ID"`
+}
+
+// DecodeAwaitInput decodes the raw downstream tool arguments without routing
+// arbitrary JSON numbers through float64.
+func DecodeAwaitInput(raw json.RawMessage) (AwaitInput, error) {
+	if len(raw) == 0 {
+		raw = json.RawMessage(`{}`)
+	}
+
+	var input AwaitInput
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&input); err != nil {
+		return AwaitInput{}, fmt.Errorf("decode await input: %w", err)
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return AwaitInput{}, fmt.Errorf("await input contains trailing data")
+	}
+	if input.SubmissionID == "" {
+		return AwaitInput{}, fmt.Errorf("submission_id is required")
+	}
+	return input, nil
 }
 
 // Step is a bounded step counter within an operation. Unknown values are
@@ -79,4 +109,8 @@ type AwaitOutput struct {
 	Error        *Error     `json:"error,omitempty"`
 	CompletedAt  *time.Time `json:"completed_at,omitempty"`
 	NextPollMS   int        `json:"next_poll_ms,omitempty"`
+	// InputRequests carries the validated outstanding input-request map while
+	// the state is input_required. The same local submission and cursor are
+	// retained; input_responses on a later await answers the requests.
+	InputRequests json.RawMessage `json:"input_requests,omitempty"`
 }

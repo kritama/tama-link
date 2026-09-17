@@ -1,0 +1,394 @@
+package application
+
+import (
+	"context"
+	"encoding/json"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/kritama/tama-link/internal/catalog"
+	"github.com/kritama/tama-link/internal/contract"
+	"github.com/kritama/tama-link/internal/limits"
+	"github.com/kritama/tama-link/internal/store"
+)
+
+// awaitTerminal polls await until the submission is terminal or the test
+// deadline passes. It returns the terminal output.
+func awaitTerminal(t *testing.T, svc *Service, id string) contract.AwaitOutput {
+	t.Helper()
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		out, appErr := svc.Await(context.Background(), contract.AwaitInput{SubmissionID: id, TimeoutMS: 200})
+		if appErr != nil {
+			t.Fatalf("await: %s", appErr.Message)
+		}
+		if out.Terminal {
+			return out
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("submission %s did not reach a terminal state", id)
+	return contract.AwaitOutput{}
+}
+
+func TestAwaitUnknownSubmission(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, _, _ := fixtureApp(t, f)
+
+	_, appErr := svc.Await(context.Background(), contract.AwaitInput{SubmissionID: "nope"})
+	if appErr == nil || appErr.Code != contract.CodeSubmissionNotFound {
+		t.Fatalf("error = %+v, want submission_not_found", appErr)
+	}
+}
+
+func TestAwaitValidation(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, _, _ := fixtureApp(t, f)
+	id := submitStatus(t, svc, "await-val")
+
+	cases := []struct {
+		name string
+		in   contract.AwaitInput
+	}{
+		{name: "bad cursor", in: contract.AwaitInput{SubmissionID: id, Cursor: "not-a-number"}},
+		{name: "negative timeout", in: contract.AwaitInput{SubmissionID: id, TimeoutMS: -1}},
+		{name: "timeout above max", in: contract.AwaitInput{SubmissionID: id, TimeoutMS: 10 * 3600 * 1000}},
+		{name: "input responses on non-input state",
+			in: contract.AwaitInput{SubmissionID: id, InputResponses: map[string]json.RawMessage{"r": json.RawMessage(`{}`)}}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			_, appErr := svc.Await(context.Background(), tc.in)
+			if appErr == nil || appErr.Code != contract.CodeInvalidRequest {
+				t.Fatalf("error = %+v, want invalid_request", appErr)
+			}
+		})
+	}
+}
+
+func TestAwaitCursorReplay(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, _, _ := fixtureApp(t, f)
+	id := submitStatus(t, svc, "cursor-1")
+
+	out := awaitTerminal(t, svc, id)
+	if out.Cursor == "" {
+		t.Fatal("terminal await returned no cursor")
+	}
+	if len(out.Events) == 0 {
+		t.Fatal("terminal await returned no events")
+	}
+
+	// Replaying from the final cursor returns the terminal state with no
+	// new events.
+	replay, appErr := svc.Await(context.Background(), contract.AwaitInput{SubmissionID: id, Cursor: out.Cursor})
+	if appErr != nil {
+		t.Fatalf("replay: %s", appErr.Message)
+	}
+	if len(replay.Events) != 0 {
+		t.Fatalf("replay returned %d new events, want 0", len(replay.Events))
+	}
+	if !replay.Terminal || replay.Status != contract.StatusCompleted {
+		t.Fatalf("replay status = %s terminal=%v", replay.Status, replay.Terminal)
+	}
+}
+
+func TestAwaitFailureMapping(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	f.fail.Store(true)
+	svc, _, _ := fixtureApp(t, f)
+
+	id := submitStatus(t, svc, "fail-1")
+	out := awaitTerminal(t, svc, id)
+	if out.Status != contract.StatusFailed {
+		t.Fatalf("status = %s, want failed", out.Status)
+	}
+	if out.Error == nil {
+		t.Fatal("failed await returned no error")
+	}
+	if out.Error.Retryable {
+		t.Fatalf("terminal error must not be retryable: %+v", out.Error)
+	}
+}
+
+func TestAwaitCancellationStopsWait(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, _, _ := fixtureApp(t, f)
+	id := submitStatus(t, svc, "cancel-1")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	start := time.Now()
+	// The fixture completes quickly, but a long timeout forces the await to
+	// wait; cancellation must end the local wait promptly.
+	_, appErr := svc.Await(ctx, contract.AwaitInput{SubmissionID: id, TimeoutMS: 30000})
+	if appErr != nil {
+		t.Fatalf("await after cancel: %s", appErr.Message)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("await waited %s after cancellation", elapsed)
+	}
+}
+
+func TestSubmitUnexpectedTaskResultFailsContractMismatch(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	f.taskResult.Store(true)
+	svc, _, _ := fixtureApp(t, f)
+
+	id := submitStatus(t, svc, "task-mismatch")
+	out := awaitTerminal(t, svc, id)
+	if out.Status != contract.StatusFailed {
+		t.Fatalf("status = %s, want failed", out.Status)
+	}
+	if out.Error == nil || out.Error.Code != contract.CodeOperationContractMismatch {
+		t.Fatalf("error = %+v, want operation_contract_mismatch", out.Error)
+	}
+	// The dedicated unexpected-task message, not the catalog-drift message:
+	// the two causes share a code but must stay distinguishable.
+	const want = "The upstream returned a task result for a pinned synchronous operation."
+	if out.Error.Message != want {
+		t.Fatalf("message = %q, want %q", out.Error.Message, want)
+	}
+	if out.Error.Retryable {
+		t.Fatalf("error = %+v, must not be retryable", out.Error)
+	}
+}
+
+// TestSubmitStaleDescriptorDigestFailsContractMismatch pins the replay
+// contract: a durable submission whose accepted descriptor digest does not
+// match the connection's effective descriptor is not executed. This is the
+// crash-reconcile scenario: the profile changed to a different descriptor
+// under the same tool name while the submission was pending.
+func TestSubmitStaleDescriptorDigestFailsContractMismatch(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, st, _ := fixtureApp(t, f)
+
+	// Create the durable submission directly with a foreign accepted
+	// digest: the store takes the digest verbatim at creation, which is
+	// exactly what a reconciled profile would have recorded before the
+	// change.
+	sub, _, err := st.CreateSubmission(context.Background(), store.NewSubmission{
+		ID:               "sub-stale-digest",
+		ClientRequestID:  "stale-digest",
+		Tool:             "status",
+		Strategy:         string(catalog.StrategyLocalReplayable),
+		DescriptorDigest: "sha256:stale-different-contract",
+		Arguments:        json.RawMessage(`{"detail":"unit"}`),
+		RequestArguments: json.RawMessage(`{"detail":"unit"}`),
+		ProtocolVersion:  "2026-07-28",
+		AdapterVersion:   "test-adapter",
+	})
+	if err != nil {
+		t.Fatalf("CreateSubmission: %v", err)
+	}
+
+	out := awaitTerminal(t, svc, sub.ID)
+	if out.Status != contract.StatusFailed {
+		t.Fatalf("status = %s, want failed", out.Status)
+	}
+	if out.Error == nil || out.Error.Code != contract.CodeOperationContractMismatch {
+		t.Fatalf("error = %+v, want operation_contract_mismatch", out.Error)
+	}
+	if got := f.calls.Load(); got != 0 {
+		t.Fatalf("upstream received %d calls, want 0 (stale digest must fail before execution)", got)
+	}
+}
+
+func TestSubmitResultTooLargeFails(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	lim := limits.Default()
+	lim.ResultBytes = 16 // the fixture result is larger than this
+	svc, _, _ := fixtureAppLimits(t, f, lim)
+
+	id := submitStatus(t, svc, "large-1")
+	out := awaitTerminal(t, svc, id)
+	if out.Status != contract.StatusFailed {
+		t.Fatalf("status = %s, want failed", out.Status)
+	}
+	if out.Error == nil || out.Error.Code != contract.CodeResultTooLarge {
+		t.Fatalf("error = %+v, want result_too_large", out.Error)
+	}
+	if out.Result != nil {
+		t.Fatalf("oversized result must never be returned: %+v", out.Result)
+	}
+}
+
+// TestAwaitRejectsOversizedTimeoutBeforeConversion pins the overflow
+// guard: a timeout_ms beyond the profile maximum is rejected as
+// invalid_request before any duration conversion, where on 64-bit builds
+// the multiplication would wrap negative and bypass the maximum.
+func TestAwaitRejectsOversizedTimeoutBeforeConversion(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, _, _ := fixtureApp(t, f)
+	subID := submitStatus(t, svc, "timeout-1")
+
+	out, appErr := svc.Await(context.Background(), contract.AwaitInput{
+		SubmissionID: subID,
+		TimeoutMS:    int(^uint(0) >> 1), // math.MaxInt64
+	})
+	if appErr == nil || appErr.Code != contract.CodeInvalidRequest {
+		t.Fatalf("Await = %+v err=%v, want invalid_request for an oversized timeout", out, appErr)
+	}
+}
+
+// TestAwaitRejectsCursorBeyondSequence pins the cursor bound: a
+// syntactically valid cursor greater than the submission's sequence (for
+// example copied from another submission) is rejected instead of echoed,
+// which would filter out every genuine event until the sequence caught up.
+func TestAwaitRejectsCursorBeyondSequence(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, st, _ := fixtureApp(t, f)
+	subID := submitStatus(t, svc, "cursor-1")
+
+	sub, err := st.GetSubmission(context.Background(), subID)
+	if err != nil {
+		t.Fatalf("GetSubmission: %v", err)
+	}
+
+	out, appErr := svc.Await(context.Background(), contract.AwaitInput{
+		SubmissionID: subID,
+		Cursor:       "999999",
+	})
+	if appErr == nil || appErr.Code != contract.CodeInvalidRequest {
+		t.Fatalf("Await = %+v err=%v, want invalid_request for a cursor beyond sequence %d", out, appErr, sub.Sequence)
+	}
+
+	// A cursor equal to the current sequence still works and echoes it.
+	if _, appErr := svc.Await(context.Background(), contract.AwaitInput{
+		SubmissionID: subID,
+		Cursor:       strconv.FormatInt(sub.Sequence, 10),
+	}); appErr != nil {
+		t.Fatalf("await at current sequence: %s", appErr.Message)
+	}
+}
+
+// queuedSubmission builds a service without a started worker, so the
+// submitted status tool stays non-terminal in its accepted state.
+func queuedSubmission(t *testing.T, f *fakeTama) (*Service, *store.Store, string) {
+	t.Helper()
+	cfg := fixtureConfigFor(t, f, limits.Default())
+	svc, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = cfg.Store.Close() })
+	id := submitStatus(t, svc, "queued-1")
+	return svc, cfg.Store, id
+}
+
+// TestAwaitFinalReadDeadlineFallsBackToSnapshot pins the deadline path of
+// the final reload: when the independent final-read deadline expires, the
+// last snapshot is returned as a successful pending response.
+func TestAwaitFinalReadDeadlineFallsBackToSnapshot(t *testing.T) {
+	t.Parallel()
+
+	setFinalReadTimeout(time.Nanosecond)
+	t.Cleanup(func() { setFinalReadTimeout(0) })
+
+	f := newFakeTama(t)
+	svc, st, id := queuedSubmission(t, f)
+	sub, err := st.GetSubmission(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetSubmission: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	out, appErr := svc.Await(ctx, contract.AwaitInput{SubmissionID: id, TimeoutMS: 30000})
+	if appErr != nil {
+		t.Fatalf("await after the final-read deadline = %s", appErr.Message)
+	}
+	if out.Error != nil {
+		t.Fatalf("await error = %+v, want a pending snapshot response", out.Error)
+	}
+	if out.Status != sub.Status {
+		t.Fatalf("status = %s, want the last %s snapshot", out.Status, sub.Status)
+	}
+}
+
+// TestAwaitFinalReadFailurePropagates pins that only the expiry of the
+// independent final-read deadline falls back to the snapshot: a real
+// storage failure during the final reload reaches the caller instead of
+// being reported as a successful pending response.
+func TestAwaitFinalReadFailurePropagates(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, st, id := queuedSubmission(t, f)
+
+	// Fail the store while the wait is in flight but before the caller
+	// cancels, so the final reload fails with a real storage error while
+	// its independent deadline is still live.
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, appErr := svc.Await(ctx, contract.AwaitInput{SubmissionID: id, TimeoutMS: 30000})
+	// The mapped code depends on the store failure mode (a closed database
+	// surfaces as internal); the pinned behavior is that the failure
+	// reaches the caller instead of a snapshot-shaped success.
+	if appErr == nil {
+		t.Fatal("await succeeded on a failed final read, want the storage error to propagate")
+	}
+}
+
+// TestAwaitTerminalOmitsPollingGuidance pins the response contract: a
+// terminal await response omits next_poll_ms entirely, so a client
+// scheduling retries off the field stops once terminal is true, while a
+// pending response still carries the guidance.
+func TestAwaitTerminalOmitsPollingGuidance(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, _, _ := fixtureApp(t, f)
+	id := submitStatus(t, svc, "poll-1")
+	out := awaitTerminal(t, svc, id)
+	if !out.Terminal {
+		t.Fatalf("status = %s, want terminal", out.Status)
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal terminal output: %v", err)
+	}
+	if strings.Contains(string(data), "next_poll_ms") {
+		t.Fatalf("terminal response carries polling guidance: %s", data)
+	}
+
+	// The pending branch still carries the guidance for a non-terminal
+	// submission.
+	pendingOut := svc.buildOutput(&store.Submission{ID: "sub_pending", Tool: "status", Status: contract.StatusAccepted}, 0)
+	if pendingOut.Terminal {
+		t.Fatal("pending output reported terminal")
+	}
+	pendingData, err := json.Marshal(pendingOut)
+	if err != nil {
+		t.Fatalf("marshal pending output: %v", err)
+	}
+	if !strings.Contains(string(pendingData), "next_poll_ms") {
+		t.Fatalf("pending response lost polling guidance: %s", pendingData)
+	}
+}

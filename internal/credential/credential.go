@@ -6,9 +6,12 @@
 package credential
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"runtime"
+	"time"
 
 	keyring "github.com/99designs/keyring"
 )
@@ -43,9 +46,17 @@ func secureBackends() []keyring.BackendType {
 	}
 }
 
+// probeTimeout bounds the startup availability probe. It is deliberately
+// short and fixed in the binary: Tama Link starts headless and must never
+// hang on an interactive keyring unlock prompt. A backend that cannot
+// complete a write within the window is unavailable, and serve fails fast
+// with a clear error. Tests in this package shorten the window through the
+// variable; production never extends it.
+var probeTimeout = 5 * time.Second
+
 // New opens the secure credential backend for profile and namespaces it by
 // profile. It fails closed with ErrUnavailable when no secure backend is
-// available.
+// available or cannot complete an availability probe.
 func New(profile string) (*Keyring, error) {
 	if profile == "" {
 		return nil, errors.New("credential: profile name is required")
@@ -58,7 +69,49 @@ func New(profile string) (*Keyring, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
+	if err := probeBackend(profile, kr); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
+	}
 	return &Keyring{kr: kr, prefix: profile + "/"}, nil
+}
+
+// probeBackend verifies that the backend completes a Set/Get/Remove cycle
+// on one disposable profile-scoped entry. Platform backends can accept a
+// connection while still being unable to complete a write, so connect
+// success alone is not availability.
+//
+// The probe runs through the process-wide probe worker instead of an
+// abandoned goroutine per attempt: a backend that blocks indefinitely
+// pins exactly one worker, and retries through New fail fast at the
+// deadline without adding workers.
+func probeBackend(profile string, kr keyring.Keyring) error {
+	// The probe key is unique per invocation: two Tama Link processes for
+	// the same profile can start concurrently, and a shared probe key lets
+	// one process delete the entry the other is still reading, reporting a
+	// healthy keyring as unavailable.
+	key, err := probeKey(profile)
+	if err != nil {
+		return err
+	}
+	return sharedRunner().probe(kr, key)
+}
+
+// probeKey returns one unguessable per-invocation probe key inside the
+// profile namespace.
+func probeKey(profile string) (string, error) {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("generate probe key: %w", err)
+	}
+	return fmt.Sprintf("%s/__probe_%s", profile, hex.EncodeToString(b[:])), nil
+}
+
+// NewWithBackend namespaces an already-open backend under namespace. The
+// production entry point is New, which resolves the platform backend for the
+// canonical profile namespace; managed installations and tests that pin
+// their own backend use this constructor.
+func NewWithBackend(namespace string, kr keyring.Keyring) *Keyring {
+	return newWith(namespace, kr)
 }
 
 // newWith builds a Keyring over an already-open backend. It is used by tests

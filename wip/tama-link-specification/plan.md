@@ -6,14 +6,16 @@ This plan sequences the work required to satisfy the Tama Link specification and
 records the concrete decisions the spec leaves open. It is grounded in the
 surrounding repositories this proxy actually integrates with:
 
-- `tama-mcp` — next-generation MCP `2026-07-28` server library (Phase 4 target);
+- `tama-mcp` — the MCP `2026-07-28` server library and upstream wire contract
+  for Phase 2; this plan is reconciled to specification commit
+  `6b5db00018d2774834db5a0f00eed5b9b55e1d2e`;
 - `tama-oauth` — protocol library for the OAuth mechanics (PKCE S256,
   `private_key_jwt`, RFC 7662 introspection, refresh-token lifecycle);
 - `memovee` — the authorization server (issuer `https://app.localhost`) and the
   host of the local Tama topology;
-- `memovee/tama/graph/AGENT-INSTRUCTIONS.md` — the authoritative caller contract
-  for the **current** Tama release (`0.14.0-server`), which is the Phase 2
-  integration target;
+- `upmaru/tama#123` and the later endpoint migration — the Tama-owned Ecto,
+  durable runner, Phoenix PubSub, OAuth composition, and application routing
+  needed to expose the TamaMCP contract;
 - `memovee-cli` — will own binary pinning and profile creation (not yet
   implemented).
 
@@ -41,7 +43,8 @@ Phase 1 is complete. The durable-domain implementation now includes:
   namespaces, effective-limit resolution, and canonical whole-profile digest
   enforcement whenever a profile raises a default limit;
 - `internal/server`: profile-driven MCP server wiring the catalog projection,
-  instructions, and the bounded submit `tool` enum;
+  instructions, and the unconstrained submit `tool` field (retries of
+  reconciled-away tools must reach the application);
 - `internal/store`: encrypted SQLite state (D2/D3/D4) with complete-input
   idempotency, compare-and-set transitions, bounded progress, atomic terminal
   capture, lease-guarded worker writes, payload-free D12 GC, and exact schema
@@ -60,41 +63,34 @@ Phase 1 is complete. The durable-domain implementation now includes:
   integrity), plus worker cancellation and recovery coverage.
 
 Phase 2 is next. The downstream `submit` and `await` handlers deliberately
-remain placeholders until the current Tama System and App adapters are wired;
+remain placeholders until the MCP `2026-07-28` System and App adapter is wired;
 Phase 1's no-upstream exit criteria are satisfied independently of that work.
 
 ## Key architectural decisions (resolving spec open questions)
 
-### D1. The upstream side is a reviewed hand-rolled JSON-RPC client, not the Go SDK
+### D1. The upstream side speaks only MCP 2026-07-28
 
-The spec requires "a reviewed stable release of the official MCP Go SDK." That
-is achievable **only for the downstream (STDIO) side**. For the upstream side it
-is not achievable, because no released Go SDK supports the MCP Tasks protocol
-that current Tama speaks:
+Tama's replacement MCP server is the TamaMCP runtime. Its upstream contract is
+stateless MCP `2026-07-28`; it deliberately rejects legacy initialization,
+protocol sessions, `Mcp-Session-Id`, client-requested task augmentation,
+`tasks/result`, and `tasks/list`.
 
-- The pinned stable `go-sdk v1.7.0` exposes no `params.task` on
-  `CallToolParams`, and no `tasks/get`, `tasks/result`, or `tasks/cancel`
-  methods for the 2025-11-25 experimental Tasks extension that current Tama
-  speaks.
-- Current Tama App's caller contract is entirely task-based: `tools/call` with
-  `params.task`, then `tasks/get` / `tasks/result` / `tasks/cancel`, with
-  **session-scoped** task IDs.
+Phase 2 uses a reviewed stable release of the official Go MCP SDK for the core
+`2026-07-28` transport, `server/discover`, `tools/list`, `tools/call`, and
+`subscriptions/listen` behavior it exposes. The pinned `go-sdk v1.7.0` is the
+current implementation baseline. Its public client API has no Tasks extension
+types, and its core subscription type cannot request task IDs. Before coding,
+issue #2 must re-audit the selected stable SDK. If those gaps remain, add one
+focused `internal/upstream/tasks` extension layer for `tasks/get`,
+`tasks/update`, `tasks/cancel`, task-ID subscriptions, and
+`notifications/tasks`. That layer must reuse the SDK's core wire conventions
+and must be checked against TamaMCP's pinned fixtures; it must not recreate a
+legacy session client or fork general MCP behavior.
 
-Decision: Phase 2 builds a small, reviewed, fixture-tested JSON-RPC 2.0 client
-over streamable HTTP (`internal/upstream`) for the task protocol. The official
-Go SDK remains the downstream STDIO server and is sufficient there (it provides
-tool registration, `GetProgressToken`, and `ServerSession.NotifyProgress`).
-
-`go-sdk v1.7.0` is the initial pin: it is the newest reviewed stable release,
-preserves full backward compatibility with clients negotiating
-`2025-11-25` or earlier, and natively implements the `2026-07-28` protocol
-(stateless per-request `_meta`, `server/discover`, `subscriptions/listen`,
-MRTR `inputResponses`) plus custom JSON-RPC method registration. The Phase 4
-upstream adapter therefore builds on the official SDK directly, using custom
-methods only for the `tasks/*` extension surface.
-
-This is a deliberate, documented deviation from the original spec wording and
-is now recorded in the authoritative specification.
+Every upstream request carries `MCP-Protocol-Version`, `Mcp-Method`, conditional
+`Mcp-Name`, and the required per-request `_meta` protocol version, Link client
+information, and capabilities. Task capability is declared on each applicable
+request, never inferred from discovery or a previous call.
 
 ### D2. Local persistence is SQLite via a pure-Go driver
 
@@ -113,27 +109,37 @@ is authoritative for Tama Link's
 client-facing submission lifecycle and for locally executed System operations;
 it does not replace Tama's existing durable App graph submission.
 
-### D3. Persist the canonical upstream request, not just the task ID
+### D3. Persist the owner-bound task ID and canonical upstream request
 
-Current Tama task IDs are valid only in the MCP session that created them. After
-any new session (for example, after a Tama Link or Tama restart), the only
-recovery path is to re-issue the same idempotent upstream `message` arguments to
-re-attach to the durable Submission and obtain a new session-scoped task ID.
+TamaMCP task IDs are opaque, globally unique, durable, and independent of an
+HTTP connection or process. Every task request is authenticated independently,
+and Tama binds lookup to an application-defined owner derived from the validated
+principal and protected resource. After restart, Tama Link retrieves the same
+task ID through `tasks/get`; it does not open a protocol session or replace a
+stale session-scoped task ID.
+
+The canonical upstream request remains required for Link-side idempotency and
+for the narrow ambiguous-acceptance case where the initial `tools/call` may have
+reached Tama but its task handle was not received. Replaying that request is
+allowed only while Tama's application adapter preserves the existing Message
+Submission idempotency contract and proves that replay cannot duplicate graph
+work.
 
 Therefore the state store must persist, per submission:
 
 - the local `submission_id` and `client_request_id`;
 - the upstream tool name, selected execution strategy, descriptor digest, and
   the **validated, canonicalized arguments** (the exact recoverable request);
-- the current upstream task ID (may be stale);
+- the durable upstream task ID once received and the owner/profile binding
+  needed to make an independently authenticated lookup;
 - normalized state, timestamps, progress cursor and bounded events;
 - the terminal result or structured failure within retention limits;
 - the accepted response, result, event, and retention limits that govern the
   submission for its complete lifecycle;
 - the negotiated protocol version and adapter version.
 
-This resolves the restart-recovery acceptance criterion and is now recorded in
-the authoritative specification.
+This resolves restart recovery without making protocol sessions part of local
+state.
 
 ### D4. Credentials live only in the platform keyring
 
@@ -156,13 +162,65 @@ scoped, documented exception to the original "must not open a TCP listener"
 rule, which the authoritative specification now states as "no persistent
 control-surface listener."
 
+The listener port is selected before the authorization URL exists. That exact
+redirect URI is carried in the authorization request, matched against the
+observed callback, and resent verbatim in the token exchange; the
+authorization-code grant requires the two values to be equal, so any mismatch
+is rejected before a token request is sent.
+
+Client registration is revalidated against the auth-method secret
+requirement on load, and the RFC 7591 `client_secret_expires_at` is
+persisted and enforced: a record that lacks the secret its method requires,
+or whose secret has expired, is absent for readiness and refresh, and the
+next login re-registers. A replacement registration issues a new client ID,
+so the orphaned credential from the previous client and the new record are
+committed under one refresh-lease epoch, and a completion that started from
+the previous record re-reads the stored record before the exchange and again
+before the fenced commit: it either commits before the replacement (the
+grant is then retired) or aborts, never pairing the new client with a grant
+issued under the old one. The registration mutation holds the local lock
+that orders completions, refreshes, and logouts — a same-owner lease claim
+never advances the epoch, so the lease alone cannot order in-process
+mutations — and renews the epoch across the whole mutation. The lock and
+lease are acquired before the dynamic-registration POST: a contended
+writer fails before creating an upstream client, and a concurrent
+first-time login rechecks the stored record under the lock and reuses the
+winner's registration. The client
+record is fenced like the refresh credential: it is written to a unique
+secure-backend slot — whose label stays within the credential backend's
+accepted label characters, alphanumerics plus dot, underscore, and dash —
+and made live only by an atomic fence advance bound to
+the writer's live lease epoch; a writer that loses the lease or whose
+caller cancels before the commit observes it has its advance rejected and
+its own slot rolled back; a failed rollback deletion is durably enqueued on
+the client retirement backlog for a later refresh or logout to retry. A stale
+registration can therefore never be installed or silently orphaned, and a
+winner's committed record is never touched. The first successful commit also
+retires the legacy single-label record — dead data once a fence exists —
+by enqueueing it in the same transaction as the fence advance, so a crash
+after the commit or a failed deletion always leaves a durable cleanup
+record the retirement sweep retries. Logout clears the
+client fence and removes its slot under the same epoch-bound protocol as
+the refresh fence, so a logout that loses its lease mid-cleanup fails
+retryably and can never wipe a registration installed by the process that
+took over. Logout and rejected-grant invalidation renew their
+ownership outliving caller cancellation for the same reason: their
+fixed-label deletions take no context and cannot be aborted.
+
 ### D6. Terminal results are captured immediately and owned locally
 
-Current Tama task TTL is short (caller examples use `ttl: 60000` ms). `await`
-therefore captures the upstream terminal result into the local store **the
-moment it is observed**, so the result survives Tama Link or Tama restarts and
-client disconnects. Repeated `await` after terminal return is served entirely
-from local state.
+TamaMCP includes the complete state-specific payload, including a terminal
+`CallToolResult`, in `tasks/get` and `notifications/tasks`. Tama Link captures a
+terminal result into the local store **the moment it is observed** through
+either path, so the result survives Tama Link restarts, upstream retention, and
+client disconnects. Repeated `await` after terminal capture is served entirely
+from local state. Pending await responses carry `next_poll_ms` polling
+guidance; terminal responses omit it, so clients scheduling retries off the
+field stop once `terminal` is true. The final state read after a caller cancellation or budget
+expiry runs on an independent context with its own short deadline, so a
+contended or stalled store cannot hold the handler beyond the wait contract;
+only the expiry of that deadline falls back to the last snapshot, while a
+real storage failure during the refresh still reaches the caller.
 
 ### D7. One profile means one endpoint, process identity, and state namespace
 
@@ -185,30 +243,67 @@ profiles or add a profile selector to `submit`.
 The Memovee CLI or client installer writes a deterministic snapshot containing
 the selected upstream instructions and an allowlisted descriptor for every
 operation: name/title, description, upstream and client-visible input schemas,
-output schema, annotations, task support, declarative bindings, execution
-strategy, and digest.
+output schema, annotations, expected task/execution strategy, declarative
+bindings, and digest.
 
-At runtime Tama Link authenticates, initializes the upstream server, reads all
-`tools/list` pages, and verifies the pinned descriptors against the live
-catalog. The effective catalog is always the live catalog intersected with the
+At runtime Tama Link authenticates, calls `server/discover`, reads the complete
+`tools/list` result, and verifies the pinned descriptors against the live
+catalog. The bootstrap reads are bounded by the implementation hard response
+ceiling, not the profile's current bound, and the ceiling is cumulative
+across pagination; the catalog is profile infrastructure, so a later,
+lowered profile limit can never constrain connection establishment or fail
+an accepted submission before its tools/call. Annotation numbers compare by
+their JSON literal — the live side decodes with `UseNumber` like the profile
+loader — so unchanged literals are never false drift and distinct literals
+above 2^53 are never missed. The effective catalog is always the live catalog intersected with the
 profile allowlist. New upstream tools are never exposed automatically, and
 security-relevant drift fails closed with `operation_contract_mismatch`.
 
-The legacy downstream `submit` schema advertises the allowed operation names as
-an enum and emits bounded deterministic operation signatures in its
-description. Runtime validation against the selected client-visible and
+TamaMCP selects task execution from its application-owned tool policy and the
+Link's per-request capabilities; the `2026-07-28` `tools/list` response does not
+advertise the old `execution.taskSupport` field. The profile still pins Link's
+expected strategy. The adapter verifies the Tasks capability through
+`server/discover` and enforces the `tools/call` `resultType`; it must not
+interpret absent legacy task metadata as `forbidden`.
+
+The legacy downstream `submit` schema does not constrain the tool name to
+the current catalog: an exact retry whose tool the profile later removed
+must reach the application, where idempotency reconciliation precedes the
+catalog check that enforces the profile for genuinely new work. Bounded
+deterministic operation signatures in the description advertise the approved
+operations. Runtime validation against the selected client-visible and
 upstream schemas is authoritative. Rich tagged-union schema projection is a
 later negotiated optimization, not a correctness dependency.
+
+The idempotency identity is the client-visible request: the tool name and
+the canonical arguments plus the client thread ID in one of three shapes —
+its string value, an explicit JSON null when the accepted operation could
+map the source but the request carried no value, or an omitted field when
+it could not. A retry cannot know which shape the accepted request took,
+so recovery matches candidates against the stored identity: a retry that
+carries a value matches its value-shape or the omitted-field identity, and
+a retry that carries no value matches the explicit-null or the omitted-
+field identity. Adding a value after an accepted request omitted one from a
+mappable source conflicts; changing a value the accepted operation never
+mapped reconciles. The same candidate matching applies to the atomic create
+path: when a concurrent process claims the key and the insert loses, the
+loser reconciles the winner's row against the candidates instead of
+reporting a conflict for an otherwise exact request.
 
 ### D9. Operation descriptors select the execution strategy
 
 The initial strategies are:
 
-- `upstream_task`: current `/mcp/app` `message`; Link polls and reattaches to
-  Tama's server-side durable submission;
+- `upstream_task`: `/mcp/app` `message`; Link subscribes for hints, reconciles
+  through owner-bound `tasks/get`, and captures the detailed terminal state;
 - `local_replayable`: read-only or proven-idempotent `/mcp/system` operations;
   a leased Link worker makes an ordinary `tools/call` and may replay it after an
-  interrupted lease;
+  interrupted lease; every execution — including a recovered one — is bounded
+  by the submission's accepted response limit rather than the profile's
+  current value, so limit changes never reinterpret an accepted request, and
+  a successful response is held to the pinned output schema and the pinned
+  protocol version's content-block shapes before it can be stored as
+  completed;
 - `local_guarded`: a synchronous mutation with a reviewed conflict/read-back
   reconciliation contract; automatic replay is forbidden until reconciliation;
 - `unsupported`: reject before any upstream mutation.
@@ -282,23 +377,33 @@ returns a truncated terminal result. If a non-replayable synchronous mutation
 loses its response before its outcome is known, it remains `outcome_unknown`
 rather than being mislabeled `result_too_large`.
 
-### D13. Current Tama task expiry and refresh behavior are explicit
+### D13. Task polling, subscriptions, expiry, and refresh are explicit
 
-In current Tama `0.14.0-server`, `task.ttl` is measured from task creation and
-bounds the lifetime of both pending access and terminal-result retrieval.
-Expired task rows are removed, and a terminal Submission does not complete an
-already expired task (`lib/tama/mcp/task/expiration.ex` and
-`lib/tama/mcp/task/persistence.ex`). The App adapter therefore polls at the
-advertised interval, retrieves a terminal result immediately, and reattaches
-through the canonical idempotent request when a session or task expires.
+The upstream task supplies its bounded `ttlMs` and `pollIntervalMs`. Tama Link
+uses `subscriptions/listen` for prompt task snapshots and `tasks/get` as the
+source-of-truth recovery path. There is no replay guarantee: after every stream
+disconnect, overflow, authorization expiry, or policy invalidation, Link
+reauthorizes, calls `tasks/get`, and opens a new subscription for the still
+authorized task IDs. Subscription acknowledgement must precede notifications,
+and an unacknowledged task remains on the polling path.
 
-Current Tama retains the same refresh token across refresh exchanges and its
-tests permit concurrent refreshes (`test/tama/token/exchange_test.exs` and
-`test/tama/token/exchange_race_test.exs`). It does not rotate the token on every
-use. Tama Link still coordinates refresh attempts with a profile-scoped SQLite
+Expiry of non-terminal upstream work is represented by the task's durable
+failed state and bounded expiration error. Link captures that state locally;
+it must not infer expiry from a lost stream or elapsed client wait alone.
+
+Tama Link coordinates OAuth refresh attempts with a profile-scoped SQLite
 lease, re-reads the keyring value after acquiring the lease, and atomically
-stores a replacement if a future compatible server returns one. One
-`invalid_grant` becomes `authentication_required`; it is not retried in a loop.
+stores a replacement refresh token when returned. A token response is
+accepted only when its HTTP status is successful and the document carries
+no OAuth error, so credentials from an error response are never persisted. The replacement is
+committed through the fenced protocol, and every rejection path — commit
+error, lost epoch, or an uncertain slot write — rolls the writer's own
+uncommitted slot back, durably enqueuing it on the refresh retirement
+backlog when the rollback deletion itself fails, so a rejected writer never
+orphans a refresh token in the backend. One `invalid_grant` becomes
+`authentication_required`; it is not retried in a loop. A subscription closes
+no later than credential expiry and is reopened only after successful
+reauthorization.
 
 ### D14. Encrypted state has a fail-closed lifecycle
 
@@ -331,6 +436,28 @@ returned by review and retrievable during reconciliation, plus interrupted-call
 acceptance tests. The presence of the tool in upstream `tools/list` alone is
 not sufficient to allow it.
 
+### D16. `await` carries request-correlated input responses
+
+The TamaMCP task states include `input_required`, and `tasks/update` accepts a
+map of input-request IDs to responses. Tama Link preserves exactly two
+downstream tools by extending `await` with optional `input_responses` and by
+returning the outstanding `input_requests` in an `input_required` pending
+response.
+
+One `await` call submits at most one `tasks/update` before it begins its bounded
+wait. Partial response maps are allowed. Tama Link records each accepted
+input-request ID and canonical response: an exact replay is idempotent, a
+different response for the same ID is `idempotency_conflict`, and a response
+for a task or request that is not outstanding is `invalid_request`.
+`tasks/update` acknowledgement is eventually consistent, so Link continues
+with `tasks/get` or subscription reconciliation rather than assuming the task
+already left `input_required`.
+
+Link declares only the per-request input capabilities that this downstream
+contract and selected profile can actually relay. It must not advertise an
+elicitation or sampling sub-capability merely because the upstream server can
+produce that input request.
+
 ## Package layout
 
 ```
@@ -345,8 +472,8 @@ internal/store/           encrypted SQLite state, schema validation, leases, GC
 internal/worker/          leased local replayable/guarded execution
 internal/credential/      platform keyring wrapper (secrets only)
 internal/oauth/           discovery, auth-code+PKCE, single-flight refresh
-internal/upstream/        reviewed JSON-RPC/streamable-HTTP client (task protocol)
-internal/adapter/tama014/ current Tama (0.14.0) adapter: submit/await/normalize
+internal/upstream/        official SDK core plus focused Tasks/subscription extension
+internal/adapter/tama2026/ MCP 2026-07-28 submit/await/normalize adapter
 internal/limits/          size, rate, timeout, retry, retention bounds
 ```
 
@@ -395,46 +522,85 @@ Exit: a submission can be created, made idempotent, transitioned, persisted,
 and recovered after an in-process store reopen, with no upstream involved. The
 storage subset of the separate-process suite passes before Phase 1 is complete.
 
-## Phase 2 — current Tama (0.14.0) adapters
+## Phase 2 — TamaMCP 2026 upstream adapter
 
-- `internal/upstream`: reviewed JSON-RPC 2.0 client over streamable HTTP
-  (initialize handshake, `Mcp-Session-Id`, `application/json` and SSE
-  responses, bearer auth) supporting `tools/call` (with `params.task`),
-  `tasks/get`, and `tasks/cancel`. Fixture-driven tests.
+- `internal/upstream`: use the official Go SDK for the stateless MCP
+  `2026-07-28` core and add only the focused Tasks/subscription extension seam
+  D1 permits. Support `server/discover`, `tools/list`, `tools/call`,
+  `tasks/get`, `tasks/update`, `tasks/cancel`, `subscriptions/listen`, and
+  `notifications/tasks`. Reject legacy initialization, `Mcp-Session-Id`,
+  client-requested task augmentation, `tasks/result`, and `tasks/list`.
+- Every request includes exact `MCP-Protocol-Version`, `Mcp-Method`, conditional
+  `Mcp-Name`, and matching per-request `_meta`. Fixture tests cover header/body
+  agreement, Base64 sentinel handling, capability failures, supported response
+  content types, body bounds, cancellation, and the fixed protocol error codes.
 - `internal/oauth`: RFC 9728 protected-resource discovery → RFC 8414 AS
   metadata, dynamic client registration, auth-code + PKCE S256 with the
-  ephemeral loopback redirect (D5), and current stable-token refresh coordinated
+  ephemeral loopback redirect (D5), and provider-token refresh coordinated
   across processes as specified by D13.
-- `internal/adapter/tama014`:
-  - common connect → initialize → read all `tools/list` pages → verify the
-    profile catalog and instructions before executing an operation;
+- `internal/adapter/tama2026`:
+  - authenticate → `server/discover` → read the complete `tools/list` result →
+    verify the profile catalog and instructions before executing an operation;
   - App `submit` → validate client-visible arguments → apply declarative
-    bindings → validate complete upstream arguments → task-augmented
-    `tools/call` → persist submission + task ID;
-  - `await` → bounded long-poll via `tasks/get` using the upstream poll
-    interval → normalize state/progress → capture terminal result locally
-    immediately and before the task lifetime expires (D6/D13);
-  - restart recovery / re-attach (D3): reopen the upstream session and re-issue
-    the persisted idempotent request to obtain a fresh session-scoped task ID;
-    never reuse a stale task ID.
+    bindings → validate complete upstream arguments → `tools/call` with the
+    per-request Tasks capability → persist the returned owner-bound task ID;
+  - `await` → optionally send one idempotent `tasks/update` → reconcile through
+    `tasks/get` using `pollIntervalMs` → use authorized task-ID subscriptions as
+    a prompt-update optimization → normalize and immediately capture the
+    complete detailed terminal result from either path (D6/D13/D16);
+  - restart recovery (D3): authenticate as the same profile owner and query the
+    persisted task ID; replay the canonical `tools/call` only for the proven
+    ambiguous initial-acceptance case where no task ID was received.
 - `internal/worker` System path:
   - claim a `local_replayable` submission with a transactional lease;
   - issue an ordinary `/mcp/system` `tools/call` and capture the complete MCP
     result in the same local submission;
   - replay an interrupted read-only/idempotent operation after lease expiry;
   - reject guarded mutations in the initial profile (D15).
-- Record and validate the negotiated protocol version at connect; unsupported
-  combinations fail closed with `protocol_mismatch`.
+- Record and validate the discovered protocol/server capabilities and adapter
+  version; unsupported combinations fail closed with `protocol_mismatch`.
 - Result normalization + size validation; explicit upstream→normalized error
   and state mapping table: a captured `CallToolResult` is `completed` and
   preserves its `isError`; transport/protocol/local failures are `failed`.
-- Fixture tests from `memovee/tama/graph/AGENT-INSTRUCTIONS.md` and
-  `memory-contract.v1.json`; live integration against the local `memovee/tama`
-  compose stack (Tama `0.14.0-server` + Memovee AS).
+- Import and run the relevant package-provided TamaMCP conformance fixtures,
+  including task states, owner isolation, headers, subscriptions, reconnect,
+  and rejection of removed legacy methods. Run live integration only against a
+  Tama build that has completed the TamaMCP persistence, runner, PubSub, System,
+  and App migration.
 
 Exit: the full `submit` → repeated `await` → terminal workflow works against
 separate live App and System profiles. App recovery does not duplicate graph
-work; System read-only recovery safely replays interrupted local work.
+work; a Link restart resumes the same owner-bound task ID; System read-only
+recovery safely replays interrupted local work; an `input_required` task can be
+answered through `await`; and dropped subscription notifications recover
+through `tasks/get`.
+
+### Phase 2 execution work breakdown
+
+GitHub issue [#9](https://github.com/kritama/tama-link/issues/9) tracks the
+phase and its dependency order:
+
+1. Build the MCP `2026-07-28` core and Tasks/subscription transport
+   ([#2](https://github.com/kritama/tama-link/issues/2)) and OAuth services
+   ([#3](https://github.com/kritama/tama-link/issues/3)) as independent
+   foundations.
+2. Establish the shared TamaMCP discovery, capability, and pinned
+   catalog boundary ([#4](https://github.com/kritama/tama-link/issues/4)).
+3. Implement owner-bound App task execution, subscriptions, input updates, and
+   restart recovery
+   ([#5](https://github.com/kritama/tama-link/issues/5)) and replayable System
+   execution ([#6](https://github.com/kritama/tama-link/issues/6)) on that
+   boundary.
+4. Wire the thin downstream `submit` and `await` handlers
+   ([#7](https://github.com/kritama/tama-link/issues/7)).
+5. Close the phase only after fixture and live acceptance against the pinned
+   local Memovee/Tama topology
+   ([#8](https://github.com/kritama/tama-link/issues/8)).
+
+Phase 2 is gated by the package and application layers it consumes. TamaMCP
+Phase 2 is complete; task subscriptions remain tracked by
+`kritama/tama-mcp#9`. Live Link acceptance additionally waits for the
+Tama-owned adapters and endpoint migration beginning with `upmaru/tama#123`.
 
 ## Phase 3 — client progress and acceptance
 
@@ -454,39 +620,42 @@ work; System read-only recovery safely replays interrupted local work.
   one stable `client_context.thread_id` per conversation and never falls back to
   a profile-global value.
 
-Exit: acceptance criteria #1–#20 of the spec are demonstrated by automated and
+Exit: acceptance criteria #1–#23 of the spec are demonstrated by automated and
 live tests.
 
-## Phase 4 — newer (2026-07-28) MCP adapter
+## Phase 4 — production release and migration closure
 
-- A second upstream adapter built on the pinned `go-sdk v1.7.0`, which natively
-  speaks `2026-07-28`: stateless per-request `_meta`, `tasks/get` polling via
-  custom method registration, optional `subscriptions/listen` as an
-  optimization, and MRTR `inputResponses` for `input_required`.
-- Downstream `submit`/`await` contract unchanged.
-- Define the `input_required` contract behavior (G11) before implementation;
-  the SDK's MRTR mechanism is the upstream transport for an `await`
-  `input_response`.
-- Expand the published compatibility matrix only after live client tests.
+- Complete the platform credential-backend and crash-recovery matrix for every
+  operating system claimed by the release.
+- Publish the compatibility matrix covering the exact TamaMCP, Tama, Tama Link,
+  OAuth/profile, protocol, OS/architecture, and verified client versions.
+- Coordinate final acceptance evidence with Tama before its Anubis endpoint and
+  compatibility projections are removed; old and new runtimes must never
+  mutate the same task.
+- Cut the independent Tama Link release through the configured Git Flow and
+  provide the immutable version/checksum consumed by Memovee CLI.
 
-Exit: the 2026-07-28 path is selectable by profile/adapter version and passes
-the same acceptance suite; the 0.14.0 path remains the default.
+Exit: the supported binary set and compatibility matrix are published, Tama's
+legacy runtime can be removed without losing a required Link path, and every
+production gate has current evidence.
 
 ## Resolved specification amendments
 
 The current specification revision incorporates the decisions previously
-tracked as G1-G7: the reviewed upstream JSON-RPC exception, canonical-request
-recovery, the OAuth loopback exception and explicit login command, completed
-versus failed result semantics, initial state-only progress, profile isolation
-and catalog projection, and declarative App idempotency/context bindings.
+tracked as G1-G7: the upstream SDK/extension boundary, durable task-ID and
+canonical-request recovery, the OAuth loopback exception and explicit login
+command, completed versus failed result semantics, portable progress, profile
+isolation and catalog projection, and declarative App idempotency/context
+bindings.
 
 The current revision also resolves G8-G10 and G12-G15:
 
 - **G8:** bounded results fail as `result_too_large` and are never truncated;
-- **G9:** current Tama task TTL is a task/result-access lifetime measured from
-  creation; live compatibility remains an acceptance gate;
-- **G10:** current Tama uses stable refresh tokens; the Link refresh lease and
-  replacement-token handling remain future-compatible;
+- **G9:** TamaMCP task TTL/polling values and detailed durable state are
+  authoritative; Link captures terminal results locally and reconciles dropped
+  subscriptions through `tasks/get`;
+- **G10:** the Link refresh lease and replacement-token handling remain correct
+  independently of whether the current provider rotates refresh tokens;
 - **G12:** the guarded Reflection mutation is excluded until upstream
   correlation makes exact reconciliation possible;
 - **G13:** projected App profiles require explicit caller-owned conversation
@@ -494,44 +663,52 @@ The current revision also resolves G8-G10 and G12-G15:
 - **G14:** missing or unavailable encryption keys fail closed and v1 does not
   rotate them automatically; and
 - **G15:** the architecture is fixed and a separate-process stress suite is a
-  release gate.
+  release gate; and
+- **G11:** `await.input_responses` carries request-correlated responses to
+  `input_required` tasks without adding a third downstream tool (D16).
 
 ## Remaining gates and deferred work
 
-1. **G11 (Phase 4) — `input_required` has no client-facing path.** The
-   2026-07-28 profile has an `input_required` task state answered via
-   `tasks/update`, but the two-tool contract has no way for a client to answer
-   an input request. The preferred direction is an optional, request-correlated
-   `input_response` on `await`, preserving exactly two downstream tools. Finalize
-   its schema and idempotency behavior against `tama-mcp` fixtures before Phase
-   4; do not represent it as ordinary running progress indefinitely.
+1. **TamaMCP subscription dependency:** package Phase 3 issue
+   `kritama/tama-mcp#9` must complete the task-ID subscription and notification
+   contract before Link can claim its subscription path. Polling work may
+   proceed first because `tasks/get` is the recovery source of truth.
 
-2. **Current-adapter live acceptance:** against the named local `memovee/tama`
-   Compose environment and pinned Tama `0.14.0-server`, verify initialization,
-   negotiated protocol, the 60-second task lifetime, reattachment, terminal
-   capture, and production ingress availability.
+2. **Tama application migration:** `upmaru/tama#123` and the subsequent System,
+   App, OAuth composition, and Phoenix PubSub endpoint migration must expose the
+   new runtime. Link fixture work may proceed against package conformance data,
+   but live acceptance waits for that application surface.
 
-3. **Client identity acceptance:** Codex, OpenCode, and plain MCP fixtures must
+3. **TamaMCP adapter live acceptance:** against the named local `memovee/tama`
+   Compose environment and an immutable migrated Tama build, verify
+   `server/discover`, standard headers, per-request authorization/capabilities,
+   owner-bound task recovery, `tasks/update`, subscription acknowledgement and
+   reconnect, terminal capture through `tasks/get`, and production ingress.
+
+4. **Client identity acceptance:** Codex, OpenCode, and plain MCP fixtures must
    prove the D11 conversation-identity contract. Until they pass, retain the
    passthrough App profile.
 
-4. **Production storage acceptance:** complete the full D14 and Phase 1
+5. **Production storage acceptance:** complete the full D14 and Phase 1
    separate-process, platform-keyring, headless-backend, and crash-recovery
    matrix on every supported operating system before the first production
    release.
 
 None of these gates blocks Phase 0. The storage subset blocks completion of
-Phase 1; current-adapter and client-identity acceptance block completion of
-Phases 2 and 3 respectively; G11 blocks only Phase 4.
+Phase 1; TamaMCP/Tama migration and live acceptance block completion of Phase 2;
+client identity acceptance blocks Phase 3; production certification blocks
+Phase 4.
 
 ## Suggested order of attack
 
 1. Finish Phase 0 and land the versioned profile/catalog schema.
 2. Implement Phase 1, including encryption and multi-process lease tests.
-3. Implement the System read-only adapter first; it proves local execution
-   without depending on upstream Tasks.
-4. Implement the App task adapter against the local `memovee/tama` stack and
-   complete the current-adapter live gate.
-5. Complete dual-registration and conversation-identity client acceptance.
-6. Begin Phase 4 only once `tama-mcp` Phases 2–3 and the Tama
-   `/mcp/app` migration land.
+3. Implement the official-SDK core plus the smallest conformance-tested Tasks
+   extension seam while TamaMCP Phase 3 and the Tama migration proceed.
+4. Implement the System synchronous adapter first; it proves the new stateless
+   transport without depending on durable Tasks.
+5. Implement App task polling, `input_required`, subscriptions, and restart
+   recovery; then complete the migrated-Tama live gate.
+6. Complete dual-registration and conversation-identity client acceptance.
+7. Begin production release closure only after TamaMCP Phase 3, the Tama
+   System/App migration, and client acceptance land.

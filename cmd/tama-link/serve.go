@@ -2,20 +2,63 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
+	"fmt"
 	"io"
+	"os"
+	"sync"
+	"time"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"github.com/kritama/tama-link/internal/adapter/tama2026"
+	"github.com/kritama/tama-link/internal/application"
+	"github.com/kritama/tama-link/internal/credential"
+	"github.com/kritama/tama-link/internal/oauth"
 	"github.com/kritama/tama-link/internal/profile"
 	"github.com/kritama/tama-link/internal/server"
+	"github.com/kritama/tama-link/internal/store"
+	"github.com/kritama/tama-link/internal/upstream"
 	"github.com/kritama/tama-link/internal/version"
+	"github.com/kritama/tama-link/internal/worker"
 )
 
 // serveConfig holds the validated serve command inputs.
 type serveConfig struct {
 	profileName profile.Name
 	configDir   string
+}
+
+// workerLeaseTTL bounds one local execution lease. It outlives any single
+// synchronous execution (the per-request upstream timeout defaults to 60s);
+// expiry is the crash-recovery hand-off to another process.
+const workerLeaseTTL = 2 * time.Minute
+
+// gcInterval bounds how long a retention deadline waits before the serve
+// process applies it. The store's GC is one idempotent transaction, so
+// overlapping sweeps across processes are safe.
+const gcInterval = 5 * time.Minute
+
+// runGC applies the store's retention deadlines for the serve process's
+// lifetime: without it a continuously running or restarted process never
+// expires terminal payloads, tombstones, and their idempotency rows. One
+// sweep runs immediately, then on every tick; a failed sweep is retried on
+// the next tick. The goroutine owns its ctx and returns when it is
+// cancelled, so cleanup can join it before closing the store.
+func runGC(ctx context.Context, st *store.Store) {
+	ticker := time.NewTicker(gcInterval)
+	defer ticker.Stop()
+	for {
+		// A failed sweep is retried on the next tick; the next deadline
+		// still applies.
+		_, _ = st.GC(ctx)
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+	}
 }
 
 // runServe implements the serve command. Standard output is reserved for MCP
@@ -32,12 +75,163 @@ func runServe(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 		return 2
 	}
 
-	srv := server.New(p, version.Version)
+	app, cleanup, err := buildApp(ctx, p, cfg.configDir, credential.New)
+	if err != nil {
+		writef(stderr, "tama-link: %v\n", err)
+		return 2
+	}
+	defer cleanup()
+
+	srv := server.New(p, version.Version, app)
 	if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		writef(stderr, "tama-link: MCP server failed: %v\n", err)
 		return 1
 	}
 	return 0
+}
+
+// credentialOpener opens one profile's secure credential handle from its
+// canonical namespace. Production passes credential.New; tests substitute a
+// deterministic backend.
+type credentialOpener func(namespace string) (*credential.Keyring, error)
+
+// stateLayout resolves one profile's canonical durable state locations: the
+// profile-scoped database path and the credential namespace. Two named
+// profiles can never collapse onto one database or one credential space, no
+// matter how their state references are configured.
+func stateLayout(p *profile.Profile, configDir string) (dbPath string, namespace string, err error) {
+	stateRoot, err := profile.StateDir(configDir)
+	if err != nil {
+		return "", "", err
+	}
+	dbPath, err = profile.DatabasePath(stateRoot, p)
+	if err != nil {
+		return "", "", err
+	}
+	return dbPath, profile.CredentialNamespace(p), nil
+}
+
+// buildApp wires one profile's full application stack: secure credential
+// backend, encrypted state store, OAuth client, stateless upstream client,
+// verified adapter, leased worker, and the application service. The cleanup
+// callback shuts down the worker and closes the store.
+func buildApp(ctx context.Context, p *profile.Profile, configDir string, open credentialOpener) (server.App, func(), error) {
+	dbPath, namespace, err := stateLayout(p, configDir)
+	if err != nil {
+		return nil, nil, err
+	}
+	kr, err := open(namespace)
+	if err != nil {
+		return nil, nil, fmt.Errorf("open credential backend: %w", err)
+	}
+
+	st, err := store.Open(ctx, dbPath, kr, store.Config{Limits: p.EffectiveLimits()})
+	if err != nil {
+		return nil, nil, fmt.Errorf("open state store: %w", err)
+	}
+
+	oauthClient, err := oauth.New(oauth.Config{
+		Endpoint: p.Endpoint,
+		Issuer:   p.Issuer,
+		Secrets:  kr,
+		Lease:    st,
+	})
+	if err != nil {
+		_ = st.Close()
+		return nil, nil, fmt.Errorf("configure oauth: %w", err)
+	}
+
+	limits := p.EffectiveLimits()
+	up, err := upstream.New(upstream.Config{
+		Endpoint: p.Endpoint,
+		ClientInfo: mcp.Implementation{
+			Name:    "tama-link",
+			Version: version.Version,
+		},
+		ClientCapabilities: []byte(`{"extensions":{"io.modelcontextprotocol/tasks":{}}}`),
+		TokenProvider: func(ctx context.Context) (string, error) {
+			tok, err := oauthClient.Token(ctx)
+			if err != nil {
+				// Refresh-lease contention is transient: the credential is
+				// valid and the winning process is refreshing it. Report
+				// contention so the failure defers the work instead of
+				// recording an authentication rejection.
+				if errors.Is(err, oauth.ErrLeaseContention) {
+					return "", fmt.Errorf("%w: %w", upstream.ErrTokenContended, err)
+				}
+				return "", err
+			}
+			return tok, nil
+		},
+		MaxResponseBytes: int64(limits.ResponseBytes),
+	})
+	if err != nil {
+		_ = st.Close()
+		return nil, nil, fmt.Errorf("configure upstream client: %w", err)
+	}
+
+	adapter, err := tama2026.New(tama2026.Config{
+		Profile:        *p,
+		Upstream:       up,
+		AdapterVersion: version.Version,
+	})
+	if err != nil {
+		_ = st.Close()
+		return nil, nil, fmt.Errorf("configure adapter: %w", err)
+	}
+
+	connect := func(ctx context.Context) (*tama2026.Connection, error) {
+		return adapter.Connect(ctx)
+	}
+	executor := application.NewExecutor(connect)
+	workerService, err := worker.NewService(st, executor, worker.Config{
+		Owner:    fmt.Sprintf("tama-link/%d", os.Getpid()),
+		LeaseTTL: workerLeaseTTL,
+	})
+	if err != nil {
+		_ = st.Close()
+		return nil, nil, fmt.Errorf("configure worker: %w", err)
+	}
+
+	app, err := application.New(application.Config{
+		Profile:        p,
+		Store:          st,
+		Connect:        connect,
+		Worker:         workerService,
+		AdapterVersion: version.Version,
+		CredentialsReady: func(ctx context.Context) (bool, error) {
+			return oauthClient.HasCredentials(ctx)
+		},
+	})
+	if err != nil {
+		workerService.Stop()
+		_ = st.Close()
+		return nil, nil, fmt.Errorf("configure application: %w", err)
+	}
+
+	// Startup recovery offers every pending replayable submission to the
+	// bounded worker pool and returns immediately: a large backlog runs in
+	// the background and must not delay the MCP server accepting clients.
+	_ = workerService.Start(ctx)
+
+	// Retention sweeps run for the process lifetime under an owned,
+	// cancellable context: cleanup cancels before the store closes and
+	// joins the sweep so no GC can run against a closed store.
+	gcCtx, stopGC := context.WithCancel(context.Background())
+	var gcWg sync.WaitGroup
+	gcWg.Add(1)
+	go func() {
+		defer gcWg.Done()
+		runGC(gcCtx, st)
+	}()
+
+	cleanup := func() {
+		workerService.Stop()
+		stopGC()
+		gcWg.Wait()
+		_ = st.Close()
+	}
+	return app, cleanup, nil
 }
 
 func parseServeFlags(args []string, stderr io.Writer) (serveConfig, bool) {

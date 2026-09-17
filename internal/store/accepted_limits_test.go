@@ -22,7 +22,7 @@ func TestSubmissionPreservesAcceptedLifecycleLimitsAcrossReopen(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	if err := s.Close(); err != nil {

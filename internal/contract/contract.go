@@ -19,9 +19,12 @@ type Status string
 
 // Normalized submission statuses.
 const (
-	StatusAccepted       Status = "accepted"
-	StatusQueued         Status = "queued"
-	StatusRunning        Status = "running"
+	StatusAccepted Status = "accepted"
+	StatusQueued   Status = "queued"
+	StatusRunning  Status = "running"
+	// StatusInputRequired is a non-terminal waiting state: the upstream task
+	// needs input responses before it can continue.
+	StatusInputRequired  Status = "input_required"
 	StatusCompleted      Status = "completed"
 	StatusFailed         Status = "failed"
 	StatusCancelled      Status = "cancelled"

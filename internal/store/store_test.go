@@ -166,6 +166,7 @@ func testSubmission(id, clientRequestID string) store.NewSubmission {
 		Strategy:         "upstream_task",
 		DescriptorDigest: "sha256:abc",
 		Arguments:        []byte(`{"message":"hi"}`),
+		RequestArguments: []byte(`{"message":"hi"}`),
 		ProtocolVersion:  "2025-11-25",
 		AdapterVersion:   "tama014/1",
 	}
@@ -216,7 +217,7 @@ func TestOpenReopensExistingDatabase(t *testing.T) {
 	clk := newClock()
 
 	s1, path := openTestStore(t, keys, clk)
-	created, err := s1.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1"))
+	created, _, err := s1.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1"))
 	if err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
@@ -247,7 +248,7 @@ func TestOpenFailsClosedWithoutKey(t *testing.T) {
 	clk := newClock()
 
 	s, path := openTestStore(t, keys, clk)
-	if _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	if err := s.Close(); err != nil {
@@ -274,7 +275,7 @@ func TestOpenFailsClosedWithoutKey(t *testing.T) {
 func TestOpenFailsClosedWhenNonemptyDatabaseLosesMetadata(t *testing.T) {
 	keys := newMemKeys()
 	s, path := openTestStore(t, keys, newClock())
-	if _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	if err := s.Close(); err != nil {
@@ -336,7 +337,7 @@ func TestOpenFailsClosedWhenBackendDown(t *testing.T) {
 	// rather than falling back to plaintext or a replacement key.
 	keys := newMemKeys()
 	s, path := openTestStore(t, keys, newClock())
-	if _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(context.Background(), testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	if err := s.Close(); err != nil {

@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	keyring "github.com/99designs/keyring"
 
@@ -18,10 +20,11 @@ var _ store.KeyProvider = (*Keyring)(nil)
 // fakeKeyring is an in-memory keyring.Keyring for tests. It can be configured
 // to fail Get or Set to exercise the fail-closed paths.
 type fakeKeyring struct {
-	mu      sync.Mutex
-	items   map[string]keyring.Item
-	failGet bool
-	failSet bool
+	mu             sync.Mutex
+	items          map[string]keyring.Item
+	failGet        bool
+	failSet        bool
+	pendingRemoves int
 }
 
 func newFakeKeyring() *fakeKeyring {
@@ -56,6 +59,9 @@ func (f *fakeKeyring) Set(item keyring.Item) error {
 }
 
 func (f *fakeKeyring) Remove(key string) error {
+	f.mu.Lock()
+	f.pendingRemoves++
+	f.mu.Unlock()
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	delete(f.items, key)
@@ -181,3 +187,254 @@ func TestKeyringSecuresStore(t *testing.T) {
 	}
 	_ = reopened.Close()
 }
+
+// blockingKeyring never completes a Set, modeling a backend that accepts a
+// connection but waits on user interaction for writes.
+type blockingKeyring struct{ started chan struct{} }
+
+func (b *blockingKeyring) Get(string) (keyring.Item, error)             { panic("unused") }
+func (b *blockingKeyring) GetMetadata(string) (keyring.Metadata, error) { panic("unused") }
+func (b *blockingKeyring) Set(keyring.Item) error {
+	close(b.started)
+	select {}
+}
+func (b *blockingKeyring) Remove(string) error     { panic("unused") }
+func (b *blockingKeyring) Reset() error            { panic("unused") }
+func (b *blockingKeyring) Keys() ([]string, error) { panic("unused") }
+
+func TestProbeTimesOutOnBlockingBackend(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
+	blocking := &blockingKeyring{started: make(chan struct{})}
+	probeTimeout = 200 * time.Millisecond
+	t.Cleanup(func() { probeTimeout = 5 * time.Second })
+
+	start := time.Now()
+	err := probeBackend("demo", blocking)
+	if err == nil {
+		t.Fatal("probe succeeded, want timeout error")
+	}
+	if time.Since(start) > 5*time.Second {
+		t.Fatalf("probe took %s, want it to be bounded", time.Since(start))
+	}
+	select {
+	case <-blocking.started:
+	default:
+		t.Fatal("probe never attempted a Set")
+	}
+}
+
+func TestProbeSucceedsAndCleansUp(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
+	backend := newFakeKeyring()
+	if err := probeBackend("demo", backend); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	backend.mu.Lock()
+	count := len(backend.items)
+	backend.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("probe left %d entries behind", count)
+	}
+}
+
+// slowKeyring blocks Set until release is closed and then delegates to
+// the inner keyring, modeling a backend whose write hangs and later
+// completes.
+type slowKeyring struct {
+	started chan struct{}
+	release chan struct{}
+	inner   *fakeKeyring
+	once    sync.Once
+}
+
+func (s *slowKeyring) Get(key string) (keyring.Item, error) {
+	return s.inner.Get(key)
+}
+
+func (s *slowKeyring) GetMetadata(key string) (keyring.Metadata, error) {
+	return s.inner.GetMetadata(key)
+}
+
+func (s *slowKeyring) Set(item keyring.Item) error {
+	s.once.Do(func() { close(s.started) })
+	<-s.release
+	return s.inner.Set(item)
+}
+
+func (s *slowKeyring) Remove(key string) error { return s.inner.Remove(key) }
+func (s *slowKeyring) Keys() ([]string, error) { return s.inner.Keys() }
+
+// TestProbeRetryReusesWorkerAfterTimeout pins the shared probe worker at
+// the retry lifecycle: a backend whose probe blocks past the deadline
+// pins exactly one worker, and a retry through probeBackend — the same
+// path New retries take — reuses that worker once the blocking call
+// returns instead of spawning a replacement per attempt.
+func TestProbeRetryReusesWorkerAfterTimeout(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
+	backend := newFakeKeyring()
+	slow := &slowKeyring{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		inner:   backend,
+	}
+	probeTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { probeTimeout = 5 * time.Second })
+
+	// The first attempt blocks in Set and times out.
+	if err := probeBackend("demo", slow); err == nil {
+		t.Fatal("probe succeeded, want timeout error")
+	}
+	close(slow.release)
+
+	// The retry reuses the same worker and succeeds, and both probes'
+	// Set/Get/Remove cycles cleaned up their disposable entries.
+	if err := probeBackend("demo", backend); err != nil {
+		t.Fatalf("retry probe: %v", err)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.items) != 0 {
+		t.Fatalf("probes left %d entries behind", len(backend.items))
+	}
+}
+
+// delayedSetKeyring sleeps before each Set and then delegates, modeling
+// a backend whose write takes time.
+type delayedSetKeyring struct {
+	inner *fakeKeyring
+	delay time.Duration
+}
+
+func (d *delayedSetKeyring) Get(key string) (keyring.Item, error) {
+	return d.inner.Get(key)
+}
+
+func (d *delayedSetKeyring) GetMetadata(key string) (keyring.Metadata, error) {
+	return d.inner.GetMetadata(key)
+}
+
+func (d *delayedSetKeyring) Set(item keyring.Item) error {
+	time.Sleep(d.delay)
+	return d.inner.Set(item)
+}
+
+func (d *delayedSetKeyring) Remove(key string) error { return d.inner.Remove(key) }
+func (d *delayedSetKeyring) Keys() ([]string, error) { return d.inner.Keys() }
+
+// TestProbeRemovesEntryAfterReadFailure pins the cleanup after a failed
+// read: the probe entry is disposable, so a backend that stores it but
+// fails the read must not leave it behind — repeated failed startups
+// would otherwise accumulate permanent probe records even while deletion
+// still works.
+func TestProbeRemovesEntryAfterReadFailure(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
+	backend := newFakeKeyring()
+	backend.failGet = true
+	if err := probeBackend("demo", backend); err == nil {
+		t.Fatal("probe succeeded, want the read failure")
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.items) != 0 {
+		t.Fatalf("probe left %d entries behind after the read failure", len(backend.items))
+	}
+}
+
+// TestProbeDeadlineCoversQueueingAndExecution pins the single deadline:
+// a probe accepted just before the shared deadline expires gets only the
+// remaining window, not a fresh one — queueing behind a busy worker
+// cannot extend the documented fixed probe window.
+func TestProbeDeadlineCoversQueueingAndExecution(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
+	probeTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { probeTimeout = 5 * time.Second })
+
+	// Occupy the worker with a probe whose Set blocks until its own
+	// request deadline has already expired.
+	busyBackend := newFakeKeyring()
+	busy := &slowKeyring{started: make(chan struct{}), release: make(chan struct{}), inner: busyBackend}
+	busyErrs := make(chan error, 1)
+	go func() { busyErrs <- probeBackend("demo", busy) }()
+	<-busy.started
+
+	// Queue the next probe behind the busy worker: its shared deadline
+	// starts now and expires well before its 375ms write can finish if
+	// it is accepted right after the release.
+	slow := &delayedSetKeyring{inner: newFakeKeyring(), delay: 375 * time.Millisecond}
+	slowErrs := make(chan error, 1)
+	go func() { slowErrs <- probeBackend("demo", slow) }()
+
+	// Release the worker when the busy probe's own deadline fires; the
+	// queued probe is then accepted with most of its window already
+	// spent. With one shared deadline its write cannot finish in the
+	// remainder; a fresh second window would let it succeed.
+	<-busyErrs
+	close(busy.release)
+
+	if err := <-slowErrs; err == nil {
+		t.Fatal("queued probe succeeded, want the shared deadline to expire")
+	}
+}
+
+// TestProbeKeysAreUniquePerInvocation proves concurrent same-profile
+// starts cannot interfere with each other's availability probes: every
+// probe uses its own unguessable key, and a probe that sees another
+// probe's Remove between its Set and Get still succeeds on its own key.
+func TestProbeKeysAreUniquePerInvocation(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
+	seen := make(chan string, 8)
+	backend := newFakeKeyring()
+	racy := &spyKeyring{inner: backend, seen: seen}
+
+	errs := make(chan error, 4)
+	for range 4 {
+		go func() { errs <- probeBackend("demo", racy) }()
+	}
+	// All four probes completed, so exactly their 12 Set/Get/Remove sends
+	// are done. Every probe used a distinct per-invocation key.
+	setKeys := map[string]bool{}
+	for range 12 {
+		select {
+		case k := <-seen:
+			if !strings.HasPrefix(k, "demo/__probe_") {
+				t.Fatalf("probe key %q is not per-invocation", k)
+			}
+			setKeys[k] = true
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed out waiting for recorded probe keys")
+		}
+	}
+	if len(setKeys) != 4 {
+		t.Fatalf("probes used %d distinct keys, want 4 (one per invocation)", len(setKeys))
+	}
+}
+
+// spyKeyring records every key its inner keyring handles so a test can
+// assert probe keys are per-invocation.
+type spyKeyring struct {
+	inner keyring.Keyring
+	seen  chan string
+}
+
+func (s *spyKeyring) Set(item keyring.Item) error {
+	s.seen <- item.Key
+	return s.inner.Set(item)
+}
+
+func (s *spyKeyring) Get(key string) (keyring.Item, error) {
+	s.seen <- key
+	return s.inner.Get(key)
+}
+
+func (s *spyKeyring) GetMetadata(key string) (keyring.Metadata, error) {
+	return s.inner.GetMetadata(key)
+}
+
+func (s *spyKeyring) Remove(key string) error { s.seen <- key; return s.inner.Remove(key) }
+func (s *spyKeyring) Keys() ([]string, error) { return s.inner.Keys() }

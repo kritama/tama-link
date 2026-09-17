@@ -16,7 +16,7 @@ func TestTransitionLeasedRequiresCurrentOwner(t *testing.T) {
 	ctx := context.Background()
 	clk := newClock()
 	s, _ := openTestStore(t, newMemKeys(), clk)
-	if _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
+	if _, _, err := s.CreateSubmission(ctx, testSubmission("sub-1", "req-1")); err != nil {
 		t.Fatalf("CreateSubmission: %v", err)
 	}
 	if owned, err := s.ClaimLease(ctx, "submission/sub-1", "owner-a", time.Minute); err != nil || !owned {

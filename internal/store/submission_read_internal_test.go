@@ -35,9 +35,10 @@ func TestUnreadableEncryptedPayloadsReportStateUnavailable(t *testing.T) {
 			input := NewSubmission{
 				ID: "sub-1", ClientRequestID: "req-1", Tool: "message",
 				Strategy: "upstream_task", DescriptorDigest: "sha256:test",
-				Arguments: []byte(`{"message":"private"}`),
+				Arguments:        []byte(`{"message":"private"}`),
+				RequestArguments: []byte(`{"message":"private"}`),
 			}
-			if _, err := s.CreateSubmission(context.Background(), input); err != nil {
+			if _, _, err := s.CreateSubmission(context.Background(), input); err != nil {
 				t.Fatalf("CreateSubmission: %v", err)
 			}
 			if _, err := s.db.Exec(test.query, []byte("corrupt"), input.ID); err != nil {

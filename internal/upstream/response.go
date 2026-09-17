@@ -1,0 +1,274 @@
+package upstream
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
+)
+
+// resolveBound returns the response bound for one request: the per-request
+// override when positive, otherwise the client's configured bound.
+func (c *Client) resolveBound(perRequest int64) int64 {
+	if perRequest > 0 {
+		return perRequest
+	}
+	return c.maxBytes
+}
+
+// readResult consumes one call response and returns the raw JSON-RPC result
+// value. The response is either a single application/json body or an SSE
+// stream carrying exactly the matching response. perRequest, when positive,
+// bounds this response's body or events instead of the client's configured
+// bound.
+func (c *Client) readResult(method, requestID string, resp *http.Response, perRequest int64) (json.RawMessage, error) {
+	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
+		drain(resp.Body)
+		return nil, newError(KindAuth, resp.StatusCode, nil)
+	}
+	if resp.StatusCode != http.StatusOK {
+		return nil, c.readHTTPError(resp, perRequest)
+	}
+	contentType := baseMediaType(resp.Header.Get("Content-Type"))
+	switch contentType {
+	case "application/json":
+		return c.readJSONResult(method, requestID, resp.Body, perRequest)
+	case "text/event-stream":
+		var result json.RawMessage
+		sawResponse := false
+		err := c.scanSSE(resp.Body, perRequest, func(msg jsonrpc.Message) (bool, error) {
+			r, done, derr := matchResult(msg, requestID)
+			if derr != nil {
+				return true, derr
+			}
+			if done {
+				result = r
+				sawResponse = true
+				return true, nil
+			}
+			return false, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		if !sawResponse {
+			return nil, newError(KindTransport, 0, fmt.Errorf("%s stream closed without a response", method))
+		}
+		return result, nil
+	default:
+		drain(resp.Body)
+		return nil, newError(KindTransport, 0, fmt.Errorf("unsupported content type %q", contentType))
+	}
+}
+
+// readJSONResult decodes a single application/json response body.
+func (c *Client) readJSONResult(method, requestID string, body io.Reader, perRequest int64) (json.RawMessage, error) {
+	data, err := readBounded(body, c.resolveBound(perRequest))
+	if err != nil {
+		return nil, err
+	}
+	msg, err := jsonrpc.DecodeMessage(data)
+	if err != nil {
+		return nil, newError(KindTransport, 0, fmt.Errorf("decode %s response: jsonrpc", method))
+	}
+	if werr, ok := asWireError(msg); ok {
+		return nil, protocolError(werr)
+	}
+	result, done, err := matchResult(msg, requestID)
+	if err != nil {
+		return nil, err
+	}
+	if !done {
+		return nil, newError(KindTransport, 0, fmt.Errorf("%s response id mismatch", method))
+	}
+	return result, nil
+}
+
+// readHTTPError classifies a non-200 response, extracting a JSON-RPC error
+// object when the body carries one.
+func (c *Client) readHTTPError(resp *http.Response, perRequest int64) error {
+	data, err := readBounded(resp.Body, c.resolveBound(perRequest))
+	if err != nil {
+		return err
+	}
+	if len(bytes.TrimSpace(data)) > 0 {
+		if msg, err := jsonrpc.DecodeMessage(data); err == nil {
+			if werr, ok := asWireError(msg); ok {
+				return protocolError(werr)
+			}
+		}
+	}
+	return newError(KindHTTP, resp.StatusCode, nil)
+}
+
+// readBounded reads at most bound+1 bytes and fails closed on overflow so a
+// hostile or oversized body is never allocated past its bound.
+func readBounded(r io.Reader, bound int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, bound+1))
+	if err != nil {
+		return nil, newError(KindTransport, 0, fmt.Errorf("read upstream body: %w", err))
+	}
+	if int64(len(data)) > bound {
+		return nil, newError(KindTooLarge, 0, fmt.Errorf("body exceeds %d bytes", bound))
+	}
+	return data, nil
+}
+
+// matchResult reports whether msg is the response to requestID and returns
+// its raw result. A JSON-RPC error response is reported as a protocol error.
+func matchResult(msg jsonrpc.Message, requestID string) (json.RawMessage, bool, error) {
+	resp, ok := msg.(*jsonrpc.Response)
+	if !ok {
+		return nil, false, newError(KindTransport, 0, fmt.Errorf("unexpected server request in response stream"))
+	}
+	if !idMatches(resp.ID, requestID) {
+		return nil, false, nil
+	}
+	if werr, ok := asWireError(resp); ok {
+		return nil, false, protocolError(werr)
+	}
+	return resp.Result, true, nil
+}
+
+// idMatches compares a response ID with the string request ID that produced
+// it.
+func idMatches(id jsonrpc.ID, requestID string) bool {
+	raw := id.Raw()
+	s, ok := raw.(string)
+	return ok && s == requestID
+}
+
+// asWireError reports whether msg carries a JSON-RPC error object.
+func asWireError(msg jsonrpc.Message) (*jsonrpc.Error, bool) {
+	resp, ok := msg.(*jsonrpc.Response)
+	if !ok || resp.Error == nil {
+		return nil, false
+	}
+	var werr *jsonrpc.Error
+	if !errors.As(resp.Error, &werr) {
+		return nil, false
+	}
+	return werr, true
+}
+
+// protocolError classifies a JSON-RPC error object as a protocol failure.
+func protocolError(werr *jsonrpc.Error) error {
+	return newError(KindProtocol, int(werr.Code), fmt.Errorf("jsonrpc code %d", werr.Code))
+}
+
+// scanSSE consumes an SSE stream, dispatching each data payload as a decoded
+// JSON-RPC message until dispatch stops, an error occurs, or the stream
+// closes. The complete encoded event counts against the per-event bound:
+// every data line adds its value plus the newline that rejoining inserts, so
+// an unbounded number of individually valid lines cannot allocate an
+// unbounded payload. The stream itself is bounded by the caller context.
+//
+// A clean close without a stop signal returns nil: stream end is an ordinary
+// outcome the caller reconciles. An event whose blank-line delimiter never
+// arrives at EOF is not dispatched, matching the WHATWG event-stream parser
+// (an implied line feed completes the last line, but only a blank line
+// dispatches). Callers that were waiting for a response treat that as a
+// clean close and reconcile.
+func (c *Client) scanSSE(r io.Reader, perRequest int64, dispatch func(msg jsonrpc.Message) (stop bool, err error)) error {
+	maxBytes := c.resolveBound(perRequest)
+	scanner := bufio.NewScanner(r)
+	// The line bound is the event bound plus the data-field prefix: the
+	// cumulative event count below is the actual bound, the line bound only
+	// has to avoid truncating one bounded event.
+	scanner.Buffer(make([]byte, 0, 64*1024), int(maxBytes)+8)
+	var data []string
+	var eventBytes int64
+	// flush returns the dispatch stop signal: a successful stop (the
+	// matching finite response or the graceful subscription close) ends the
+	// scan immediately, even while the peer keeps the body open.
+	flush := func() (bool, error) {
+		payload := strings.Join(data, "\n")
+		data = data[:0]
+		eventBytes = 0
+		if payload == "" {
+			return false, nil
+		}
+		msg, err := jsonrpc.DecodeMessage([]byte(payload))
+		if err != nil {
+			return false, newError(KindTransport, 0, fmt.Errorf("decode SSE payload: jsonrpc"))
+		}
+		stop, err := dispatch(msg)
+		if stop || err != nil {
+			return true, err
+		}
+		return false, nil
+	}
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			if stopped, err := flush(); stopped || err != nil {
+				return err
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue // keepalive comment
+		}
+		if value, ok := strings.CutPrefix(line, "data:"); ok {
+			value = stripOneSpace(value)
+			// Count the line plus its join separator so the cumulative
+			// encoded payload is bounded before the event completes.
+			eventBytes += int64(len(value)) + 1
+			if eventBytes > maxBytes {
+				return newError(KindTooLarge, 0, fmt.Errorf("SSE event exceeds %d bytes", maxBytes))
+			}
+			data = append(data, value)
+		}
+		// event:, id:, retry: fields carry no payload for this contract.
+	}
+	if err := scanner.Err(); err != nil {
+		if isContextError(err) {
+			return err
+		}
+		// Token overflow means one event exceeded the bound; every other
+		// scanner failure is a body read failure and must not be reported
+		// as an oversized response — classify.go maps the two kinds to
+		// different stable codes.
+		if errors.Is(err, bufio.ErrTooLong) {
+			return newError(KindTooLarge, 0, fmt.Errorf("SSE frame exceeds bound: %w", err))
+		}
+		return newError(KindTransport, 0, fmt.Errorf("read SSE stream: %w", err))
+	}
+	// A final event without its blank-line delimiter is dropped by design.
+	return nil
+}
+
+// stripOneSpace removes the single optional space after a field colon, per
+// the SSE grammar.
+func stripOneSpace(s string) string {
+	if strings.HasPrefix(s, " ") {
+		return s[1:]
+	}
+	return s
+}
+
+// isContextError reports whether err wraps context cancellation or deadline.
+func isContextError(err error) bool {
+	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+}
+
+// baseMediaType extracts the media type without parameters.
+func baseMediaType(header string) string {
+	if i := strings.IndexByte(header, ';'); i >= 0 {
+		header = header[:i]
+	}
+	return strings.TrimSpace(strings.ToLower(header))
+}
+
+// drain consumes and closes a response body without inspecting it.
+func drain(body io.ReadCloser) {
+	_, _ = io.Copy(io.Discard, io.LimitReader(body, 4096))
+	_ = body.Close()
+}

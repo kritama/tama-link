@@ -34,6 +34,10 @@ var (
 	// ErrLeaseNotOwned reports that a lease-guarded write no longer belongs to
 	// the caller or its lease has expired.
 	ErrLeaseNotOwned = errors.New("submission lease not owned")
+	// ErrBusy reports that the write lock was held past the busy timeout.
+	// No work is failed: the caller may retry, and lease-based coordination
+	// makes a deferred retry safe.
+	ErrBusy = errors.New("store busy")
 	// ErrResultTooLarge reports that a terminal result exceeds the profile
 	// result bound. The result is never truncated or stored.
 	ErrResultTooLarge = errors.New("result too large")

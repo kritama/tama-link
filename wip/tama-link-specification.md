@@ -50,7 +50,8 @@ Tama Link must:
    responses;
 8. normalize progress so basic clients can poll it and richer plugins can
    render it live;
-9. negotiate supported MCP revisions on the upstream and downstream sides;
+9. speak MCP `2026-07-28` on the upstream side while negotiating the supported
+   client protocol on the downstream side;
 10. contain protocol-version and client-compatibility logic outside Tama;
 11. protect OAuth credentials, tokens, result data, and logs; and
 12. support deterministic diagnosis and compatibility testing;
@@ -185,7 +186,11 @@ Requirements:
   declarative profile bindings and validates the complete upstream arguments
   against the pinned upstream contract.
 - `client_request_id` is an opaque idempotency key scoped to the profile. When
-  omitted, Tama Link generates one before the first upstream mutation.
+  omitted, Tama Link generates one before durable acceptance, bindings, and
+  the first upstream mutation; a generated key is fresh on every call, so each
+  omission is a new submission. Operations whose reviewed bindings map the
+  key to an upstream identity (for example the App `message` projection)
+  document that a generated identifier is a fresh identity per call.
 - `client_context` carries client-owned correlation values that an operation
   binding may require but ordinary MCP does not provide automatically. It is
   not passed upstream unless a reviewed profile binding maps a field.
@@ -193,14 +198,70 @@ Requirements:
   `client_context.thread_id`, omission is `invalid_request`. Tama Link must not
   substitute a profile-global or process-global conversation identity.
 - Repeating the same `client_request_id` with equivalent canonical input must
-  return the original submission.
+  return the original submission. The request identity is the client-visible
+  request — the tool name, the canonical arguments, and the client-owned
+  correlation values the accepted operation can map — never live profile
+  state or bound upstream output, so a retry after a profile reconciliation
+  reconciles to the original submission instead of reporting a conflict. A
+  context that carries no correlation value is normalized to absence, so a
+  retry that omits the context or sends an empty one carries no value in
+  any candidate identity. The accepted identity records how the operation
+  handled the client thread ID at acceptance: its value, an explicit
+  absence when the request carried no value, or no field at all when the
+  operation could not map the source. A retry cannot know which shape it
+  took — the binding set may have changed since — so recovery matches, for
+  a retry that carries a value, the identity with that value or the
+  unmappable-source identity, and, for a retry that carries no value, the
+  explicitly-absent or the unmappable-source identity. Adding a thread ID
+  after an accepted request omitted one from a mappable source reports a
+  conflict; changing a value the accepted operation never mapped
+  reconciles; and an exact retry reconciles whether the tool kept, gained,
+  or lost its thread binding, or left the catalog entirely.
+  The same candidate matching applies when the key is claimed concurrently
+  at insert time: two processes straddling a profile reconciliation can
+  both miss the preliminary lookup, and the insert loser reconciles the
+  winner's row against the candidate identities instead of reporting a
+  conflict for an otherwise exact request.
+  Reconciliation
+  runs before the catalog membership check, argument validation, and binding
+  application, in addition to before the readiness and strategy checks
+  below. A replay appends no
+  progress events and re-offers nothing to the worker: an already advanced
+  row keeps a monotonic event sequence.
+- Reconciliation of an existing idempotency record precedes the catalog,
+  readiness, and strategy checks: recovery of an already accepted request
+  must not depend on the current catalog, credentials, or a later profile
+  policy change, so a retry after reconciliation removed its tool still
+  returns the original submission. The client-facing submit surface must
+  not restrict the tool name to the current catalog for this: an exact
+  retry whose tool the profile later removed still reaches the
+  application, and the application enforces the catalog only for
+  genuinely new work. The authenticate-first
+  verification and the strategy gate below apply only to genuinely new
+  acceptance.
 - Lowering a profile limit must not make an already accepted idempotent request
   unrecoverable. Tama Link canonicalizes and reconciles an existing request
   within implementation hard ceilings before applying current profile limits;
-  those current limits govern only genuinely new acceptance.
+  those current limits govern only genuinely new acceptance. Each accepted
+  submission's lifecycle policy is durable and governs its own executions:
+  a replayable submission recovered after a profile limit change runs under
+  the response bound it was accepted with — raising the limit cannot admit a
+  response the accepted policy rejects, and lowering it cannot fail a
+  response that was valid when accepted.
 - Reusing it with different input must fail with `idempotency_conflict`.
 - Success means Tama Link durably accepted responsibility for the operation in
   its local store, not that Tama accepted or completed it.
+- Tama Link verifies that the profile can authenticate before durable
+  acceptance, without a refresh or an upstream connection. A usable
+  credential is the complete pair a refresh would find: a registered client
+  and a refresh credential, both bound to the active profile issuer with an
+  issuer-bound token endpoint. A cached in-memory token never counts by
+  itself: another process may have logged the profile out, and accepting on
+  a cached token alone would only burn idempotency keys on work the worker
+  cannot authenticate. A profile without that complete pair fails
+  `submit` as `authentication_required`, and the idempotency key stays free,
+  so the reauthorize-and-retry flow replays as a genuinely new acceptance
+  instead of returning a permanently failed submission.
 - The response must not block until graph completion.
 
 For the initial App `message` projection, the profile may bind
@@ -236,19 +297,41 @@ Input schema:
 {
   "submission_id": "string, required",
   "cursor": "string, optional",
-  "timeout_ms": "integer, optional"
+  "timeout_ms": "integer, optional",
+  "input_responses": "object keyed by outstanding input-request ID, optional"
 }
 ```
 
 Requirements:
 
-- `timeout_ms` is bounded by configuration. The initial recommended default is
+- `timeout_ms` is bounded by configuration and is compared in milliseconds
+  before any duration conversion, so values that would overflow a 64-bit
+  duration fail as `invalid_request` instead of wrapping. The initial
+  recommended default is
   20 seconds and the maximum is 30 seconds.
 - Returning because the wait budget elapsed is a successful pending response,
   not a tool error.
+- Pending responses carry `next_poll_ms` polling guidance; terminal responses
+  omit it entirely, so a client scheduling retries off the field stops once
+  `terminal` is true.
+- Cancellation and budget expiry each trigger one final fresh state read on
+  an independent context with its own short deadline, so a contended or
+  stalled store cannot hold the handler beyond the wait contract after the
+  caller disconnected. Only the expiry of that independent deadline falls
+  back to the last snapshot — at most one poll interval stale, and the
+  caller can await again; a real storage failure during the refresh still
+  reaches the caller instead of being reported as a pending response.
 - `cursor` is opaque and allows the caller to request only progress events
   after the last observed sequence.
 - A client may call `await` repeatedly until `terminal` is true.
+- When the current state is `input_required`, `input_responses` may answer one
+  or more outstanding request IDs. Partial response maps are allowed. An exact
+  replay is idempotent; a different response for an already answered ID is
+  `idempotency_conflict`, and a response for an ID that is not outstanding is
+  `invalid_request`.
+- One `await` call sends at most one upstream `tasks/update` before entering its
+  bounded wait. The acknowledgement is eventually consistent and must not be
+  interpreted as proof that the task already left `input_required`.
 - Cancellation or disconnection stops the active wait promptly without
   changing durable upstream work.
 - Concurrent waits for the same submission must not duplicate upstream work.
@@ -276,11 +359,36 @@ Pending output:
 }
 ```
 
-This is the rich-adapter shape. The initial current-Tama App adapter has no
-structured upstream progress channel, so it emits state-transition events and
-omits unknown `current`, `total`, and `label` values. System operations may
-likewise expose only queued/running state unless the upstream tool provides
-structured progress.
+This is the rich-adapter shape. The TamaMCP task surface provides complete task
+snapshots and bounded `statusMessage` values through `tasks/get` and
+`notifications/tasks`, but no standard numeric task-progress channel. The
+adapter emits state-transition events, may use `statusMessage` as its bounded
+message, and omits unknown `current`, `total`, and `label` values. System
+operations may likewise expose only queued/running state unless the upstream
+tool provides reviewed structured progress.
+
+An input-required pending response contains the validated outstanding request
+map while retaining the same local submission and cursor:
+
+```json
+{
+  "submission_id": "sub_opaque",
+  "status": "input_required",
+  "terminal": false,
+  "cursor": "event_cursor",
+  "input_requests": {
+    "approval": {
+      "mode": "elicitation",
+      "schema": {}
+    }
+  },
+  "next_poll_ms": 1000
+}
+```
+
+The exact values inside each request and response remain validated protocol
+JSON. Tama Link declares upstream input sub-capabilities only when this
+downstream contract and the selected profile can relay them safely.
 
 Successful terminal output:
 
@@ -322,11 +430,12 @@ Failed terminal output:
 The normalized submission states are:
 
 ```text
-accepted -> queued -> running -> completed
-                            |-> failed
-                            |-> cancelled
-                            |-> expired
-                            |-> outcome_unknown
+accepted -> queued -> running <-> input_required
+                       |-> completed
+                       |-> failed
+                       |-> cancelled
+                       |-> expired
+                       |-> outcome_unknown
 ```
 
 The `succeeded` label is not used because successful result retrieval and a
@@ -336,13 +445,23 @@ move from a terminal value back to a pending value. Repeated terminal reads
 must return the same normalized result unless retention has expired, after
 which they return the terminal `submission_expired` error.
 
-`completed` means Tama Link captured an upstream MCP `CallToolResult`. The
-captured result preserves `isError`, content blocks, structured content, and
-safe `_meta`; a completed operation may therefore contain `is_error: true`.
+`input_required` is non-terminal and may return to `running` after an accepted
+response or move directly to any terminal state allowed by the upstream task
+contract. `completed` means Tama Link captured an upstream MCP
+`CallToolResult`, where `isError` is a required field: a complete result that
+omits it or sets it to null is a protocol failure, never a manufactured
+success. The captured result preserves `isError`, content blocks,
+structured content, and safe `_meta`; a completed operation may therefore
+contain `is_error: true`.
 Normalized content blocks and safe `_meta` are retained as validated raw JSON,
 not projected through a fixed Go union, so extension fields and content added
 by a compatible MCP revision are not discarded. Endpoint adapters validate the
-wire shape before storage.
+wire shape before storage: the required fields of the pinned protocol
+version's known content block types (text, image, audio, resource_link,
+embedded resource) are enforced there, while unknown types are preserved as
+extension blocks, and a local_replayable operation's successful structured
+result is validated against the operation's pinned output schema before it
+can be stored as completed.
 `failed` is reserved for transport, protocol, authentication, local execution,
 or result-capture failure. `outcome_unknown` is reserved for the ambiguous
 result of a non-replayable synchronous mutation and must never be silently
@@ -375,7 +494,7 @@ Permitted persisted values include:
 - local submission and idempotency identifiers;
 - operation name, execution strategy, descriptor digest, and validated
   canonical upstream arguments required for recovery;
-- upstream opaque correlation identifier;
+- upstream opaque owner-bound task identifier when the operation is task-backed;
 - normalized state and timestamps;
 - progress cursor and bounded recent events;
 - terminal result or structured failure within retention limits;
@@ -390,7 +509,10 @@ platform credential store or another explicitly selected secure backend.
 Canonical arguments, results, progress messages, and other sensitive state
 blobs must be encrypted at rest with a profile-scoped key held in the platform
 credential store. Non-sensitive indexes, digests, state labels, and timestamps
-may remain plaintext.
+may remain plaintext. Each ciphertext is authenticated against its durable
+row identity and semantic kind: a blob copied to another row — including
+another input request of the same submission — fails authentication instead
+of decrypting successfully.
 
 A new empty profile database may generate its random state-encryption key in
 the configured secure credential backend. An existing database whose key is
@@ -398,16 +520,75 @@ missing or unavailable must fail closed with `state_unavailable`; Tama Link must
 not generate a replacement, overwrite unreadable rows, delete state, or fall
 back to plaintext. Logout never removes the state key. Version 1 performs no
 automatic state-key rotation, and headless environments are supported only with
-an explicitly available secure credential backend.
+an explicitly available secure credential backend. Backend availability is a
+bounded startup probe: a complete set/read/remove cycle on one disposable
+entry with a unique unguessable per-invocation key must finish within a short
+fixed window, or Tama Link fails fast with a
+clear unavailable error. The window is fixed in the binary and cannot be
+extended at runtime, and it covers the whole probe — queueing behind a
+busy worker and execution alike — so a request accepted late gets only
+the remaining window, never a fresh one. The probe runs through one
+process-wide worker goroutine rather than an abandoned one per attempt:
+the keyring API takes no context, so an in-flight call cannot be
+interrupted, but a timed-out probe abandons only its request — the same
+worker serves every probe New makes, so retrying an unavailable backend
+cannot accumulate blocked workers, and a backend that blocks forever
+pins exactly that one worker while later probes fail fast at the
+deadline. Every successful probe write is followed by a removal even
+when the read fails, so repeated failed startups never accumulate
+permanent probe entries in the backend while deletion still works. A
+backend that accepts a
+connection but blocks on user
+interaction for writes (for example a headless Secret Service) is
+unavailable; an interactive unlock prompt is not a supported serve-startup
+path, and Tama Link must never hang the serve process on the platform
+credential store.
 
 Writes must be atomic and safe against symlink traversal. Local state and
 configuration permissions must be restrictive. Retention and garbage
 collection must never remove a non-terminal submission merely because the
 downstream client disconnected.
 
+Successful `submit` means Tama Link durably accepted responsibility for
+executing the operation, and that acceptance must always reach execution or a
+terminal state without a process restart. The execution pool bounds live
+executions and waiting goroutines alike: at most the configured maximum
+executes concurrently and at most that many more wait for a slot in a
+bounded parking set; a saturated pool never spawns one waiting goroutine per
+offered ID, and the excess stays durable in the store until the sweep
+redelivers it. The in-memory worker queue is a prompt-start aid only: when
+it is saturated, a recurring durable sweep re-derives every runnable
+replayable submission from the store and re-offers it, so a dropped queue
+entry is rediscovered within one sweep interval. The
+sweep must not re-offer work this process is already executing: in-flight
+entries would otherwise crowd the prompt queue ahead of dropped IDs and
+starve them. The lease remains the final single-winner guard across
+processes. The sweep also runs on explicit request, so a caller that
+observed queue saturation can shorten the recovery wait without changing
+the durable guarantee. A worker that
+has already published a terminal state releases its lease on a best-effort
+basis: the release is retried against transient SQLite contention and, if it
+still fails, is dropped rather than undoing the terminal transition, because
+a lease that outlives a terminal submission only lingers until its TTL
+expiry and can never shadow terminal work. A lease claim or transition that
+times out against the store's busy timeout is a transient condition, not a
+submission failure: startup recovery defers it and the recurring sweep
+retries it. Refresh-lease contention is likewise transient, never a failure
+of the work: an execution whose token provider could not claim the refresh
+lease keeps its non-terminal state and is redelivered by the sweep, instead
+of recording a terminal authentication failure for a credential that another
+process is merely refreshing.
+
 The store must tolerate multiple Tama Link processes opening the same profile.
 SQLite uses WAL mode, bounded busy handling, transactional idempotency, and
-lease-based worker ownership. The database file and its `-wal` and `-shm`
+lease-based worker ownership. Every multi-statement write transaction begins
+with `BEGIN IMMEDIATE`: the pinned driver honors the busy timeout only when a
+write lock is acquired at BEGIN time, while a write statement that upgrades a
+deferred transaction after a read fails immediately with a lock error even
+though the other process would release the lock well before the busy timeout.
+A concurrent process's open-validation window is an ordinary write-lock holder;
+overlapping writers must wait for the busy timeout and then proceed, never
+corrupt or lose the submission. The database file and its `-wal` and `-shm`
 sidecars are opened or created without following links inside the validated
 private profile directory before WAL is enabled. On Windows, each child
 directory, the database, and both sidecars are opened relative to the already
@@ -433,34 +614,104 @@ description
 upstream input schema
 client-visible input schema
 output schema
-annotations and task support
+annotations and expected task/execution strategy
 declarative argument bindings
 execution strategy
 descriptor digest
 ```
 
-The catalog snapshot allows Tama Link to initialize and advertise useful tools
-before interactive OAuth is available. On an authenticated upstream connection,
-Tama Link performs initialization and a complete paginated `tools/list`, then
-intersects the live catalog with the profile allowlist. A live tool that is not
+The catalog snapshot allows Tama Link to advertise useful tools before
+interactive OAuth is available. On an authenticated upstream connection, Tama
+Link performs `server/discover` and reads the complete `tools/list`, then
+intersects the live catalog with the profile allowlist. The bootstrap reads
+are bounded by the implementation hard response ceiling rather than the
+profile's current response bound: the catalog is profile infrastructure, not
+a submission's response, so a later, lowered profile limit can never
+constrain connection establishment or irreversibly fail an already accepted
+submission whose catalog no longer fits the lowered bound. The ceiling is
+cumulative across pagination, so a hostile endpoint serving many
+just-under-bound pages cannot exhaust process memory. Annotation numbers in
+the live catalog compare by their JSON literal, never through float64
+coercion, matching the profile loader. A live tool that is not
 in the profile is never exposed automatically. A pinned operation whose
 security-relevant descriptor has drifted fails closed with
 `operation_contract_mismatch` until the profile is reconciled.
 
-The downstream `submit` schema always constrains `tool` to the approved names.
-For legacy clients, `arguments` remains an object and the generated `submit`
-description includes bounded deterministic operation signatures. Tama Link
-performs the authoritative per-operation validation at execution time. A later
+TamaMCP's `2026-07-28` tool listing does not expose the legacy
+`execution.taskSupport` field. A profile still pins Link's expected execution
+strategy. For task-backed operations, Link verifies the Tasks extension in
+`server/discover`, declares it in the current request, and requires the expected
+`tools/call` `resultType`. Absence of legacy task metadata must not be
+interpreted as evidence that a TamaMCP tool is synchronous. A task result for a
+pinned synchronous operation is a contract violation: the submission fails
+terminal with `operation_contract_mismatch` and the task result is never
+polled, stored, or returned.
+
+The downstream `submit` schema does not constrain `tool` to the current
+approved names: an exact retry whose tool the profile later removed must
+still reach idempotency reconciliation, and the application enforces the
+catalog for genuinely new work. For legacy clients, `arguments` remains an
+object and the generated `submit` description includes bounded deterministic
+operation signatures, which are the advertisement of the approved
+operations. Tama Link performs the authoritative per-operation validation at
+execution time. A later
 downstream protocol adapter may use a tagged `oneOf` schema when the negotiated
 client supports full JSON Schema composition; correctness must not depend on
 that richer presentation.
+
+Runtime validation is authoritative only within a reviewed assertion
+vocabulary: `type`, `properties`, `required`, `additionalProperties`
+(boolean or nested schema), `items`, `enum`, `const`, `minimum`, `maximum`,
+`minLength`, `maxLength`, `minItems`, `maxItems`, and `pattern`, plus the
+annotation keywords `title`, `description`, `examples`, `default`, `$schema`,
+and `$comment`. A pinned operation schema that uses any other assertion
+keyword — `oneOf`, `allOf`, `not`, `minProperties`, `uniqueItems`,
+`contains`, `exclusiveMinimum`, `dependentRequired`, or another — would be
+silently unenforced, so profile load fails closed and names the unsupported
+keyword, recursively, instead.
+
+Profile load also validates the meta-shape of every supported keyword,
+recursively: a keyword with a null or malformed value is rejected, never
+interpreted as absent, so a malformed schema cannot disable an intended
+restriction. Count constraints are non-negative integers within a reviewed
+bound, `enum` is non-empty, `required` names are unique and, when
+`properties` is present, declared, bound pairs must not be inverted, and
+type names come from the closed set. The `pattern` dialect is Go's RE2
+syntax, a strict subset of the ECMAScript-compatible regular expressions
+JSON Schema normally assumes, and patterns must compile at profile load.
+At runtime, `minLength` and `maxLength` count Unicode code points, and
+numeric values and bounds accept the complete JSON number grammar,
+including exponent form. Numeric work — bound comparison, integer checks,
+and `const`/`enum` equality — runs on exact arbitrary-precision decimals
+(`github.com/cockroachdb/apd/v3`), never through `float64`, and never
+allocates in proportion to the exponent magnitude. The reviewed exponent
+range is the decimal library's effective-exponent limit of ±100000:
+an out-of-range exponent fails profile load for numeric bounds and count
+constraints, and fails instance validation whenever a numeric assertion
+(bound, `const`, `enum`, or `integer` type) must evaluate it, in both
+cases as a validation error rather than a panic. `const` and `enum` use
+JSON Schema instance equality recursively: numbers compare by exact
+mathematical value (`1`, `1.0`, and `1e0` are equal), strings by decoded
+code points, arrays positionally, and objects independently of key order.
+Count constraints use the same checked decimal conversion during profile
+validation and runtime schema decoding, so an exponent-form integer such as
+`1e2` is enforced as 100 in both paths. Integer checks reduce trailing
+coefficient zeros and inspect the resulting exponent; they never construct
+`10^scale` or perform work proportional to an exponent's magnitude.
+
+`required` follows the standard JSON Schema semantics: it applies only to
+object instances (a non-object value is constrained only by an independent
+type assertion), it checks map-key presence only (a present property whose
+value is an explicit JSON null satisfies it, and the property's own schema
+decides whether null is permitted), and no `default` annotation fills a
+missing required property.
 
 Server instructions are composed from two clearly separated sources:
 
 1. Tama Link supplies the submit-once, await-until-terminal workflow and local
    safety constraints.
 2. The trusted profile supplies a pinned bounded copy of the selected upstream
-   server instructions, verified against live initialization when connected.
+   server instructions, verified against live discovery when connected.
 
 Product skills own domain judgment such as when and what to remember or how to
 conduct Reflection review. Skills must not be the sole source of operation
@@ -476,7 +727,7 @@ Each operation selects exactly one execution strategy:
 
 | Strategy | Initial use | Recovery |
 | --- | --- | --- |
-| `upstream_task` | `/mcp/app` `message` | Reconnect, reissue the canonical idempotent request, and attach a fresh session-scoped task ID |
+| `upstream_task` | `/mcp/app` `message` | Reauthenticate, retrieve the same owner-bound task ID through `tasks/get`, and resubscribe; replay the canonical request only after ambiguous initial acceptance with no task ID |
 | `local_replayable` | Read-only or proven-idempotent `/mcp/system` tools | Execute as an ordinary upstream call from a leased local worker; replay safely after an interrupted lease |
 | `local_guarded` | Synchronous mutation with a reviewed conflict/reconciliation contract | Reconcile before retry; otherwise terminate as `outcome_unknown` |
 | `unsupported` | Unsafe synchronous mutation | Reject before upstream execution |
@@ -490,29 +741,172 @@ correlation is returned and retrievable during reconciliation. The existing
 Tama App submission table remains authoritative for graph execution and is not
 generalized for System calls.
 
-Initial adapter work must cover the protocol and durable-result contract in the
-currently supported Tama release. Later adapters may cover standard MCP Tasks
-and the newer MCP protocol without changing the downstream `submit`/`await`
-tool contract.
+The sole upstream adapter speaks MCP `2026-07-28` as implemented by TamaMCP. It
+does not send `initialize`, `notifications/initialized`, `Mcp-Session-Id`,
+client-requested task augmentation, `tasks/result`, or `tasks/list`.
 
-At connection time Tama Link records and validates:
+The Phase 2 wire baseline is the TamaMCP specification at commit
+`6b5db00018d2774834db5a0f00eed5b9b55e1d2e`, including its immutable core and
+Tasks conformance pins. A different TamaMCP revision is supported only after
+its compatibility bounds and fixtures are reviewed and the profile contract
+is regenerated.
+
+Every request is independently authenticated and carries
+`MCP-Protocol-Version`, `Mcp-Method`, conditional `Mcp-Name`, and matching
+per-request `_meta` protocol version, Link client information, and declared
+capabilities. Unsupported, absent, or body-mismatched standard headers fail
+closed. Link declares the Tasks extension on each applicable request; it does
+not infer capabilities from discovery or an earlier call.
+
+Task creation is server-directed. A task-backed `tools/call` returns an opaque,
+globally unique, owner-bound task ID; attaching it to the durable submission
+is first-write-wins, idempotent for an identical value, and reports a
+conflict when the submission already carries a different task ID rather than
+succeeding silently. `tasks/get` returns the complete detailed
+task state and includes the terminal `CallToolResult` or failure payload.
+`tasks/update` carries responses while a task is `input_required`, and
+`tasks/cancel` records cooperative cancellation intent. Downstream `await`
+cancellation remains local and does not invoke `tasks/cancel` or cancel Tama's
+durable Submission or graph execution.
+
+`subscriptions/listen` is an authorized, task-ID-scoped SSE optimization. Link
+accepts no task notification before the acknowledgement, captures complete
+snapshots only when the subscription ID matches and the task ID is in the
+acknowledged set, and always recovers through `tasks/get` after a disconnect,
+missed notification, overflow, credential expiry, or policy invalidation.
+Correctness never depends on notification delivery.
+
+The stream contract fails closed: the acknowledgement must be the first event
+and may authorize only a subset of the requested task IDs; every later task
+snapshot must carry an acknowledged task ID; the final JSON-RPC response may
+only follow the acknowledgement and marks graceful closure; a final JSON-RPC
+error is a protocol failure, not a clean close. A successful stop signal — the
+matching finite response or the graceful final response — ends the scan
+immediately; the client never waits for the peer to close a held-open body.
+SSE events are bounded as a complete encoded event, including multi-line data
+fields, and an event whose delimiter never arrives at end of stream is not
+dispatched. A stream's lifetime is bounded by the caller context, credential
+expiry, and the stream-lifetime owner, never by a finite-request client
+timeout. Finite requests additionally receive a per-request deadline (default
+60 seconds); a supplied HTTP client's overall timeout is cleared when the
+transport clones it, so no client-level timeout can terminate a stream.
+
+Detailed task states and initial `tools/call` task results share one common
+envelope: `createdAt`, `lastUpdatedAt`, and `ttlMs` are required, correctly
+typed, non-negative, and bounded by the Tasks maximum safe integer (2^53-1);
+`pollIntervalMs` carries the same bounds when present; explicit nulls fail
+like missing values. The pinned TamaMCP profile creates tasks in the `working`
+state, so an initial task result in any other state is a protocol failure,
+not a shortcut to a captured result.
+
+At discovery time Tama Link records and validates:
 
 - negotiated protocol version;
 - server identity and declared capabilities;
-- selected task/result adapter;
+- Tasks and task-notification capabilities;
 - protected-resource and authorization-server metadata; and
 - profile compatibility bounds.
 
 Unsupported combinations fail closed with `protocol_mismatch`. Tama Link must
 not guess task support from a product name or user agent.
 
-The downstream STDIO server must use a reviewed stable release of the official
-MCP Go SDK. Because the released SDK used by the initial implementation does
-not expose the current Tama task request/lookup surface or a raw request API,
-the current upstream adapter may use a minimal reviewed and fixture-tested
-JSON-RPC/Streamable HTTP implementation. Pre-release support for a newer
-protocol must not enter the default build until the application and client
-compatibility matrix is proven.
+The authorization-server metadata is validated before any token request:
+the token endpoint must be a secure absolute URL on the same origin as the
+validated issuer, because the authorization code and any client secret are
+sent there. A token response is accepted only when its HTTP status is
+successful and the document carries no OAuth error: a document with both
+`access_token` and an `error`, or any non-2xx status, is never treated as
+a usable token, so no refresh or authorization persists credentials from
+an error response. The same origin policy re-validates the stored token endpoint
+before every refresh. A refresh holds its cross-process lease for the whole
+critical section: the lease is renewed on a third of its TTL while the token
+exchange runs and the replacement credential is written, and a lost lease
+aborts before any replacement token is persisted: ownership is re-verified
+by an atomic commit gate immediately before the write, so a lease lost to a
+foreign claim blocks the stale write. The renewal spans the whole critical
+section — the token exchange and the fenced persistence — so a slow
+secret-store write cannot outlive the lease TTL and reject the replacement
+after the endpoint already rotated the grant. The credential persistence
+itself is fenced: every writer commits its replacement at its own unique
+secure-backend slot and then atomically advances a durable fence pointer to
+that slot's generation, and the commit is a single atomic operation that
+requires both an unadvanced fence generation and the writer's own live,
+unexpired lease ownership epoch — the epoch gate covers the plain insert
+path too, so a fence row that is absent because logout cleared it or no
+authorization ever committed cannot be created by a stale writer either —
+with a provider that permits overlapping
+rotations, a writer that lost the lease while its secret-store write was
+blocked can never make its value live, not even before the winner commits
+its own generation. A writer whose commit fails or is rejected rolls its
+own uncommitted slot back, and if that rollback deletion also fails the
+slot is durably enqueued in the retirement backlog so a later refresh or
+logout retries it — a rejected writer never orphans a refresh token in
+the backend. The commit is the last fallible step for the slot
+swap: the previous live slot stays referenced until the commit is durable,
+so a rejected commit can never leave the fence pointing at a deleted
+credential, and the commit atomically enqueues the previous slot in the
+retirement backlog — one transaction with the advance — so a committed
+fence always carries a durable retirement record for the slot it replaced.
+A successful commit leaves the new slot as the only live credential; the
+replaced credentials — the legacy label and the previous live slot — are
+retired after the commit, the backlog record is cleared on success, and a
+failed retirement keeps its durable record so a later refresh or logout
+retries the deletion instead of silently stranding a still-valid grant. The
+authorization-code exchange is a credential rotation too: it holds the
+local refresh lock across the exchange and persistence, so an in-process
+refresh or logout waits for the login instead of racing it through the
+shared lease owner, and it claims the same refresh lease before redeeming
+the single-use code and renews the lease across both the exchange and the
+fenced persistence, so a lease contention can never burn the code; it
+commits its credential through the same fence under its own epoch. Logout holds the local refresh lock
+and claims the cross-process refresh lease before touching credentials, so
+no concurrent writer can reinstall a fence and slot behind the logout: the
+claim advances the epoch and every in-flight writer's commit fails and
+rolls back its own slot. A contended claim fails logout with a retryable
+error. Ownership is renewed through the whole cleanup, outliving the
+caller's cancellation because the fixed-label deletions take no context
+and cannot be aborted: a cancel mid-delete must not hand the epoch to
+another process whose new registration the stale deletion would then
+remove. The fence clear
+is bound to the claimed epoch, so a logout that loses its lease
+mid-cleanup fails retryably and can never wipe a newer fence installed by
+the process that took over. The committed slot is deleted while the fence
+still references it — a failed deletion keeps the slot discoverable, so a
+retried logout finishes the cleanup — and the fence is cleared once its
+slot is gone; a fence that is already absent clears successfully, so a
+repeated logout or a legacy-only profile can complete its cleanup; a later
+login starts from a clean fence. The
+fence subsumes post-write ownership checks, which
+cannot repair an unfenced external write. Refresh transactions are also
+serialized inside one process, and a burst of concurrent token requests
+reuses one rotation: queued callers recheck the cached token under the
+single-flight lock, while an explicit forced refresh never coalesces. The
+refresh lead time is capped to a quarter of the issued token lifetime so a
+short token keeps a positive validity window instead of refreshing on every
+request.
+
+The local worker executes at most a bounded number of submissions
+concurrently; queued work beyond the bound waits for a free slot. The bound
+protects the store writer and the upstream connection pool when a sweep or
+burst discovers a large backlog. Before a replayable submission executes,
+the worker rechecks the submission's accepted descriptor digest against the
+connection's effective descriptor: a submission accepted under one contract
+is not executed under a different descriptor that reuses the tool name, and
+the mismatch fails with `operation_contract_mismatch` before any upstream
+call. The verified upstream connection is resolved once and reused for the
+process lifetime: the connection's token provider tracks refreshes, so a
+reused connection always authenticates with the current credential, while
+re-resolving per replayable execution would repeat the authenticated
+`server/discover` and the complete paginated `tools/list` for every
+operation and let a transient discovery outage fail already queued work.
+
+Both the downstream STDIO server and the upstream core transport use a reviewed
+stable release of the official MCP Go SDK. If the selected stable release does
+not expose the separately versioned Tasks methods or task-ID subscription
+shape, Tama Link may add one minimal reviewed extension layer for those exact
+wire contracts. It must reuse SDK core transport conventions and pass the
+TamaMCP package fixtures; it must not grow into a second general MCP client or
+reintroduce legacy session behavior.
 
 ## Progress contract
 
@@ -615,11 +1009,110 @@ operation may refresh authorization when standards and policy permit, but must
 return an actionable terminal or retryable error when user interaction is
 required.
 
-The current Tama `0.14.0-server` profile uses a stable refresh token across
-refresh exchanges. Tama Link coordinates refresh through a profile-scoped
-cross-process lease, re-reads the credential after acquiring it, and safely
-stores a replacement if a future compatible server returns one. `invalid_grant`
-maps to `authentication_required` without an automatic retry loop.
+The authorization-code exchange binds one exact loopback redirect URI. The
+ephemeral listener port is selected before the authorization URL is built, and
+that exact URI appears in the authorization request, is required on the
+observed callback, and is resent verbatim in the token request, as the
+authorization-code grant requires. A callback observed on any other URI is
+rejected before any token request is sent.
+
+Tama Link coordinates refresh through a profile-scoped cross-process lease,
+re-reads the credential after acquiring it, and safely stores a replacement
+refresh token when the provider returns one. The reported `expires_in` is
+bounded before its duration conversion, so a pathological value can never
+wrap negative and commit a credential that is already expired.
+`invalid_grant` maps to
+`authentication_required` without an automatic retry loop, and the durable
+refresh credential is invalidated under the held, renewed lease: the fence
+pointer and the fenced slot's retirement record are committed in one
+transaction — honoring a lost epoch and treating an absent fence as already
+cleared — before the slot is deleted, so a crash or a failed deletion can
+never leave the slot with no durable reference; a failed deletion keeps its
+record for the next refresh or logout, and the record is removed only after
+the deletion succeeds. The durable invalidation marker is established
+before the fence is cleared — clearing makes a surviving legacy label
+eligible for the fence-less fallback — so a crash or a failed fenced-slot
+deletion can no more bring the rejected grant back to life than a failed
+legacy deletion; the marker is cleared once the label is gone or a new
+credential commits. With
+the credential invalidated, readiness rejects new
+work as `authentication_required` instead of accepting submissions that
+can only fail on the same known-invalid grant. An upstream
+subscription closes no later than credential expiry; after successful refresh,
+Link reconciles through `tasks/get` before opening a replacement stream.
+A successful exchange requires the response to declare the Bearer token
+type, case-insensitive: the upstream transport always sends the access
+token as a Bearer credential, so an omitted or different type is a failed
+exchange, not a credential.
+
+The stored client registration and refresh credential must both bind the
+active profile issuer, and the stored token endpoint is re-validated against
+the issuer-bound metadata policy before use. A profile that changes issuer
+while retaining its credential namespace fails closed rather than replaying a
+foreign token to a stored endpoint. A registration response must supply the
+client secret the selected auth method requires: a client-secret
+registration without a secret fails the registration instead of being
+persisted as a permanently unusable record that readiness keeps accepting.
+The stored registration is revalidated against the same requirement on
+load, so a legacy record persisted without the secret is treated as absent:
+readiness fails as not-ready and the next login's registration replaces the
+unusable record instead of the profile looping on it. The RFC 7591
+`client_secret_expires_at` is persisted with the registration, and an
+expired secret makes the record absent for readiness and refresh, so the
+next login re-registers before an exchange can fail on an `invalid_client`
+authentication. Because a replacement registration issues a new client ID,
+any refresh credential still stored from the previous client is retired and
+the new record committed under one refresh-lease epoch: a login that
+started from the previous record revalidates the stored registration before
+consuming the single-use authorization code and again before committing its
+grant, so it either commits before the replacement — its grant is then
+retired as orphaned — or aborts, and the new client is never paired with a
+grant issued under the old one. The registration mutation also holds the
+local lock that orders completions, refreshes, and logouts (a same-owner
+claim never advances the epoch, so the lease alone cannot order in-process
+mutations) and renews the epoch across the whole mutation — and the lock
+and lease are acquired before the registration POST itself: a writer that
+cannot own the epoch fails before creating an upstream client it could
+never commit, and a concurrent first-time login waits for the winner's
+whole mutation, rechecks the stored record under the lock, and reuses the
+winner's registration instead of creating its own client. The client
+record is fenced exactly like the refresh credential: the record is
+written to a unique secure-backend slot and made live only by an atomic
+fence advance that requires the writer's own live, unexpired lease
+ownership epoch. Slot labels stay within the credential backend's
+accepted label characters — alphanumerics plus dot, underscore, and dash —
+so the generated labels are always accepted by the production keyring. The slot write itself takes no context and cannot be
+aborted, but a writer that loses the lease while the write is in flight —
+or whose caller cancels before the commit is observed — has its fence
+advance rejected and removes its own uncommitted slot, so it can never
+install a stale registration, and a winner whose registration commits in
+between keeps its own fenced record untouched. If that rollback deletion
+fails, the uncommitted slot is durably added to the client retirement backlog
+on a cancellation-independent context so a later refresh or logout retries it
+instead of orphaning a client secret. The first successful commit also
+retires the legacy single-label record: once a client fence exists the
+legacy label is dead data — reads take the fenced slot and fall back only
+when no fence has been committed — so the commit enqueues it for
+retirement atomically with the fence advance, making the migration
+restart-safe: a crash after the commit, or a failed deletion, always
+leaves a durable cleanup record that the retirement sweep retries. The
+fence pointer and its
+clear are therefore the only authority for which registration is live:
+reads take the fenced slot when a client fence has been committed and
+fall back to the legacy single-label record only when no fence exists, a
+registration replaced by a newer commit is retired through the same
+retirement backlog as refresh credentials, and logout clears the client
+fence and removes its slot under the same epoch-bound protocol as the
+refresh fence, so a logout that loses its lease mid-cleanup fails
+retryably and can never wipe a registration installed by the process
+that took over. The normal
+first-login path, which stores no credential yet, is unaffected.
+The client auth method is selected from the set the authorization server
+advertises — the field is a set of supported methods, not a single choice:
+the first method this client supports, in the server's advertised order,
+with the RFC 8414 default when the field is omitted, and the same
+selection shared between discovery and registration. A server that
+advertises no supported method fails discovery.
 
 ## Validation and limits
 
@@ -640,11 +1133,21 @@ result, 16 KiB per progress event, 128 retained events and 1 MiB total event
 data per submission, seven days for terminal payloads, and 30 days from
 completion for payload-free expiry tombstones. Profiles may lower these values;
 raising them requires explicit values within implementation hard ceilings and
-a reconciled profile digest.
+a reconciled profile digest. Deleting a lapsed tombstone also deletes the
+input responses retained for that submission: retained response payloads must
+not outlive the tombstone that bounds them. The serve process applies these
+deadlines on a periodic retention sweep for its lifetime — with an owned,
+cancellable loop that shuts down before the store closes — so a
+continuously running or restarted process expires payloads, tombstones,
+and their idempotency rows instead of accumulating them; the sweep is one
+idempotent transaction, so overlapping sweeps across processes are safe.
 
-All network destinations come from a validated profile. Redirects, discovered
-metadata, JWKS locations, and authorization endpoints require the same SSRF and
-origin review expected of an OAuth/MCP client.
+All network destinations come from a validated profile. Discovered metadata,
+JWKS locations, and authorization endpoints require the same SSRF and origin
+review expected of an OAuth/MCP client. HTTP redirects are never followed on
+either side: every client, default or supplied, rejects 3xx responses instead
+of changing destination, so a bearer token or form credential can never be
+replayed to a destination introduced by a `Location` header.
 
 Standard output must never contain logs. Logs must not contain credentials,
 authorization headers, private keys, raw assertions, complete sensitive
@@ -727,27 +1230,46 @@ The first complete implementation is not done until automated tests prove:
 4. Repeating the same idempotency key does not duplicate upstream work.
 5. Conflicting idempotency input fails deterministically.
 6. `await` returns pending state when its bounded wait expires.
-7. Repeated `await` calls reach and preserve a successful terminal result.
-8. Upstream failure, cancellation, and expiry produce terminal failures.
-9. Client cancellation stops a wait without cancelling upstream work.
-10. A process restart recovers accepted non-terminal submissions.
-11. Progress cursors deduplicate ordered events.
-12. Requested MCP progress notifications are rate limited and correlated.
-13. Credentials and plaintext sensitive inputs do not appear in SQLite
+7. Repeated `await` calls reach and preserve a successful terminal result
+   returned in a detailed `tasks/get` state or task notification.
+8. `input_required` requests can be answered idempotently through `await`, and
+   an eventually consistent `tasks/update` acknowledgement is reconciled.
+9. Upstream failure, cancellation, and expiry produce terminal failures.
+10. Client cancellation stops a wait without cancelling upstream work.
+11. A process restart recovers accepted non-terminal submissions through the
+    same owner-bound task ID without a protocol session. Startup recovery
+    lists the durable backlog and offers it to the bounded worker pool, then
+    returns immediately: a large backlog executes in the background and must
+    not delay the downstream MCP server accepting clients.
+12. Progress cursors deduplicate ordered events. A cursor beyond the
+    submission's current event sequence is an `invalid_request`, never
+    echoed, so a copied cursor cannot create a persistent event gap.
+13. Recording an input response detects a concurrent winner in the same
+    operation: when another process answered the same outstanding request
+    with a different value, the loser gets `idempotency_conflict` and
+    reconciles against the durable winner instead of silently assuming its
+    value was stored. An exact replay of the recorded value is a no-op.
+14. Requested MCP progress notifications are rate limited and correlated.
+15. Credentials and plaintext sensitive inputs do not appear in SQLite
     metadata, JSON output, logs, panic output, or test snapshots; encrypted
     state blobs fail closed when their key is unavailable.
-14. Unsupported protocol, capability, profile, and Tama versions fail closed.
-15. Separate App and System registrations expose isolated catalogs,
+16. Unsupported protocol, capability, profile, and Tama versions fail closed;
+    legacy upstream initialization, session IDs, `tasks/result`, and
+    `tasks/list` are rejected rather than used as fallbacks.
+17. Separate App and System registrations expose isolated catalogs,
     instructions, credentials, and state while retaining the same two-tool
     contract.
-16. App restart recovery reattaches to Tama's durable submission without
-    duplicate graph work.
-17. System read-only restart recovery safely replays unfinished local work.
-18. Multiple processes sharing one profile cannot duplicate claimed work, lose
+18. App restart recovery retrieves the same owner-bound durable task; an
+    ambiguous initial call replay does not duplicate graph work.
+19. System read-only restart recovery safely replays unfinished local work.
+20. Subscription acknowledgement, authorized task snapshots, stream loss, and
+    credential-expiry recovery preserve correctness through `tasks/get`.
+21. Multiple processes sharing one profile cannot duplicate claimed work, lose
     a replacement refresh token, or corrupt credential coordination.
-19. Codex, OpenCode, and at least one plain MCP inspector complete the
+22. Codex, OpenCode, and at least one plain MCP inspector complete the
     `submit`/repeated-`await` workflow for both profile types.
-20. Race tests, static analysis, lint, cross-builds, and protocol fixtures pass.
+23. Race tests, static analysis, lint, cross-builds, TamaMCP conformance
+    fixtures, and live migrated-Tama acceptance pass.
 
 ## Implementation phases
 
@@ -769,14 +1291,21 @@ The first complete implementation is not done until automated tests prove:
 - idempotency and recovery tests; and
 - progress snapshot/event model.
 
-### Phase 2: current Tama adapter
+### Phase 2: TamaMCP 2026 upstream adapter
 
-- authenticated upstream connection;
-- current durable submission/result correlation;
-- ordinary `/mcp/system` execution through the local worker;
-- bounded polling and terminal failure semantics;
-- result normalization and limits; and
-- integration fixtures against the supported Tama release.
+- official-SDK MCP `2026-07-28` core transport plus the smallest required
+  Tasks/subscription extension layer;
+- authenticated stateless `server/discover`, standard headers, and per-request
+  metadata/capability negotiation;
+- server-directed App task creation, owner-bound `tasks/get`, idempotent
+  `tasks/update`, and cooperative `tasks/cancel` support;
+- task-ID `subscriptions/listen` and `notifications/tasks`, with polling as the
+  recovery source of truth;
+- ordinary synchronous `/mcp/system` execution through the local worker;
+- bounded polling, terminal failure semantics, result normalization, and
+  limits; and
+- package conformance fixtures plus live integration against the migrated Tama
+  server.
 
 ### Phase 3: client progress and acceptance
 
@@ -785,26 +1314,25 @@ The first complete implementation is not done until automated tests prove:
 - client-specific progress presentation; and
 - disconnect, restart, timeout, and live OAuth acceptance tests.
 
-### Phase 4: newer MCP adapter
+### Phase 4: production release and migration closure
 
-- adopt a stable SDK release supporting the newer protocol;
-- add negotiated task-capability handling behind the adapter boundary;
-- retain the downstream two-tool contract; and
-- expand the published compatibility matrix only after live client tests.
+- certify every supported credential backend and crash-recovery path;
+- publish the exact TamaMCP, Tama, Tama Link, protocol, profile, OS, and client
+  compatibility matrix;
+- coordinate acceptance evidence before Tama removes its Anubis runtime; and
+- publish the independent Tama Link binary and checksums through Git Flow.
 
 ## Remaining acceptance gates
 
-The current adapter must still be verified against the pinned local
-`memovee/tama` Compose environment: initialization and protocol negotiation,
-the task lifetime and terminal-result behavior, canonical-request reattachment,
-and production ingress availability. Codex, OpenCode, and plain MCP fixtures
-must prove stable caller-owned `client_context.thread_id` behavior. The SQLite,
-lease, GC, encryption-key, and crash-recovery suite must use separate OS
-processes and cover each supported credential backend, including the explicitly
-configured headless Linux case.
+TamaMCP Phase 2 is complete, while task subscriptions remain tracked by
+`kritama/tama-mcp#9`. Live Link acceptance waits for the Tama-owned persistence,
+runner, PubSub, System, App, OAuth-composition, and endpoint migration beginning
+with `upmaru/tama#123`. The migrated endpoint must be verified for stateless
+discovery, standard headers, owner-bound task lookup, input responses,
+subscription recovery, terminal capture through `tasks/get`, and production
+ingress availability.
 
-The newer Phase 4 adapter still requires a client-facing, request-correlated
-answer path for `input_required`. The preferred direction is an optional
-`input_response` on `await`, which retains exactly two downstream tools; its
-schema and idempotency rules must be finalized against `tama-mcp` fixtures
-before that adapter is enabled.
+Codex, OpenCode, and plain MCP fixtures must prove stable caller-owned
+`client_context.thread_id` behavior. The SQLite, lease, GC, encryption-key, and
+crash-recovery suite must use separate OS processes and cover each supported
+credential backend, including the explicitly configured headless Linux case.

@@ -74,6 +74,13 @@ func (b Bounds) Valid() bool {
 	return okLo && okHi && !lo.After(hi)
 }
 
+// Contains reports whether version, an MCP version date, falls inclusively
+// within the bounds. Version dates compare lexicographically, so the
+// comparison is a plain string comparison.
+func (b Bounds) Contains(version string) bool {
+	return version >= b.ProtocolMin && version <= b.ProtocolMax
+}
+
 func parseProtocolVersion(value string) (time.Time, bool) {
 	parsed, err := time.Parse("2006-01-02", value)
 	return parsed, err == nil

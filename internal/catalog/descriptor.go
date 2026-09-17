@@ -239,5 +239,8 @@ func checkSchema(field string, raw json.RawMessage, optional, requireObjectType 
 	if schemaType, ok := object["type"].(string); requireObjectType && (!ok || schemaType != "object") {
 		return fmt.Errorf("%s must declare type object", field)
 	}
+	if err := CheckSchemaVocabulary(canonicalized); err != nil {
+		return fmt.Errorf("%s: %w", field, err)
+	}
 	return nil
 }

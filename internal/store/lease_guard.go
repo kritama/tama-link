@@ -12,7 +12,7 @@ type leaseIdentity struct {
 	owner string
 }
 
-func (s *Store) requireLiveLease(ctx context.Context, tx *sql.Tx, lease leaseIdentity) error {
+func (s *Store) requireLiveLease(ctx context.Context, tx *writeTx, lease leaseIdentity) error {
 	var held int
 	err := tx.QueryRowContext(ctx, `
 		SELECT 1 FROM leases

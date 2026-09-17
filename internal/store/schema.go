@@ -8,8 +8,11 @@ import (
 	"strconv"
 )
 
-// schemaVersion is the initial database schema this build reads and writes.
-const schemaVersion = 1
+// schemaVersion is the database schema this build reads and writes. Version
+// 2 adds the input_responses table for request-correlated input replay;
+// version 3 adds the lease generation counter used to gate credential
+// writes behind one lease holder.
+const schemaVersion = 4
 
 // Metadata keys.
 const (
@@ -60,6 +63,14 @@ CREATE TABLE IF NOT EXISTS submissions (
     lease_expires_at INTEGER
 );
 
+CREATE TABLE IF NOT EXISTS input_responses (
+    submission_id TEXT NOT NULL,
+    request_id TEXT NOT NULL,
+    response_enc BLOB NOT NULL,
+    answered_at INTEGER NOT NULL,
+    PRIMARY KEY (submission_id, request_id)
+);
+
 CREATE TABLE IF NOT EXISTS idempotency (
     client_request_id TEXT PRIMARY KEY,
     args_hash TEXT NOT NULL,
@@ -70,7 +81,14 @@ CREATE TABLE IF NOT EXISTS idempotency (
 CREATE TABLE IF NOT EXISTS leases (
     name TEXT PRIMARY KEY,
     owner TEXT NOT NULL,
-    expires_at INTEGER NOT NULL
+    expires_at INTEGER NOT NULL,
+    generation INTEGER NOT NULL DEFAULT 1
+);
+
+CREATE TABLE IF NOT EXISTS credential_fence (
+    name TEXT PRIMARY KEY,
+    generation INTEGER NOT NULL,
+    slot TEXT NOT NULL
 );
 `
 

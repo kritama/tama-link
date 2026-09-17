@@ -34,7 +34,9 @@ const (
 	envSubID    = "STORE_PROCTEST_SUBID"
 	envOwner    = "STORE_PROCTEST_OWNER"
 	envTTLMS    = "STORE_PROCTEST_TTLMS"
+	envLockMS   = "STORE_PROCTEST_LOCKMS"
 	envGCSweeps = "STORE_PROCTEST_GC"
+	envPhaseDir = "STORE_PROCTEST_PHASE"
 )
 
 const scenarioArgPrefix = "--tama-link-store-scenario="
@@ -153,13 +155,36 @@ func runScenario(scenario string) int {
 			Strategy:         "upstream_task",
 			DescriptorDigest: "sha256:abc",
 			Arguments:        []byte(`{"message":"hi"}`),
+			RequestArguments: []byte(`{"message":"hi"}`),
 		}
-		created, err := s.CreateSubmission(ctx, sub)
+		created, _, err := s.CreateSubmission(ctx, sub)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "create: %v\n", err)
 			return 1
 		}
 		fmt.Println(created.ID)
+		return 0
+
+	case "append-events-once":
+		id := os.Getenv(envSubID)
+		// Signal open completion, then wait for the concurrent writer
+		// (the locker process) to signal that it holds the write lock.
+		// The explicit phase handoff pins the intended overlap: this
+		// process's read-then-write transaction runs while another
+		// process owns the write lock, instead of hoping fixed delays
+		// line the phases up.
+		signalPhase(os.Getenv(envPhaseDir), "opened", "wait for opened: %v\n")
+		waitForPhase(os.Getenv(envPhaseDir), "locked", "wait for locked: %v\n")
+		event := contract.Event{
+			SubmissionID: id,
+			Sequence:     1,
+			Timestamp:    time.Now().UTC(),
+			State:        contract.StatusQueued,
+		}
+		if _, err := s.AppendEvents(ctx, id, []contract.Event{event}); err != nil {
+			fmt.Fprintf(os.Stderr, "append events: %v\n", err)
+			return 1
+		}
 		return 0
 
 	case "lock":
@@ -175,7 +200,12 @@ func runScenario(scenario string) int {
 			fmt.Fprintf(os.Stderr, "begin: %v\n", err)
 			return 1
 		}
-		time.Sleep(1500 * time.Millisecond)
+		signalPhase(os.Getenv(envPhaseDir), "locked", "signal locked: %v\n")
+		hold := 1500 * time.Millisecond
+		if ms, perr := time.ParseDuration(os.Getenv(envLockMS) + "ms"); perr == nil && ms > 0 {
+			hold = ms
+		}
+		time.Sleep(hold)
 		if _, err := raw.ExecContext(ctx, "ROLLBACK"); err != nil {
 			fmt.Fprintf(os.Stderr, "rollback: %v\n", err)
 			return 1
@@ -232,10 +262,10 @@ func runScenario(scenario string) int {
 	case "die":
 		// Create a submission and exit without closing the store, so the
 		// WAL file is left for the next opener to recover.
-		if _, err := s.CreateSubmission(ctx, store.NewSubmission{
+		if _, _, err := s.CreateSubmission(ctx, store.NewSubmission{
 			ID: "sub-wal", ClientRequestID: "req-wal", Tool: "message",
 			Strategy: "upstream_task", DescriptorDigest: "sha256:abc",
-			Arguments: []byte(`{"message":"hi"}`),
+			Arguments: []byte(`{"message":"hi"}`), RequestArguments: []byte(`{"message":"hi"}`),
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "create: %v\n", err)
 			return 1
@@ -246,10 +276,10 @@ func runScenario(scenario string) int {
 		// Drive one submission to a completed result and leave it durable so a
 		// later GC sweep must find it fresh (within retention) and keep it.
 		subID := "sub-race"
-		if _, err := s.CreateSubmission(ctx, store.NewSubmission{
+		if _, _, err := s.CreateSubmission(ctx, store.NewSubmission{
 			ID: subID, ClientRequestID: "req-race", Tool: "message",
 			Strategy: "upstream_task", DescriptorDigest: "sha256:abc",
-			Arguments: []byte(`{"message":"hi"}`),
+			Arguments: []byte(`{"message":"hi"}`), RequestArguments: []byte(`{"message":"hi"}`),
 		}); err != nil {
 			fmt.Fprintf(os.Stderr, "create: %v\n", err)
 			return 1
@@ -424,6 +454,50 @@ func TestProctestBusyTimeout(t *testing.T) {
 	}
 }
 
+// TestProctestWriteAfterReadWaitsForLock pins a driver behavior the store
+// depends on: a write statement that follows a read inside one transaction
+// must wait out the busy timeout while another process holds the write lock
+// (for example inside a concurrent store open's validation window) instead of
+// failing immediately with SQLITE_BUSY. All multi-statement write
+// transactions therefore begin IMMEDIATE (see writeTx).
+func TestProctestWriteAfterReadWaitsForLock(t *testing.T) {
+	st := newScenarioState(t)
+	s := proctestOpen(t, st.db, st.key)
+	created, _, err := s.CreateSubmission(context.Background(), store.NewSubmission{
+		ID:               "sub-write-after-read",
+		ClientRequestID:  "war-1",
+		Tool:             "message",
+		Strategy:         "local_replayable",
+		DescriptorDigest: "sha256:abc",
+		Arguments:        []byte(`{}`),
+		RequestArguments: []byte(`{}`),
+	})
+	if err != nil {
+		t.Fatalf("create submission: %v", err)
+	}
+
+	// Start the appender first so its open completes unblocked; the
+	// phase markers synchronize the rest: the locker starts only after
+	// the appender opened, and the appender appends only after the
+	// locker signaled its held write lock.
+	phaseDir := t.TempDir()
+	appenderDone := make(chan string, 1)
+	go func() {
+		code, out := runProctest(t, "append-events-once", withProctestEnv(st.db, st.key, envSubID+"="+created.ID, envPhaseDir+"="+phaseDir))
+		appenderDone <- out + fmt.Sprintf("(exit %d)", code)
+	}()
+	waitForTestPhase(t, phaseDir, "opened")
+	lockerCode, out := runProctest(t, "lock", withProctestEnv(st.db, st.key, envLockMS+"=4000", envPhaseDir+"="+phaseDir))
+	if lockerCode != 0 {
+		t.Fatalf("locker exited %d: %s", lockerCode, out)
+	}
+	result := <-appenderDone
+	if strings.Contains(result, "(exit 0)") {
+		return
+	}
+	t.Fatalf("append-events-once failed while a writer was held: %s", result)
+}
+
 func TestProctestExclusiveWorkerClaim(t *testing.T) {
 	st := newScenarioState(t)
 
@@ -549,5 +623,53 @@ func TestProctestIntegrityCheck(t *testing.T) {
 	code, out := runProctest(t, "integrity", withProctestEnv(st.db, st.key))
 	if code != 0 || strings.TrimSpace(out) != "ok" {
 		t.Fatalf("integrity scenario = %q (exit %d), want ok", out, code)
+	}
+}
+
+// signalPhase creates the named phase marker so the parent test can
+// synchronize child processes without fixed delays.
+func signalPhase(dir, name, failFormat string) {
+	if dir == "" {
+		return
+	}
+	if err := os.WriteFile(filepath.Join(dir, name), nil, 0o600); err != nil {
+		fmt.Fprintf(os.Stderr, failFormat, err)
+		os.Exit(1)
+	}
+}
+
+// waitForPhase polls for the named phase marker; a missing marker past the
+// deadline fails the scenario rather than racing blind.
+func waitForPhase(dir, name, failFormat string) {
+	if dir == "" {
+		return
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			fmt.Fprintf(os.Stderr, failFormat, fmt.Errorf("phase %q never appeared", name))
+			os.Exit(1)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// waitForTestPhase polls for a child process's phase marker from the
+// parent test, replacing fixed inter-process delays with an explicit
+// handoff.
+func waitForTestPhase(t *testing.T, dir, name string) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, err := os.Stat(filepath.Join(dir, name)); err == nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("phase %q never appeared in %s", name, dir)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

@@ -24,7 +24,7 @@ type GCSummary struct {
 func (s *Store) GC(ctx context.Context) (GCSummary, error) {
 	nowMs := s.now().UnixMilli()
 
-	tx, err := s.db.BeginTx(ctx, nil)
+	tx, err := s.beginWriteTx(ctx)
 	if err != nil {
 		return GCSummary{}, fmt.Errorf("begin gc: %w", err)
 	}
@@ -45,7 +45,7 @@ func (s *Store) GC(ctx context.Context) (GCSummary, error) {
 
 // expirePayloads converts terminal submissions past payload retention into
 // payload-free expired tombstones.
-func (s *Store) expirePayloads(ctx context.Context, tx *sql.Tx, nowMs int64) (GCSummary, error) {
+func (s *Store) expirePayloads(ctx context.Context, tx *writeTx, nowMs int64) (GCSummary, error) {
 	query := `
 			UPDATE submissions
 			SET status = ?, args_enc = NULL, task_id = NULL, events_enc = NULL,
@@ -70,9 +70,12 @@ func (s *Store) expirePayloads(ctx context.Context, tx *sql.Tx, nowMs int64) (GC
 	return GCSummary{Expired: int(affected)}, nil
 }
 
-// deleteLapsedTombstones removes submissions past tombstone retention and
-// their idempotency entries.
-func (s *Store) deleteLapsedTombstones(ctx context.Context, tx *sql.Tx, nowMs int64) (int, error) {
+// deleteLapsedTombstones removes submissions past tombstone retention with
+// their idempotency entries and retained input responses. input_responses
+// has no foreign key to the submissions row, so the encrypted payloads are
+// deleted in the same transaction: a tombstone leaves no orphan rows and
+// payload retention stays bounded.
+func (s *Store) deleteLapsedTombstones(ctx context.Context, tx *writeTx, nowMs int64) (int, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT submission_id, client_request_id
 		FROM submissions
@@ -90,6 +93,11 @@ func (s *Store) deleteLapsedTombstones(ctx context.Context, tx *sql.Tx, nowMs in
 		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM submissions WHERE submission_id = ?", id); err != nil {
 			return 0, fmt.Errorf("delete submission %s: %w", id, err)
+		}
+		if _, err := tx.ExecContext(ctx,
+			"DELETE FROM input_responses WHERE submission_id = ?", id,
+		); err != nil {
+			return 0, fmt.Errorf("delete input responses for submission %s: %w", id, err)
 		}
 		if _, err := tx.ExecContext(ctx,
 			"DELETE FROM idempotency WHERE client_request_id = ?", clientRequestID,
