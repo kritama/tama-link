@@ -235,6 +235,71 @@ func TestProbeSucceedsAndCleansUp(t *testing.T) {
 	}
 }
 
+// slowKeyring blocks Set until release is closed and then delegates to
+// the inner keyring, modeling a backend whose write hangs and later
+// completes.
+type slowKeyring struct {
+	started chan struct{}
+	release chan struct{}
+	inner   *fakeKeyring
+	once    sync.Once
+}
+
+func (s *slowKeyring) Get(key string) (keyring.Item, error) {
+	return s.inner.Get(key)
+}
+
+func (s *slowKeyring) GetMetadata(key string) (keyring.Metadata, error) {
+	return s.inner.GetMetadata(key)
+}
+
+func (s *slowKeyring) Set(item keyring.Item) error {
+	s.once.Do(func() { close(s.started) })
+	<-s.release
+	return s.inner.Set(item)
+}
+
+func (s *slowKeyring) Remove(key string) error { return s.inner.Remove(key) }
+func (s *slowKeyring) Keys() ([]string, error) { return s.inner.Keys() }
+
+// TestProbeWorkerServesNextProbeAfterTimeout pins the owned probe
+// worker: a timed-out probe abandons its request, not the worker, so the
+// worker that survives the deadline serves a follow-up probe instead of
+// every retry spawning another abandoned goroutine that keeps mutating
+// the backend.
+func TestProbeWorkerServesNextProbeAfterTimeout(t *testing.T) {
+	backend := newFakeKeyring()
+	slow := &slowKeyring{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		inner:   backend,
+	}
+	runner := newProbeRunner()
+	t.Cleanup(runner.close)
+	probeTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { probeTimeout = 5 * time.Second })
+
+	errs := make(chan error, 1)
+	go func() { errs <- runner.probe(slow, "demo/__probe_slow") }()
+	<-slow.started
+	if err := <-errs; err == nil {
+		t.Fatal("probe succeeded, want timeout error")
+	}
+	close(slow.release)
+
+	// The same worker serves the follow-up probe once the slow call
+	// completes, and both probes' Set/Get/Remove cycles cleaned up their
+	// disposable entries.
+	if err := runner.probe(backend, "demo/__probe_next"); err != nil {
+		t.Fatalf("follow-up probe: %v", err)
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.items) != 0 {
+		t.Fatalf("probes left %d entries behind", len(backend.items))
+	}
+}
+
 // TestProbeKeysAreUniquePerInvocation proves concurrent same-profile
 // starts cannot interfere with each other's availability probes: every
 // probe uses its own unguessable key, and a probe that sees another

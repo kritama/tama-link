@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/kritama/tama-link/internal/store"
@@ -119,9 +120,10 @@ func (c *Client) storeFenced(ctx context.Context, fenced *fencedCredential) erro
 		return err
 	}
 	if err := c.secrets.SetSecret(slot, data); err != nil {
-		// Best-effort rollback of the uncommitted slot.
-		_ = c.secrets.DeleteSecret(slot)
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+		// A backend may report an uncertain write. Roll back the unique
+		// slot; if deletion also fails, keep a durable cleanup record.
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable,
+			errors.Join(err, c.rollbackRefreshSlot(ctx, slot)))
 	}
 	c.retireFailedSlots(ctx)
 	previous := fenced.previousSlot
@@ -140,15 +142,18 @@ func (c *Client) storeFenced(ctx context.Context, fenced *fencedCredential) erro
 		LeaseGeneration: fenced.leaseGeneration,
 	})
 	if err != nil {
-		_ = c.secrets.DeleteSecret(slot)
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable,
+			errors.Join(err, c.rollbackRefreshSlot(ctx, slot)))
 	}
 	if !committed {
 		// A concurrent rotation passed this generation, or this writer
 		// lost the lease during the write: the write must not be reported
 		// as success and the orphan slot must not linger.
-		_ = c.secrets.DeleteSecret(slot)
-		return fmt.Errorf("%w: refresh credential superseded by a concurrent rotation", ErrBackendUnavailable)
+		rejected := fmt.Errorf("%w: refresh credential superseded by a concurrent rotation", ErrBackendUnavailable)
+		if rollbackErr := c.rollbackRefreshSlot(ctx, slot); rollbackErr != nil {
+			return errors.Join(rejected, rollbackErr)
+		}
+		return rejected
 	}
 	// The commit is durable: the new slot is the only live credential and
 	// the previous slot is durably enqueued for retirement retry. Retire
@@ -168,6 +173,26 @@ func (c *Client) storeFenced(ctx context.Context, fenced *fencedCredential) erro
 		if err := c.lease.ClearRetiredCredentialSlot(ctx, store.RefreshFenceName, previous); err != nil {
 			return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
 		}
+	}
+	return nil
+}
+
+// rollbackRefreshSlot removes a refresh slot that never became live. A
+// secure-backend deletion can fail after the slot write succeeded; record
+// that slot durably on a cancellation-independent context so a later
+// refresh or logout can retry it instead of orphaning a refresh token.
+func (c *Client) rollbackRefreshSlot(ctx context.Context, slot string) error {
+	if err := c.secrets.DeleteSecret(slot); err != nil {
+		recordErr := c.lease.RecordRetiredCredentialSlot(
+			context.WithoutCancel(ctx), store.RefreshFenceName, slot,
+		)
+		if recordErr != nil {
+			return errors.Join(
+				fmt.Errorf("delete uncommitted refresh slot: %w", err),
+				fmt.Errorf("record uncommitted refresh slot for retirement: %w", recordErr),
+			)
+		}
+		return fmt.Errorf("delete uncommitted refresh slot: %w", err)
 	}
 	return nil
 }

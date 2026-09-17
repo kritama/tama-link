@@ -1038,6 +1038,75 @@ func TestRefreshVerifiesOwnershipBeforeCredentialWrite(t *testing.T) {
 	clock.set(clock.now.Add(time.Minute))
 }
 
+// TestRefreshRecordsFailedSlotRollback pins every post-write rejection
+// path of the refresh fence: if the uncommitted refresh slot cannot be
+// deleted, it is durably discoverable in the refresh stream's retirement
+// backlog and a later retirement sweep removes it — a rejected writer
+// never orphans a refresh token in the backend.
+func TestRefreshRecordsFailedSlotRollback(t *testing.T) {
+	tests := []struct {
+		name          string
+		commitError   bool
+		foreignHolder bool
+		wantErr       error
+	}{
+		{name: "fence commit error", commitError: true, wantErr: ErrBackendUnavailable},
+		{name: "fence commit rejected", foreignHolder: true, wantErr: ErrBackendUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			server := (&metadataServer{}).start(t)
+			server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+			secrets := newFakeSecrets()
+			lease := newFakeLease()
+			client := clientForServer(t, server, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
+			seedCredentials(t, secrets, "cid-1", "shh", server.ts.URL+"/oauth/token", server.ts.URL+"/oauth", "rt-1")
+			if tt.commitError {
+				lease.fenceCommitErr = errors.New("state write failure")
+			}
+
+			var slot string
+			secrets.setDoneHook = func(label string) {
+				if strings.HasPrefix(label, labelRefresh+"@") {
+					slot = label
+					secrets.failDeletes(label)
+					if tt.foreignHolder {
+						lease.holdOther()
+					}
+				}
+			}
+
+			if _, err := client.Token(ctx); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Token = %v, want %v", err, tt.wantErr)
+			}
+			if slot == "" {
+				t.Fatal("refresh slot write was not observed")
+			}
+			retired, err := lease.RetiredCredentialSlots(ctx, store.RefreshFenceName)
+			if err != nil {
+				t.Fatalf("RetiredCredentialSlots: %v", err)
+			}
+			if len(retired) != 1 || retired[0] != slot {
+				t.Fatalf("retired refresh slots = %v, want %q", retired, slot)
+			}
+			if _, found, err := secrets.GetSecret(slot); err != nil || !found {
+				t.Fatalf("failed rollback slot = found:%v err:%v, want retained for retry", found, err)
+			}
+
+			secrets.allowDeletes(slot)
+			client.retireFailedSlots(ctx)
+			if _, found, err := secrets.GetSecret(slot); err != nil || found {
+				t.Fatalf("retired rollback slot = found:%v err:%v, want deleted", found, err)
+			}
+			retired, err = lease.RetiredCredentialSlots(ctx, store.RefreshFenceName)
+			if err != nil || len(retired) != 0 {
+				t.Fatalf("retirement backlog after retry = %v err:%v, want empty", retired, err)
+			}
+		})
+	}
+}
+
 // TestRefreshFenceRejectsStaleWriter proves the persistence fence under the
 // blocked-write scenario: process A's credential write blocks past its
 // lease, process B claims the lease, completes its own rotation and commits

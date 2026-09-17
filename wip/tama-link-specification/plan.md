@@ -365,7 +365,12 @@ it must not infer expiry from a lost stream or elapsed client wait alone.
 
 Tama Link coordinates OAuth refresh attempts with a profile-scoped SQLite
 lease, re-reads the keyring value after acquiring the lease, and atomically
-stores a replacement refresh token when returned. One `invalid_grant` becomes
+stores a replacement refresh token when returned. The replacement is
+committed through the fenced protocol, and every rejection path — commit
+error, lost epoch, or an uncertain slot write — rolls the writer's own
+uncommitted slot back, durably enqueuing it on the refresh retirement
+backlog when the rollback deletion itself fails, so a rejected writer never
+orphans a refresh token in the backend. One `invalid_grant` becomes
 `authentication_required`; it is not retried in a loop. A subscription closes
 no later than credential expiry and is reopened only after successful
 reauthorization.

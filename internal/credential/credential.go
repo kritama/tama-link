@@ -79,6 +79,11 @@ func New(profile string) (*Keyring, error) {
 // on one disposable profile-scoped entry. Platform backends can accept a
 // connection while still being unable to complete a write, so connect
 // success alone is not availability.
+//
+// The probe runs through an owned probe worker instead of an abandoned
+// goroutine: a backend that blocks indefinitely leaves one worker parked
+// on its own keyring call — no goroutine is added per retry — and that
+// worker exits as soon as the uninterruptible call returns.
 func probeBackend(profile string, kr keyring.Keyring) error {
 	// The probe key is unique per invocation: two Tama Link processes for
 	// the same profile can start concurrently, and a shared probe key lets
@@ -88,28 +93,9 @@ func probeBackend(profile string, kr keyring.Keyring) error {
 	if err != nil {
 		return err
 	}
-	type result struct{ err error }
-	done := make(chan result, 1)
-	go func() {
-		err := kr.Set(keyring.Item{
-			Key:         key,
-			Data:        []byte{1},
-			Label:       "Tama Link availability probe",
-			Description: "Temporary entry; safe to delete",
-		})
-		if err == nil {
-			if _, err = kr.Get(key); err == nil {
-				err = kr.Remove(key)
-			}
-		}
-		done <- result{err: err}
-	}()
-	select {
-	case res := <-done:
-		return res.err
-	case <-time.After(probeTimeout):
-		return fmt.Errorf("credential backend did not complete an availability probe within %s; a keyring unlock prompt is not a supported serve-startup path", probeTimeout)
-	}
+	runner := newProbeRunner()
+	defer runner.close()
+	return runner.probe(kr, key)
 }
 
 // probeKey returns one unguessable per-invocation probe key inside the

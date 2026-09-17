@@ -502,7 +502,12 @@ bounded startup probe: a complete set/read/remove cycle on one disposable
 entry with a unique unguessable per-invocation key must finish within a short
 fixed window, or Tama Link fails fast with a
 clear unavailable error. The window is fixed in the binary and cannot be
-extended at runtime. A backend that accepts a connection but blocks on user
+extended at runtime. The probe runs through one owned worker goroutine
+rather than an abandoned one per attempt: the keyring API takes no context,
+so an in-flight call cannot be interrupted, but a timed-out probe abandons
+only its request — the worker stays owned, serves the next probe once the
+blocking call returns, and exits on shutdown. A backend that accepts a
+connection but blocks on user
 interaction for writes (for example a headless Secret Service) is
 unavailable; an interactive unlock prompt is not a supported serve-startup
 path, and Tama Link must never hang the serve process on the platform
@@ -785,7 +790,11 @@ authorization ever committed cannot be created by a stale writer either —
 with a provider that permits overlapping
 rotations, a writer that lost the lease while its secret-store write was
 blocked can never make its value live, not even before the winner commits
-its own generation. The commit is the last fallible step for the slot
+its own generation. A writer whose commit fails or is rejected rolls its
+own uncommitted slot back, and if that rollback deletion also fails the
+slot is durably enqueued in the retirement backlog so a later refresh or
+logout retries it — a rejected writer never orphans a refresh token in
+the backend. The commit is the last fallible step for the slot
 swap: the previous live slot stays referenced until the commit is durable,
 so a rejected commit can never leave the fence pointing at a deleted
 credential, and the commit atomically enqueues the previous slot in the
