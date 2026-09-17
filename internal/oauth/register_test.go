@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kritama/tama-link/internal/credential"
 	"github.com/kritama/tama-link/internal/store"
 )
 
@@ -238,12 +239,12 @@ func TestRegisterRecordsFailedSlotRollback(t *testing.T) {
 
 			var slot string
 			secrets.setHook = func(label string) {
-				if tt.foreignHolder && strings.HasPrefix(label, store.ClientFenceName+"@") {
+				if tt.foreignHolder && strings.HasPrefix(label, store.ClientFenceName+"-") {
 					lease.holdOther()
 				}
 			}
 			secrets.setDoneHook = func(label string) {
-				if strings.HasPrefix(label, store.ClientFenceName+"@") {
+				if strings.HasPrefix(label, store.ClientFenceName+"-") {
 					slot = label
 					secrets.failDeletes(label)
 				}
@@ -296,7 +297,7 @@ func TestRegisterRollsBackSlotAfterCallerCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel the caller at the moment the slot write starts.
 	secrets.setHook = func(label string) {
-		if strings.HasPrefix(label, store.ClientFenceName+"@") {
+		if strings.HasPrefix(label, store.ClientFenceName+"-") {
 			cancel()
 		}
 	}
@@ -324,7 +325,7 @@ func TestRegisterRollsBackSlotAfterLostEpochDuringWrite(t *testing.T) {
 	// A foreign process takes over the lease the moment the slot write
 	// starts.
 	secrets.setHook = func(label string) {
-		if strings.HasPrefix(label, store.ClientFenceName+"@") {
+		if strings.HasPrefix(label, store.ClientFenceName+"-") {
 			lease.holdOther()
 		}
 	}
@@ -349,7 +350,7 @@ func assertNoClientRecord(ctx context.Context, t *testing.T, secrets *fakeSecret
 		t.Fatalf("client fence = gen:%d slot:%q found:%v err:%v, want absent", gen, slot, found, err)
 	}
 	for _, label := range secrets.secretLabels() {
-		if strings.HasPrefix(label, store.ClientFenceName+"@") {
+		if strings.HasPrefix(label, store.ClientFenceName+"-") {
 			t.Fatalf("uncommitted client slot %q leaked into the credential backend", label)
 		}
 	}
@@ -377,18 +378,18 @@ func TestRegisterKeepsWinnerRecordAfterLostEpochDuringWrite(t *testing.T) {
 		t.Fatalf("marshal winner record: %v", err)
 	}
 	secrets.setHook = func(label string) {
-		if strings.HasPrefix(label, store.ClientFenceName+"@") {
+		if strings.HasPrefix(label, store.ClientFenceName+"-") {
 			lease.holdOther()
 		}
 	}
 	secrets.setDoneHook = func(label string) {
-		if strings.HasPrefix(label, store.ClientFenceName+"@") && label != "oauth-client@winner" {
-			if err := secrets.SetSecret("oauth-client@winner", winnerData); err != nil {
+		if strings.HasPrefix(label, store.ClientFenceName+"-") && label != "oauth-client-winner" {
+			if err := secrets.SetSecret("oauth-client-winner", winnerData); err != nil {
 				t.Errorf("store winner slot: %v", err)
 				return
 			}
 			// The winner holds the lease: its fence commit succeeds.
-			if !lease.fence.commit(store.ClientFenceName, 1, "oauth-client@winner", "other-process") {
+			if !lease.fence.commit(store.ClientFenceName, 1, "oauth-client-winner", "other-process") {
 				t.Error("the winner's fence commit was rejected")
 			}
 		}
@@ -741,5 +742,27 @@ func TestRegisterFailures(t *testing.T) {
 				t.Fatal("registration accepted")
 			}
 		})
+	}
+}
+
+// TestSlotLabelsUseBackendValidCharacters pins the generated slot labels
+// against the credential backend's real label pattern: the production
+// keyring rejects labels outside ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$, and a
+// separator like "@" would break every persistence call in production
+// while the permissive test fake never notices.
+func TestSlotLabelsUseBackendValidCharacters(t *testing.T) {
+	refreshSlot, err := newRefreshSlotLabel()
+	if err != nil {
+		t.Fatalf("newRefreshSlotLabel: %v", err)
+	}
+	clientSlot, err := newClientSlotLabel()
+	if err != nil {
+		t.Fatalf("newClientSlotLabel: %v", err)
+	}
+	if !credential.ValidSecretLabel(refreshSlot) {
+		t.Fatalf("refresh slot label %q is not accepted by the credential backend", refreshSlot)
+	}
+	if !credential.ValidSecretLabel(clientSlot) {
+		t.Fatalf("client slot label %q is not accepted by the credential backend", clientSlot)
 	}
 }

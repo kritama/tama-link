@@ -183,7 +183,9 @@ that orders completions, refreshes, and logouts — a same-owner lease claim
 never advances the epoch, so the lease alone cannot order in-process
 mutations — and renews the epoch across the whole mutation. The client
 record is fenced like the refresh credential: it is written to a unique
-secure-backend slot and made live only by an atomic fence advance bound to
+secure-backend slot — whose label stays within the credential backend's
+accepted label characters, alphanumerics plus dot, underscore, and dash —
+and made live only by an atomic fence advance bound to
 the writer's live lease epoch; a writer that loses the lease or whose
 caller cancels before the commit observes it has its advance rejected and
 its own slot rolled back; a failed rollback deletion is durably enqueued on

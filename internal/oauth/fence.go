@@ -14,23 +14,28 @@ import (
 // newRefreshSlotLabel returns one unique secure-backend label for a
 // fenced credential slot. Labels are per-transaction: two writers that
 // read the same fence must never share a slot, or a rejected writer's
-// cleanup could delete the winner's live credential.
+// cleanup could delete the winner's live credential. The separator must
+// stay within the credential backend's accepted label characters — the
+// backend rejects labels outside ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$, so
+// an unusable separator would break every persistence call in production
+// while tests with a permissive fake would never notice.
 func newRefreshSlotLabel() (string, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("generate credential slot label: %w", err)
 	}
-	return labelRefresh + "@" + hex.EncodeToString(b[:]), nil
+	return labelRefresh + "-" + hex.EncodeToString(b[:]), nil
 }
 
 // newClientSlotLabel returns one unique secure-backend label for a client
-// record awaiting its fence commit.
+// record awaiting its fence commit. See newRefreshSlotLabel for the label
+// character constraint.
 func newClientSlotLabel() (string, error) {
 	var b [8]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return "", fmt.Errorf("generate client slot label: %w", err)
 	}
-	return store.ClientFenceName + "@" + hex.EncodeToString(b[:]), nil
+	return store.ClientFenceName + "-" + hex.EncodeToString(b[:]), nil
 }
 
 // fencedCredential is one refresh credential plus the generations and

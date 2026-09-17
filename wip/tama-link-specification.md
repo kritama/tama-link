@@ -1056,7 +1056,9 @@ mutations) and renews the epoch across the whole mutation. The client
 record is fenced exactly like the refresh credential: the record is
 written to a unique secure-backend slot and made live only by an atomic
 fence advance that requires the writer's own live, unexpired lease
-ownership epoch. The slot write itself takes no context and cannot be
+ownership epoch. Slot labels stay within the credential backend's
+accepted label characters — alphanumerics plus dot, underscore, and dash —
+so the generated labels are always accepted by the production keyring. The slot write itself takes no context and cannot be
 aborted, but a writer that loses the lease while the write is in flight —
 or whose caller cancels before the commit is observed — has its fence
 advance rejected and removes its own uncommitted slot, so it can never

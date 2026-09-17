@@ -12,6 +12,16 @@ import (
 // identifiers so labels can never traverse the profile namespace.
 var secretLabelPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
+// ValidSecretLabel reports whether label is accepted by the secure backend:
+// opaque, path-free, and limited to alphanumerics plus dot, underscore, and
+// dash. Producers of credential labels — for example fenced slot labels —
+// use it to stay within the backend's accepted set; a label the backend
+// would reject breaks every persistence call in production while a
+// permissive test fake never notices.
+func ValidSecretLabel(label string) bool {
+	return secretLabelPattern.MatchString(label)
+}
+
 // secretEntryKey namespaces a secret by profile and label.
 func (k *Keyring) secretEntryKey(label string) string {
 	return k.prefix + "secret/" + label

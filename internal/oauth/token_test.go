@@ -436,7 +436,7 @@ func TestTokenRejectsNonBearerTokenType(t *testing.T) {
 // fencedSlot reports whether label looks like a per-transaction fenced
 // credential slot (labelRefresh@hex).
 func fencedSlot(label string) bool {
-	return strings.HasPrefix(label, labelRefresh+"@")
+	return strings.HasPrefix(label, labelRefresh+"-")
 }
 
 // TestRefreshRetiresPreviousSlot pins that each successful rotation leaves
@@ -1068,7 +1068,7 @@ func TestRefreshRecordsFailedSlotRollback(t *testing.T) {
 
 			var slot string
 			secrets.setDoneHook = func(label string) {
-				if strings.HasPrefix(label, labelRefresh+"@") {
+				if strings.HasPrefix(label, labelRefresh+"-") {
 					slot = label
 					secrets.failDeletes(label)
 					if tt.foreignHolder {
