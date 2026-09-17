@@ -311,6 +311,9 @@ Requirements:
   20 seconds and the maximum is 30 seconds.
 - Returning because the wait budget elapsed is a successful pending response,
   not a tool error.
+- Pending responses carry `next_poll_ms` polling guidance; terminal responses
+  omit it entirely, so a client scheduling retries off the field stops once
+  `terminal` is true.
 - Cancellation and budget expiry each trigger one final fresh state read on
   an independent context with its own short deadline, so a contended or
   stalled store cannot hold the handler beyond the wait contract after the
@@ -453,7 +456,12 @@ contain `is_error: true`.
 Normalized content blocks and safe `_meta` are retained as validated raw JSON,
 not projected through a fixed Go union, so extension fields and content added
 by a compatible MCP revision are not discarded. Endpoint adapters validate the
-wire shape before storage.
+wire shape before storage: the required fields of the pinned protocol
+version's known content block types (text, image, audio, resource_link,
+embedded resource) are enforced there, while unknown types are preserved as
+extension blocks, and a local_replayable operation's successful structured
+result is validated against the operation's pinned output schema before it
+can be stored as completed.
 `failed` is reserved for transport, protocol, authentication, local execution,
 or result-capture failure. `outcome_unknown` is reserved for the ambiguous
 result of a non-replayable synchronous mutation and must never be silently

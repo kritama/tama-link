@@ -222,9 +222,12 @@ func (s *Service) buildOutput(sub *store.Submission, after int64) contract.Await
 		Terminal:     submission.Terminal(sub.Status),
 		Cursor:       strconv.FormatInt(last, 10),
 		Events:       events,
-		NextPollMS:   1000,
 	}
 	if !submission.Terminal(sub.Status) {
+		// Polling guidance is only meaningful for work that can still
+		// change: the documented terminal response omits it, so a client
+		// scheduling retries off this field stops once terminal is true.
+		out.NextPollMS = 1000
 		return out
 	}
 	if sub.CompletedAt != nil {

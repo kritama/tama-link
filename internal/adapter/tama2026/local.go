@@ -1,6 +1,7 @@
 package tama2026
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -42,6 +43,19 @@ func (cn *Connection) ExecuteLocal(ctx context.Context, name string, args json.R
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrProtocolMismatch, err)
 	}
+	// The pinned output contract is enforced before the result can be
+	// stored: a successful response whose structured content is missing or
+	// violates the declared output schema is a protocol failure, never a
+	// completed result returned downstream. Error results are exempt — an
+	// upstream failure is reported as-is.
+	if !result.IsError && len(d.OutputSchema) > 0 {
+		if len(bytes.TrimSpace(result.StructuredContent)) == 0 {
+			return nil, fmt.Errorf("%w: tool %q declared an output schema but returned no structured content", ErrProtocolMismatch, d.Name)
+		}
+		if err := catalog.ValidateAgainstSchema(d.OutputSchema, result.StructuredContent); err != nil {
+			return nil, fmt.Errorf("%w: tool %q returned a structured result violating its pinned output schema", ErrProtocolMismatch, d.Name)
+		}
+	}
 	return &result, nil
 }
 
@@ -74,6 +88,9 @@ func NormalizeCompleteResult(raw json.RawMessage) (contract.Result, error) {
 		Meta:              view.Meta,
 	}
 	if err := result.Validate(); err != nil {
+		return contract.Result{}, err
+	}
+	if err := validateContentBlocks(result.Content); err != nil {
 		return contract.Result{}, err
 	}
 	return result, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -352,5 +353,42 @@ func TestAwaitFinalReadFailurePropagates(t *testing.T) {
 	// reaches the caller instead of a snapshot-shaped success.
 	if appErr == nil {
 		t.Fatal("await succeeded on a failed final read, want the storage error to propagate")
+	}
+}
+
+// TestAwaitTerminalOmitsPollingGuidance pins the response contract: a
+// terminal await response omits next_poll_ms entirely, so a client
+// scheduling retries off the field stops once terminal is true, while a
+// pending response still carries the guidance.
+func TestAwaitTerminalOmitsPollingGuidance(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, _, _ := fixtureApp(t, f)
+	id := submitStatus(t, svc, "poll-1")
+	out := awaitTerminal(t, svc, id)
+	if !out.Terminal {
+		t.Fatalf("status = %s, want terminal", out.Status)
+	}
+	data, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal terminal output: %v", err)
+	}
+	if strings.Contains(string(data), "next_poll_ms") {
+		t.Fatalf("terminal response carries polling guidance: %s", data)
+	}
+
+	// The pending branch still carries the guidance for a non-terminal
+	// submission.
+	pendingOut := svc.buildOutput(&store.Submission{ID: "sub_pending", Tool: "status", Status: contract.StatusAccepted}, 0)
+	if pendingOut.Terminal {
+		t.Fatal("pending output reported terminal")
+	}
+	pendingData, err := json.Marshal(pendingOut)
+	if err != nil {
+		t.Fatalf("marshal pending output: %v", err)
+	}
+	if !strings.Contains(string(pendingData), "next_poll_ms") {
+		t.Fatalf("pending response lost polling guidance: %s", pendingData)
 	}
 }

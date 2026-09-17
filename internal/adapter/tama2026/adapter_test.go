@@ -577,3 +577,39 @@ func TestConnectAnnotationNumbersPreserveLiterals(t *testing.T) {
 		}
 	})
 }
+
+// TestExecuteLocalEnforcesOutputSchema pins the pinned output contract:
+// a successful local_replayable response whose structured content is
+// missing or violates the declared output schema is a protocol failure,
+// never a completed result returned downstream. Error results are exempt —
+// an upstream failure is reported as-is.
+func TestExecuteLocalEnforcesOutputSchema(t *testing.T) {
+	tests := []struct {
+		name     string
+		call     string
+		wantFail bool
+	}{
+		{name: "violating structured content", call: `{"resultType":"complete","isError":false,"content":[{"type":"text","text":"done"}],"structuredContent":{"wrong":"value"}}`, wantFail: true},
+		{name: "missing structured content", call: `{"resultType":"complete","isError":false,"content":[{"type":"text","text":"done"}]}`, wantFail: true},
+		{name: "compliant structured content", call: `{"resultType":"complete","isError":false,"content":[{"type":"text","text":"done"}],"structuredContent":{"status":"sent"}}`},
+		{name: "error results are exempt", call: `{"resultType":"complete","isError":true,"content":[{"type":"text","text":"failed"}],"structuredContent":{"wrong":"value"}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := newTamaServer(t)
+			server.callResultDoc = tt.call
+			adapter := newTestAdapter(t, server, pinnedMessage(catalog.StrategyLocalReplayable, catalog.TaskSupportForbidden))
+			cn, err := adapter.Connect(context.Background())
+			if err != nil {
+				t.Fatalf("Connect: %v", err)
+			}
+			_, execErr := cn.ExecuteLocal(context.Background(), "message", json.RawMessage(`{"message":"hi"}`), 0)
+			if tt.wantFail && !errors.Is(execErr, ErrProtocolMismatch) {
+				t.Fatalf("err = %v, want ErrProtocolMismatch", execErr)
+			}
+			if !tt.wantFail && execErr != nil {
+				t.Fatalf("ExecuteLocal = %v, want success", execErr)
+			}
+		})
+	}
+}

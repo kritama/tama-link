@@ -214,7 +214,9 @@ TamaMCP includes the complete state-specific payload, including a terminal
 terminal result into the local store **the moment it is observed** through
 either path, so the result survives Tama Link restarts, upstream retention, and
 client disconnects. Repeated `await` after terminal capture is served entirely
-from local state. The final state read after a caller cancellation or budget
+from local state. Pending await responses carry `next_poll_ms` polling
+guidance; terminal responses omit it, so clients scheduling retries off the
+field stop once `terminal` is true. The final state read after a caller cancellation or budget
 expiry runs on an independent context with its own short deadline, so a
 contended or stalled store cannot hold the handler beyond the wait contract;
 only the expiry of that deadline falls back to the last snapshot, while a
@@ -298,7 +300,10 @@ The initial strategies are:
   a leased Link worker makes an ordinary `tools/call` and may replay it after an
   interrupted lease; every execution — including a recovered one — is bounded
   by the submission's accepted response limit rather than the profile's
-  current value, so limit changes never reinterpret an accepted request;
+  current value, so limit changes never reinterpret an accepted request, and
+  a successful response is held to the pinned output schema and the pinned
+  protocol version's content-block shapes before it can be stored as
+  completed;
 - `local_guarded`: a synchronous mutation with a reviewed conflict/read-back
   reconciliation contract; automatic replay is forbidden until reconciliation;
 - `unsupported`: reject before any upstream mutation.
