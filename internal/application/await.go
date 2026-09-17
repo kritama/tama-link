@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strconv"
+	"sync/atomic"
 	"time"
 
 	"github.com/kritama/tama-link/internal/contract"
@@ -122,23 +123,40 @@ func (s *Service) waitForState(ctx context.Context, sub *store.Submission, budge
 	return sub, nil
 }
 
-// finalReadTimeout bounds the one final state read after the caller gave up
-// or the budget expired. The read must not be cancelled with the caller — a
-// fresh terminal state is more useful than the last snapshot — but it also
-// must not hold the MCP handler beyond the wait contract while SQLite is
-// contended or stalled. Tests shorten it through the variable.
-var finalReadTimeout = 2 * time.Second
+// defaultFinalReadTimeout bounds the one final state read after the caller
+// gave up or the budget expired. The read must not be cancelled with the
+// caller — a fresh terminal state is more useful than the last snapshot —
+// but it also must not hold the MCP handler beyond the wait contract while
+// SQLite is contended or stalled.
+const defaultFinalReadTimeout = 2 * time.Second
+
+// finalReadTimeoutOverride holds a test override in nanoseconds; zero means
+// the default. Atomic so parallel tests that read the deadline never race a
+// test that overrides it.
+var finalReadTimeoutOverride atomic.Int64
+
+// setFinalReadTimeout overrides the final-read deadline; tests use it, with
+// zero restoring the default.
+func setFinalReadTimeout(d time.Duration) { finalReadTimeoutOverride.Store(int64(d)) }
 
 // finalState performs that final fresh read on an independent context with
-// its own short deadline. If the refresh does not complete in time, the
-// last snapshot is returned: it is at most one poll interval stale, and
-// the caller can await again.
+// its own short deadline. Only the expiry of that independent deadline
+// falls back to the snapshot — at most one poll interval stale, and the
+// caller can await again; a real storage failure still reaches the caller
+// instead of being reported as a successful pending response.
 func (s *Service) finalState(sub *store.Submission) (*store.Submission, *contract.Error) {
-	ctx, cancel := context.WithTimeout(context.Background(), finalReadTimeout)
+	timeout := defaultFinalReadTimeout
+	if v := finalReadTimeoutOverride.Load(); v != 0 {
+		timeout = time.Duration(v)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 	reloaded, cerr := s.reload(ctx, sub.ID)
 	if cerr != nil {
-		return sub, nil
+		if ctx.Err() != nil {
+			return sub, nil
+		}
+		return nil, cerr
 	}
 	return reloaded, nil
 }

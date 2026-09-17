@@ -136,7 +136,9 @@ func (c *Client) ListTools(ctx context.Context, cursor string, maxResponseBytes 
 // a hard page ceiling so a hostile cursor loop cannot run forever.
 func (c *Client) ListAllTools(ctx context.Context, maxResponseBytes int64) ([]*LiveTool, error) {
 	const maxPages = 32
+	bound := c.resolveBound(maxResponseBytes)
 	var all []*LiveTool
+	var catalogBytes int64
 	cursor := ""
 	for page := 0; ; page++ {
 		if page >= maxPages {
@@ -145,6 +147,15 @@ func (c *Client) ListAllTools(ctx context.Context, maxResponseBytes int64) ([]*L
 		result, err := c.ListTools(ctx, cursor, maxResponseBytes)
 		if err != nil {
 			return nil, err
+		}
+		// The cumulative catalog is bounded, not just each page: a hostile
+		// endpoint serving many just-under-bound pages cannot exhaust
+		// process memory through pagination.
+		for _, tool := range result.Tools {
+			catalogBytes += int64(len(tool.Raw))
+		}
+		if catalogBytes > bound {
+			return nil, newError(KindTooLarge, 0, fmt.Errorf("tools/list exceeds the cumulative %d byte catalog bound", bound))
 		}
 		all = append(all, result.Tools...)
 		if result.NextCursor == "" {

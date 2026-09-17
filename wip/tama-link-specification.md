@@ -314,9 +314,10 @@ Requirements:
 - Cancellation and budget expiry each trigger one final fresh state read on
   an independent context with its own short deadline, so a contended or
   stalled store cannot hold the handler beyond the wait contract after the
-  caller disconnected; if that refresh does not complete in time, the last
-  snapshot — at most one poll interval stale — is returned and the caller
-  can await again.
+  caller disconnected. Only the expiry of that independent deadline falls
+  back to the last snapshot — at most one poll interval stale, and the
+  caller can await again; a real storage failure during the refresh still
+  reaches the caller instead of being reported as a pending response.
 - `cursor` is opaque and allows the caller to request only progress events
   after the last observed sequence.
 - A client may call `await` repeatedly until `terminal` is true.
@@ -616,7 +617,11 @@ are bounded by the implementation hard response ceiling rather than the
 profile's current response bound: the catalog is profile infrastructure, not
 a submission's response, so a later, lowered profile limit can never
 constrain connection establishment or irreversibly fail an already accepted
-submission whose catalog no longer fits the lowered bound. A live tool that is not
+submission whose catalog no longer fits the lowered bound. The ceiling is
+cumulative across pagination, so a hostile endpoint serving many
+just-under-bound pages cannot exhaust process memory. Annotation numbers in
+the live catalog compare by their JSON literal, never through float64
+coercion, matching the profile loader. A live tool that is not
 in the profile is never exposed automatically. A pinned operation whose
 security-relevant descriptor has drifted fails closed with
 `operation_contract_mismatch` until the profile is reconciled.

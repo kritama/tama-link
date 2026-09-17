@@ -524,3 +524,56 @@ func TestConnectMalformedCapabilities(t *testing.T) {
 		})
 	}
 }
+
+// TestConnectAnnotationNumbersPreserveLiterals pins that annotation numbers
+// compare by their JSON literal, not through float64 coercion: an unchanged
+// 1.0 is not re-encoded as 1 (false drift), and distinct integers above 2^53
+// do not collapse into one value (missed drift). The profile loader decodes
+// with UseNumber, so the live side must too.
+func TestConnectAnnotationNumbersPreserveLiterals(t *testing.T) {
+	live := strings.Replace(defaultMessageTool(),
+		`"name": "message",`,
+		`"name": "message",
+		"annotations": {"priority": 1.0, "big": 9007199254740993},`, 1)
+
+	t.Run("identical literals do not drift", func(t *testing.T) {
+		server := newTamaServer(t)
+		server.tools = []string{live}
+		pinned := pinnedMessage(catalog.StrategyLocalReplayable, catalog.TaskSupportForbidden)
+		pinned.Annotations = map[string]any{
+			"priority": json.Number("1.0"),
+			"big":      json.Number("9007199254740993"),
+		}
+		digest, err := pinned.ComputeDigest()
+		if err != nil {
+			t.Fatalf("ComputeDigest: %v", err)
+		}
+		pinned.Digest = digest
+		adapter := newTestAdapter(t, server, pinned)
+		if _, err := adapter.Connect(context.Background()); err != nil {
+			t.Fatalf("Connect with identical annotation literals = %v, want no drift", err)
+		}
+	})
+
+	t.Run("distinct literals drift", func(t *testing.T) {
+		server := newTamaServer(t)
+		server.tools = []string{live}
+		pinned := pinnedMessage(catalog.StrategyLocalReplayable, catalog.TaskSupportForbidden)
+		// 1.0 vs 1: float64 coercion would re-encode the live value as 1
+		// and wrongly pass; the literal comparison must report drift.
+		pinned.Annotations = map[string]any{
+			"priority": json.Number("1"),
+			"big":      json.Number("9007199254740993"),
+		}
+		digest, err := pinned.ComputeDigest()
+		if err != nil {
+			t.Fatalf("ComputeDigest: %v", err)
+		}
+		pinned.Digest = digest
+		adapter := newTestAdapter(t, server, pinned)
+		_, err = adapter.Connect(context.Background())
+		if !errors.Is(err, ErrCatalogMismatch) || !strings.Contains(err.Error(), "annotations") {
+			t.Fatalf("Connect with distinct annotation literals = %v, want annotations drift", err)
+		}
+	})
+}

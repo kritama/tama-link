@@ -1,6 +1,7 @@
 package tama2026
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"slices"
@@ -120,13 +121,19 @@ func normalizeLive(tool *upstream.LiveTool, pinned catalog.Descriptor) catalog.L
 }
 
 // annotationsMap decodes the raw annotations object, keeping nil for an
-// absent declaration.
+// absent declaration. Numbers decode as json.Number so the pinned literal
+// survives the comparison: float64 coercion would re-encode an unchanged
+// 1.0 as 1 (false drift) and could collapse distinct integers above 2^53
+// into one value (missed drift), diverging from the profile loader's
+// UseNumber decode.
 func annotationsMap(raw json.RawMessage) map[string]any {
 	if len(raw) == 0 {
 		return nil
 	}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
 	var out map[string]any
-	if err := json.Unmarshal(raw, &out); err != nil {
+	if err := dec.Decode(&out); err != nil {
 		return map[string]any{"__unparseable__": true}
 	}
 	return out

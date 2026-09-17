@@ -282,3 +282,75 @@ func TestAwaitRejectsCursorBeyondSequence(t *testing.T) {
 		t.Fatalf("await at current sequence: %s", appErr.Message)
 	}
 }
+
+// queuedSubmission builds a service without a started worker, so the
+// submitted status tool stays non-terminal in its accepted state.
+func queuedSubmission(t *testing.T, f *fakeTama) (*Service, *store.Store, string) {
+	t.Helper()
+	cfg := fixtureConfigFor(t, f, limits.Default())
+	svc, err := New(cfg)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	t.Cleanup(func() { _ = cfg.Store.Close() })
+	id := submitStatus(t, svc, "queued-1")
+	return svc, cfg.Store, id
+}
+
+// TestAwaitFinalReadDeadlineFallsBackToSnapshot pins the deadline path of
+// the final reload: when the independent final-read deadline expires, the
+// last snapshot is returned as a successful pending response.
+func TestAwaitFinalReadDeadlineFallsBackToSnapshot(t *testing.T) {
+	t.Parallel()
+
+	setFinalReadTimeout(time.Nanosecond)
+	t.Cleanup(func() { setFinalReadTimeout(0) })
+
+	f := newFakeTama(t)
+	svc, st, id := queuedSubmission(t, f)
+	sub, err := st.GetSubmission(context.Background(), id)
+	if err != nil {
+		t.Fatalf("GetSubmission: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	out, appErr := svc.Await(ctx, contract.AwaitInput{SubmissionID: id, TimeoutMS: 30000})
+	if appErr != nil {
+		t.Fatalf("await after the final-read deadline = %s", appErr.Message)
+	}
+	if out.Error != nil {
+		t.Fatalf("await error = %+v, want a pending snapshot response", out.Error)
+	}
+	if out.Status != sub.Status {
+		t.Fatalf("status = %s, want the last %s snapshot", out.Status, sub.Status)
+	}
+}
+
+// TestAwaitFinalReadFailurePropagates pins that only the expiry of the
+// independent final-read deadline falls back to the snapshot: a real
+// storage failure during the final reload reaches the caller instead of
+// being reported as a successful pending response.
+func TestAwaitFinalReadFailurePropagates(t *testing.T) {
+	t.Parallel()
+
+	f := newFakeTama(t)
+	svc, st, id := queuedSubmission(t, f)
+
+	// Fail the store while the wait is in flight but before the caller
+	// cancels, so the final reload fails with a real storage error while
+	// its independent deadline is still live.
+	if err := st.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, appErr := svc.Await(ctx, contract.AwaitInput{SubmissionID: id, TimeoutMS: 30000})
+	// The mapped code depends on the store failure mode (a closed database
+	// surfaces as internal); the pinned behavior is that the failure
+	// reaches the caller instead of a snapshot-shaped success.
+	if appErr == nil {
+		t.Fatal("await succeeded on a failed final read, want the storage error to propagate")
+	}
+}

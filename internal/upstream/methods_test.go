@@ -360,3 +360,18 @@ func TestCallToolValidation(t *testing.T) {
 		t.Error("empty tool name accepted")
 	}
 }
+
+// TestListToolsCumulativeBound pins that pagination is bounded by the
+// cumulative catalog size, not just each page: a hostile endpoint serving
+// many just-under-bound pages cannot exhaust process memory through
+// pagination.
+func TestListToolsCumulativeBound(t *testing.T) {
+	page := `{"tools":[{"name":"tool","description":"` + strings.Repeat("d", 1024) + `","inputSchema":{}}],"nextCursor":"next"}`
+	ts := newTestServer(t, func(rec *recordedRequest) (int, string, string) {
+		return 200, "application/json", jsonReply(rec.BodyID, page)
+	})
+	client := newTestClient(t, ts)
+	if _, err := client.ListAllTools(context.Background(), 2048); err == nil {
+		t.Fatal("pagination exceeded the cumulative catalog bound without failing")
+	}
+}
