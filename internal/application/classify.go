@@ -48,10 +48,14 @@ func classify(err error) *contract.Error {
 	case errors.Is(err, tama2026.ErrStateUnavailable):
 		return stable(contract.CodeStateUnavailable,
 			"The secure credential backend is unavailable for this profile.")
-	default:
-		return stable(contract.CodeUpstreamUnavailable,
-			"The upstream endpoint is currently unavailable.")
 	}
+	var ue *upstream.Error
+	if errors.As(err, &ue) && ue.Kind == upstream.KindTooLarge {
+		return stable(contract.CodeResultTooLarge,
+			"The upstream response exceeded the size limit accepted for this submission.")
+	}
+	return stable(contract.CodeUpstreamUnavailable,
+		"The upstream endpoint is currently unavailable.")
 }
 
 func stable(code contract.Code, message string) *contract.Error {

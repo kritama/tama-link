@@ -608,3 +608,42 @@ func TestSubscriptionNotBoundByRequestTimeout(t *testing.T) {
 		t.Fatal("stream did not close promptly on cancellation")
 	}
 }
+
+// TestCallToolPerRequestResponseBound pins the per-request response bound:
+// a positive MaxResponseBytes on CallToolParams bounds that one response
+// instead of the client's configured bound, and zero keeps the default.
+// A submission's accepted lifecycle policy rides on this field, so a
+// recovered execution runs under the limits it was accepted with.
+func TestCallToolPerRequestResponseBound(t *testing.T) {
+	big := strings.Repeat("p", 4096)
+	ts := newTestServer(t, func(rec *recordedRequest) (int, string, string) {
+		return http.StatusOK, "application/json",
+			jsonReply(rec.BodyID, `{"resultType":"complete","isError":false,"structuredContent":{"pad":"`+big+`"}}`)
+	})
+	client, err := New(Config{
+		Endpoint:           ts.URL,
+		ClientInfo:         mcp.Implementation{Name: "tama-link", Version: "0.1.0"},
+		ClientCapabilities: json.RawMessage(`{}`),
+		TokenProvider:      func(context.Context) (string, error) { return "t", nil },
+		MaxResponseBytes:   1 << 20,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	// The per-request bound below the response size fails even though the
+	// client's configured bound is far larger.
+	if _, err := client.CallTool(context.Background(), &CallToolParams{Name: "message", MaxResponseBytes: 1024}); err == nil {
+		t.Fatal("call succeeded under the per-request bound, want too large")
+	}
+
+	// Zero keeps the client's configured bound: the same response succeeds.
+	if _, err := client.CallTool(context.Background(), &CallToolParams{Name: "message"}); err != nil {
+		t.Fatalf("call under the client bound: %v", err)
+	}
+
+	// A per-request bound above the response size also succeeds.
+	if _, err := client.CallTool(context.Background(), &CallToolParams{Name: "message", MaxResponseBytes: 1 << 20}); err != nil {
+		t.Fatalf("call under a larger per-request bound: %v", err)
+	}
+}

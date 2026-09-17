@@ -391,7 +391,7 @@ func TestExecuteLocalRejectsTaskResult(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Connect: %v", err)
 	}
-	_, err = cn.ExecuteLocal(context.Background(), "message", json.RawMessage(`{}`))
+	_, err = cn.ExecuteLocal(context.Background(), "message", json.RawMessage(`{}`), 0)
 	if !errors.Is(err, ErrUnexpectedTaskResult) {
 		t.Fatalf("err = %v, want ErrUnexpectedTaskResult", err)
 	}

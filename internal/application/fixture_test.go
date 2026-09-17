@@ -43,6 +43,9 @@ type fakeTama struct {
 	calls      atomic.Int64
 	fail       atomic.Bool
 	taskResult atomic.Bool // status tool replies with a task result
+	// pad, when positive, appends that many padding bytes to the status
+	// tool's structured content, letting tests control the response size.
+	pad atomic.Int64
 
 	mu          sync.Mutex
 	lastCallDoc string // JSON document of the last tools/call request
@@ -98,9 +101,13 @@ func newFakeTama(t *testing.T) *fakeTama {
 					writeFake(w, id, `{"resultType":"task","taskId":"task-unexpected","status":"working","createdAt":"2026-09-11T10:00:00Z","lastUpdatedAt":"2026-09-11T10:00:00Z","ttlMs":86400000,"pollIntervalMs":1000}`)
 					return
 				}
+				structured := `{"ok":true}`
+				if pad := f.pad.Load(); pad > 0 {
+					structured = `{"ok":true,"pad":"` + strings.Repeat("p", int(pad)) + `"}`
+				}
 				writeFake(w, id, `{"resultType":"complete","isError":false,
 					"content":[{"type":"text","text":"status ok"}],
-					"structuredContent":{"ok":true}}`)
+					"structuredContent":`+structured+`}`)
 			default:
 				writeFake(w, id, `{"resultType":"complete","isError":false,
 					"content":[{"type":"text","text":"sent"}],

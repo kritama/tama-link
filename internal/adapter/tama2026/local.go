@@ -14,8 +14,11 @@ import (
 // synchronous tools/call under the leased local worker. No Tasks capability
 // is declared and only a complete CallToolResult is accepted: a task-shaped
 // result for a synchronous profile operation is a pinned-contract mismatch,
-// never a polled task.
-func (cn *Connection) ExecuteLocal(ctx context.Context, name string, args json.RawMessage) (*contract.Result, error) {
+// never a polled task. maxResponseBytes, when positive, bounds this one
+// response instead of the upstream client's configured bound; callers pass
+// the submission's accepted lifecycle bound so a recovered execution runs
+// under the policy it was accepted with.
+func (cn *Connection) ExecuteLocal(ctx context.Context, name string, args json.RawMessage, maxResponseBytes int64) (*contract.Result, error) {
 	d, ok := cn.catalog.Find(name)
 	if !ok {
 		return nil, fmt.Errorf("%w: tool %q is not in the effective catalog", ErrOperationNotAllowed, name)
@@ -24,9 +27,10 @@ func (cn *Connection) ExecuteLocal(ctx context.Context, name string, args json.R
 		return nil, fmt.Errorf("%w: tool %q uses strategy %s", ErrOperationNotAllowed, name, d.Strategy)
 	}
 	resp, err := cn.adapter.upstream.CallTool(ctx, &upstream.CallToolParams{
-		Name:         name,
-		Arguments:    args,
-		Capabilities: emptyCapabilities,
+		Name:             name,
+		Arguments:        args,
+		Capabilities:     emptyCapabilities,
+		MaxResponseBytes: maxResponseBytes,
 	})
 	if err != nil {
 		return nil, classify(err)

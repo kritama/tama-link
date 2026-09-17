@@ -84,7 +84,7 @@ func (c *Client) Subscribe(ctx context.Context, taskIDs []string, cb *SubscribeC
 		return newError(KindAuth, resp.StatusCode, nil)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return c.readHTTPError(resp)
+		return c.readHTTPError(resp, 0)
 	}
 	if baseMediaType(resp.Header.Get("Content-Type")) != "text/event-stream" {
 		drain(resp.Body)
@@ -109,7 +109,7 @@ type wireSubscribeNotifications struct {
 func (c *Client) readSubscription(subscriptionID string, requested map[string]bool, body io.ReadCloser, cb *SubscribeCallbacks) error {
 	acknowledged := false
 	authorized := make(map[string]bool)
-	return c.scanSSE(body, func(msg jsonrpc.Message) (bool, error) {
+	return c.scanSSE(body, 0, func(msg jsonrpc.Message) (bool, error) {
 		req, ok := msg.(*jsonrpc.Request)
 		if ok {
 			if req.ID.IsValid() {

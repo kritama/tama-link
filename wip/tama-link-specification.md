@@ -242,7 +242,12 @@ Requirements:
 - Lowering a profile limit must not make an already accepted idempotent request
   unrecoverable. Tama Link canonicalizes and reconciles an existing request
   within implementation hard ceilings before applying current profile limits;
-  those current limits govern only genuinely new acceptance.
+  those current limits govern only genuinely new acceptance. Each accepted
+  submission's lifecycle policy is durable and governs its own executions:
+  a replayable submission recovered after a profile limit change runs under
+  the response bound it was accepted with — raising the limit cannot admit a
+  response the accepted policy rejects, and lowering it cannot fail a
+  response that was valid when accepted.
 - Reusing it with different input must fail with `idempotency_conflict`.
 - Success means Tama Link durably accepted responsibility for the operation in
   its local store, not that Tama accepted or completed it.

@@ -80,7 +80,11 @@ func (e *Executor) Execute(ctx context.Context, sub *store.Submission) (contract
 	if err := checkDescriptorDigest(cn, sub); err != nil {
 		return contract.Result{}, &BoundaryError{E: *err}
 	}
-	result, err := cn.ExecuteLocal(ctx, sub.Tool, sub.Arguments)
+	// The submission's accepted response bound governs this execution: a
+	// replayable submission recovered after a profile limit change runs
+	// under the policy it was accepted with, not the profile's current
+	// value.
+	result, err := cn.ExecuteLocal(ctx, sub.Tool, sub.Arguments, int64(sub.AcceptedLimits.ResponseBytes))
 	if err != nil {
 		if deferredErr := deferredIfContended(err); deferredErr != nil {
 			return contract.Result{}, deferredErr

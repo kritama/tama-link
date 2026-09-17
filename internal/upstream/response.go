@@ -14,25 +14,36 @@ import (
 	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 )
 
+// resolveBound returns the response bound for one request: the per-request
+// override when positive, otherwise the client's configured bound.
+func (c *Client) resolveBound(perRequest int64) int64 {
+	if perRequest > 0 {
+		return perRequest
+	}
+	return c.maxBytes
+}
+
 // readResult consumes one call response and returns the raw JSON-RPC result
 // value. The response is either a single application/json body or an SSE
-// stream carrying exactly the matching response.
-func (c *Client) readResult(method, requestID string, resp *http.Response) (json.RawMessage, error) {
+// stream carrying exactly the matching response. perRequest, when positive,
+// bounds this response's body or events instead of the client's configured
+// bound.
+func (c *Client) readResult(method, requestID string, resp *http.Response, perRequest int64) (json.RawMessage, error) {
 	if resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden {
 		drain(resp.Body)
 		return nil, newError(KindAuth, resp.StatusCode, nil)
 	}
 	if resp.StatusCode != http.StatusOK {
-		return nil, c.readHTTPError(resp)
+		return nil, c.readHTTPError(resp, perRequest)
 	}
 	contentType := baseMediaType(resp.Header.Get("Content-Type"))
 	switch contentType {
 	case "application/json":
-		return c.readJSONResult(method, requestID, resp.Body)
+		return c.readJSONResult(method, requestID, resp.Body, perRequest)
 	case "text/event-stream":
 		var result json.RawMessage
 		sawResponse := false
-		err := c.scanSSE(resp.Body, func(msg jsonrpc.Message) (bool, error) {
+		err := c.scanSSE(resp.Body, perRequest, func(msg jsonrpc.Message) (bool, error) {
 			r, done, derr := matchResult(msg, requestID)
 			if derr != nil {
 				return true, derr
@@ -58,8 +69,8 @@ func (c *Client) readResult(method, requestID string, resp *http.Response) (json
 }
 
 // readJSONResult decodes a single application/json response body.
-func (c *Client) readJSONResult(method, requestID string, body io.Reader) (json.RawMessage, error) {
-	data, err := readBounded(body, c.maxBytes)
+func (c *Client) readJSONResult(method, requestID string, body io.Reader, perRequest int64) (json.RawMessage, error) {
+	data, err := readBounded(body, c.resolveBound(perRequest))
 	if err != nil {
 		return nil, err
 	}
@@ -82,8 +93,8 @@ func (c *Client) readJSONResult(method, requestID string, body io.Reader) (json.
 
 // readHTTPError classifies a non-200 response, extracting a JSON-RPC error
 // object when the body carries one.
-func (c *Client) readHTTPError(resp *http.Response) error {
-	data, err := readBounded(resp.Body, c.maxBytes)
+func (c *Client) readHTTPError(resp *http.Response, perRequest int64) error {
+	data, err := readBounded(resp.Body, c.resolveBound(perRequest))
 	if err != nil {
 		return err
 	}
@@ -165,12 +176,13 @@ func protocolError(werr *jsonrpc.Error) error {
 // (an implied line feed completes the last line, but only a blank line
 // dispatches). Callers that were waiting for a response treat that as a
 // clean close and reconcile.
-func (c *Client) scanSSE(r io.Reader, dispatch func(msg jsonrpc.Message) (stop bool, err error)) error {
+func (c *Client) scanSSE(r io.Reader, perRequest int64, dispatch func(msg jsonrpc.Message) (stop bool, err error)) error {
+	maxBytes := c.resolveBound(perRequest)
 	scanner := bufio.NewScanner(r)
 	// The line bound is the event bound plus the data-field prefix: the
 	// cumulative event count below is the actual bound, the line bound only
 	// has to avoid truncating one bounded event.
-	scanner.Buffer(make([]byte, 0, 64*1024), int(c.maxBytes)+8)
+	scanner.Buffer(make([]byte, 0, 64*1024), int(maxBytes)+8)
 	var data []string
 	var eventBytes int64
 	// flush returns the dispatch stop signal: a successful stop (the
@@ -209,8 +221,8 @@ func (c *Client) scanSSE(r io.Reader, dispatch func(msg jsonrpc.Message) (stop b
 			// Count the line plus its join separator so the cumulative
 			// encoded payload is bounded before the event completes.
 			eventBytes += int64(len(value)) + 1
-			if eventBytes > c.maxBytes {
-				return newError(KindTooLarge, 0, fmt.Errorf("SSE event exceeds %d bytes", c.maxBytes))
+			if eventBytes > maxBytes {
+				return newError(KindTooLarge, 0, fmt.Errorf("SSE event exceeds %d bytes", maxBytes))
 			}
 			data = append(data, value)
 		}

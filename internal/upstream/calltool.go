@@ -18,6 +18,12 @@ type CallToolParams struct {
 	// adapter declares the Tasks extension only for operations that may
 	// execute as tasks.
 	Capabilities json.RawMessage
+	// MaxResponseBytes bounds this one response body or SSE event. Zero
+	// uses the client's configured bound. Executions governed by a
+	// submission's accepted lifecycle policy pass that policy's persisted
+	// bound, so a recovered submission runs under the limits it was
+	// accepted with rather than the profile's current values.
+	MaxResponseBytes int64
 }
 
 // CallToolResponse is a tools/call result in either result shape.
@@ -63,7 +69,7 @@ func (c *Client) CallTool(ctx context.Context, p *CallToolParams) (*CallToolResp
 			return nil, err
 		}
 	}
-	raw, err := c.callWithMeta(ctx, MethodCallTool, p.Name, wire, meta)
+	raw, err := c.callWithMeta(ctx, MethodCallTool, p.Name, wire, meta, p.MaxResponseBytes)
 	if err != nil {
 		return nil, err
 	}

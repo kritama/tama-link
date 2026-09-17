@@ -129,16 +129,18 @@ func New(cfg Config) (*Client, error) {
 func (c *Client) Endpoint() string { return c.endpoint.String() }
 
 // call performs one stateless request and returns the raw JSON-RPC result
-// value with the client's default capabilities.
+// value with the client's default capabilities and response bound.
 func (c *Client) call(ctx context.Context, method, name string, params json.RawMessage) (json.RawMessage, error) {
-	return c.callWithMeta(ctx, method, name, params, nil)
+	return c.callWithMeta(ctx, method, name, params, nil, 0)
 }
 
 // callWithMeta performs one stateless finite request. metaOverride, when
 // non-nil, replaces the client's default _meta triple for this request only
-// (the per-request Tasks capability seam). The per-request deadline bounds
-// this one round trip only; subscription streams never take this path.
-func (c *Client) callWithMeta(ctx context.Context, method, name string, params, metaOverride json.RawMessage) (json.RawMessage, error) {
+// (the per-request Tasks capability seam), and maxResponseBytes, when
+// positive, replaces the client's configured response bound for this one
+// request. The per-request deadline bounds this one round trip only;
+// subscription streams never take this path.
+func (c *Client) callWithMeta(ctx context.Context, method, name string, params, metaOverride json.RawMessage, maxResponseBytes int64) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
 	defer cancel()
 	id, resp, err := c.doRequest(ctx, method, name, params, metaOverride)
@@ -146,7 +148,7 @@ func (c *Client) callWithMeta(ctx context.Context, method, name string, params, 
 		return nil, err
 	}
 	defer func() { _ = resp.Body.Close() }()
-	return c.readResult(method, id, resp)
+	return c.readResult(method, id, resp, maxResponseBytes)
 }
 
 // doRequest builds and sends one stateless request. metaOverride, when

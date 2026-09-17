@@ -279,7 +279,9 @@ The initial strategies are:
   through owner-bound `tasks/get`, and captures the detailed terminal state;
 - `local_replayable`: read-only or proven-idempotent `/mcp/system` operations;
   a leased Link worker makes an ordinary `tools/call` and may replay it after an
-  interrupted lease;
+  interrupted lease; every execution — including a recovered one — is bounded
+  by the submission's accepted response limit rather than the profile's
+  current value, so limit changes never reinterpret an accepted request;
 - `local_guarded`: a synchronous mutation with a reviewed conflict/read-back
   reconciliation contract; automatic replay is forbidden until reconciliation;
 - `unsupported`: reject before any upstream mutation.
