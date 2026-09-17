@@ -181,7 +181,11 @@ grant is then retired) or aborts, never pairing the new client with a grant
 issued under the old one. The registration mutation holds the local lock
 that orders completions, refreshes, and logouts — a same-owner lease claim
 never advances the epoch, so the lease alone cannot order in-process
-mutations — and renews the epoch across the whole mutation. The client
+mutations — and renews the epoch across the whole mutation. The lock and
+lease are acquired before the dynamic-registration POST: a contended
+writer fails before creating an upstream client, and a concurrent
+first-time login rechecks the stored record under the lock and reuses the
+winner's registration. The client
 record is fenced like the refresh credential: it is written to a unique
 secure-backend slot — whose label stays within the credential backend's
 accepted label characters, alphanumerics plus dot, underscore, and dash —
@@ -384,7 +388,9 @@ it must not infer expiry from a lost stream or elapsed client wait alone.
 
 Tama Link coordinates OAuth refresh attempts with a profile-scoped SQLite
 lease, re-reads the keyring value after acquiring the lease, and atomically
-stores a replacement refresh token when returned. The replacement is
+stores a replacement refresh token when returned. A token response is
+accepted only when its HTTP status is successful and the document carries
+no OAuth error, so credentials from an error response are never persisted. The replacement is
 committed through the fenced protocol, and every rejection path — commit
 error, lost epoch, or an uncertain slot write — rolls the writer's own
 uncommitted slot back, durably enqueuing it on the refresh retirement

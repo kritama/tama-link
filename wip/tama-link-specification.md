@@ -799,7 +799,11 @@ not guess task support from a product name or user agent.
 The authorization-server metadata is validated before any token request:
 the token endpoint must be a secure absolute URL on the same origin as the
 validated issuer, because the authorization code and any client secret are
-sent there. The same origin policy re-validates the stored token endpoint
+sent there. A token response is accepted only when its HTTP status is
+successful and the document carries no OAuth error: a document with both
+`access_token` and an `error`, or any non-2xx status, is never treated as
+a usable token, so no refresh or authorization persists credentials from
+an error response. The same origin policy re-validates the stored token endpoint
 before every refresh. A refresh holds its cross-process lease for the whole
 critical section: the lease is renewed on a third of its TTL while the token
 exchange runs and the replacement credential is written, and a lost lease
@@ -1052,7 +1056,12 @@ retired as orphaned — or aborts, and the new client is never paired with a
 grant issued under the old one. The registration mutation also holds the
 local lock that orders completions, refreshes, and logouts (a same-owner
 claim never advances the epoch, so the lease alone cannot order in-process
-mutations) and renews the epoch across the whole mutation. The client
+mutations) and renews the epoch across the whole mutation — and the lock
+and lease are acquired before the registration POST itself: a writer that
+cannot own the epoch fails before creating an upstream client it could
+never commit, and a concurrent first-time login waits for the winner's
+whole mutation, rechecks the stored record under the lock, and reuses the
+winner's registration instead of creating its own client. The client
 record is fenced exactly like the refresh credential: the record is
 written to a unique secure-backend slot and made live only by an atomic
 fence advance that requires the writer's own live, unexpired lease

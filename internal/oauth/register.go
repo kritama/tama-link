@@ -131,6 +131,56 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 		return rec, nil
 	}
 
+	// The replacement is one credential-mutation protocol, and the
+	// registration POST itself is part of it: the local lock orders it
+	// against this process's own completion, refresh, and logout — a
+	// same-owner claim succeeds without advancing the epoch, so the lease
+	// alone cannot order them — and the cross-process lease orders it
+	// against every other process. Acquiring both before the POST means a
+	// contended registration never creates an upstream client it cannot
+	// commit, and two concurrent first-time logins serialize before
+	// either creates a client: the second finds the winner's stored
+	// record on the recheck below and never registers its own.
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	leaseGeneration, claimed, err := c.claimRefreshLease(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if !claimed {
+		return nil, fmt.Errorf("%w: the credential is being mutated; retry registration", ErrLeaseContention)
+	}
+	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
+
+	// Renew ownership across the whole mutation on a context that
+	// outlives the caller's cancellation: the final record write takes
+	// no context and cannot be aborted, so if the secure backend blocks
+	// beyond the lease TTL the renewal is the only thing keeping the
+	// epoch alive, and a caller cancellation during that write must not
+	// hand the epoch to another process. Every interruptible step still
+	// observes the caller context directly.
+	renewCtx, cancelExec := context.WithCancel(context.WithoutCancel(ctx))
+	renewed := make(chan struct{})
+	go c.renewLease(renewCtx, cancelExec, renewed)
+	defer func() {
+		cancelExec()
+		<-renewed
+	}()
+
+	// Another process may have registered while this one waited for the
+	// lease. The stored record is authoritative under the lock: a record
+	// bound to the same issuer is reused, so the external registration
+	// POST below never runs for it.
+	if rec, found, err := c.RegisteredClient(ctx); err != nil {
+		return nil, err
+	} else if found {
+		if rec.Issuer != md.AS.Issuer {
+			return nil, fmt.Errorf("%w: stored client registration binds a different issuer", ErrMetadata)
+		}
+		return rec, nil
+	}
+
 	body := map[string]any{
 		"client_name":                "Tama Link",
 		"redirect_uris":              []string{c.redirectURI},
@@ -188,47 +238,15 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	if recordMissingSecret(rec) {
 		return nil, fmt.Errorf("registration returned no client secret for %s", rec.AuthMethod)
 	}
-	// The replacement is one credential-mutation protocol. The local
-	// lock orders it against this process's own completion, refresh, and
-	// logout — a same-owner claim succeeds without advancing the epoch,
-	// so the lease alone cannot order them — and the cross-process lease
-	// orders it against every other process. A replacement registration
-	// issues a new client ID, so any refresh credential still stored
-	// belongs to the previous client and can never refresh under the new
-	// one: retiring it and committing the new record under the same
-	// claimed epoch means a login started from the previous record either
-	// commits its grant before the replacement (the grant is then retired
-	// as orphaned) or aborts against the superseded record — never pairs
-	// the new client with a grant issued under the old one. The normal
-	// first-login path stores no credential yet and the retirement is a
-	// no-op.
-	c.refreshMu.Lock()
-	defer c.refreshMu.Unlock()
-
-	leaseGeneration, claimed, err := c.claimRefreshLease(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if !claimed {
-		return nil, fmt.Errorf("%w: the credential is being mutated; retry registration", ErrLeaseContention)
-	}
-	defer func() { _ = c.lease.ReleaseLease(context.WithoutCancel(ctx), refreshLeaseName, c.owner) }()
-
-	// Renew ownership across the whole mutation on a context that
-	// outlives the caller's cancellation: the final record write takes
-	// no context and cannot be aborted, so if the secure backend blocks
-	// beyond the lease TTL the renewal is the only thing keeping the
-	// epoch alive, and a caller cancellation during that write must not
-	// hand the epoch to another process. Every interruptible step still
-	// observes the caller context directly.
-	renewCtx, cancelExec := context.WithCancel(context.WithoutCancel(ctx))
-	renewed := make(chan struct{})
-	go c.renewLease(renewCtx, cancelExec, renewed)
-	defer func() {
-		cancelExec()
-		<-renewed
-	}()
-
+	// A replacement registration issues a new client ID, so any refresh
+	// credential still stored belongs to the previous client and can
+	// never refresh under the new one: retiring it and committing the new
+	// record under the same claimed epoch means a login started from the
+	// previous record either commits its grant before the replacement
+	// (the grant is then retired as orphaned) or aborts against the
+	// superseded record — never pairs the new client with a grant issued
+	// under the old one. The normal first-login path stores no credential
+	// yet and the retirement is a no-op.
 	if existing, err := c.loadFenced(ctx); err != nil {
 		return nil, err
 	} else if existing != nil {
@@ -425,6 +443,21 @@ func (c *Client) postToken(ctx context.Context, endpoint string, rec *ClientReco
 	if err := json.Unmarshal(data, &out); err != nil {
 		return nil, fmt.Errorf("decode token response: json")
 	}
+	// An error document is an error, whatever else it carries: a response
+	// with both access_token and error is contradictory, and a non-2xx
+	// status never delivers a usable token. Accepting either would let a
+	// refresh or authorization persist credentials from an OAuth error
+	// response. The error check comes first so a 400 invalid_grant keeps
+	// its distinct mapping.
+	if out.Error != "" {
+		if out.Error == "invalid_grant" {
+			return nil, fmt.Errorf("%w", ErrGrantInvalid)
+		}
+		return nil, fmt.Errorf("token endpoint rejected the request: %s", out.Error)
+	}
+	if resp.StatusCode < 200 || resp.StatusCode > 299 {
+		return nil, fmt.Errorf("token endpoint answered %d with no token", resp.StatusCode)
+	}
 	if out.AccessToken != "" {
 		// The upstream transport unconditionally sends the access token as
 		// a Bearer credential: an omitted or different token type would
@@ -434,11 +467,5 @@ func (c *Client) postToken(ctx context.Context, endpoint string, rec *ClientReco
 		}
 		return &out, nil
 	}
-	if out.Error == "" {
-		return nil, fmt.Errorf("token endpoint answered %d with no token", resp.StatusCode)
-	}
-	if out.Error == "invalid_grant" {
-		return nil, fmt.Errorf("%w", ErrGrantInvalid)
-	}
-	return nil, fmt.Errorf("token endpoint rejected the request: %s", out.Error)
+	return nil, fmt.Errorf("token endpoint answered %d with no token", resp.StatusCode)
 }

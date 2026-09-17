@@ -431,23 +431,24 @@ func TestRegisterRejectsLostLeaseBeforeStoringRecord(t *testing.T) {
 	}
 }
 
-// TestRegisterSerializesWithCompletion pins the local lock on the
-// registration mutation: a same-owner claim succeeds without advancing
-// the epoch, so without refreshMu the lease alone cannot order Register
-// against this process's own completion, and the second registration
-// could store its record before the first client's completion commits
-// its grant — pairing the new client with the old one's grant.
-func TestRegisterSerializesWithCompletion(t *testing.T) {
+// TestRegisterSerializesConcurrentFirstLogins pins the lease-before-DCR
+// ordering: the registration POST is an external side effect, so it happens
+// only inside the mutation critical section (local lock + refresh lease).
+// A concurrent first-time login waits for the winner's whole mutation and
+// then reuses the winner's stored record — it never creates its own
+// upstream client, and two clients can never sequentially replace each
+// other's registration. The register-vs-completion ordering this critical
+// section used to pin separately is structural now: the DCR, the orphaned
+// grant retirement, and the fence commit all share the same lock section
+// the completion's exchange commits under.
+func TestRegisterSerializesConcurrentFirstLogins(t *testing.T) {
 	server := (&metadataServer{}).start(t)
-	server.tokenDelay = 300 * time.Millisecond
-	server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
 	secrets := newFakeSecrets()
 	lease := newFakeLease()
 	client := clientForServer(t, server, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
 
-	// B: a first-time registration whose DCR is slow, started while no
-	// record is stored yet, so its reuse check passes and its mutation
-	// lands while A is exchanging its code.
+	// B: a first-time registration whose DCR is slow. It claims the
+	// mutation before its POST starts, so the DCR runs under the lease.
 	var bCalls int32
 	regB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		atomic.AddInt32(&bCalls, 1)
@@ -476,64 +477,27 @@ func TestRegisterSerializesWithCompletion(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// A: the other first-time registration, which wins the record
-	// store before B's slow DCR returns.
+	// A: the concurrent first-time registration. It waits for B's whole
+	// mutation, then reuses B's stored record: it never registers its own
+	// upstream client.
 	var aCalls int32
 	regA := registerServer(t, `{"client_id":"cid-a","client_secret":"sha"}`, http.StatusCreated, &aCalls)
 	recA, err := client.Register(context.Background(), regMetadata(regA, client.issuer))
 	if err != nil {
 		t.Fatalf("Register (A): %v", err)
 	}
-	if recA.ClientID != "cid-a" {
-		t.Fatalf("Register (A) = %+v, want cid-a", recA)
+	if recA.ClientID != "cid-b" {
+		t.Fatalf("Register (A) = %+v, want B's stored record", recA)
 	}
-	md := serverMetadata(server.ts.URL)
-	redirect := "http://127.0.0.1:51234/callback"
-	authReq, err := client.NewAuthorizationRequest(md, recA, redirect)
-	if err != nil {
-		t.Fatalf("NewAuthorizationRequest: %v", err)
-	}
-
-	done := make(chan error, 1)
-	go func() {
-		done <- client.CompleteAuthorization(context.Background(), md, recA, authReq, "code-1", redirect)
-	}()
-	// Wait until the exchange is in flight at the token endpoint: the
-	// completion holds the local lock from here until it commits.
-	for {
-		server.tokenReqMu.Lock()
-		inFlight := server.tokenConcur > 0
-		server.tokenReqMu.Unlock()
-		if inFlight {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the authorization exchange never reached the token endpoint")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	// B's DCR has returned and its mutation section is next: it must
-	// wait behind A's completion, so the stored record is still A's
-	// while the exchange is in flight.
-	time.Sleep(150 * time.Millisecond)
-	if stored, found, _ := client.RegisteredClient(context.Background()); !found || stored.ClientID != "cid-a" {
-		t.Fatalf("stored record while A exchanges = %+v found:%v, want cid-a: B stored before A's completion finished", stored, found)
-	}
-	if err := <-done; err != nil {
-		t.Fatalf("CompleteAuthorization: %v", err)
+	if got := atomic.LoadInt32(&aCalls); got != 0 {
+		t.Fatalf("A registered its own client %d times, want 0: a concurrent login must reuse the winner's record", got)
 	}
 	if recB := <-regDone; recB == nil || recB.ClientID != "cid-b" {
 		t.Fatalf("Register (B) = %+v, want the fresh record", recB)
 	}
-
-	// B observed the committed grant and retired it as orphaned: the
-	// new client is not paired with a grant issued under the old one.
-	if _, found, _ := secrets.GetSecret(labelRefresh); found {
-		t.Fatal("A's grant survived B's re-registration")
-	}
-	if stored, found, _ := client.RegisteredClient(context.Background()); !found || stored.ClientID != "cid-b" {
-		t.Fatalf("stored record = %+v found:%v, want B's registration", stored, found)
+	stored, found, err := client.RegisteredClient(context.Background())
+	if err != nil || !found || stored.ClientID != "cid-b" {
+		t.Fatalf("stored record = %+v found:%v err:%v, want B's registration", stored, found, err)
 	}
 }
 
@@ -764,5 +728,26 @@ func TestSlotLabelsUseBackendValidCharacters(t *testing.T) {
 	}
 	if !credential.ValidSecretLabel(clientSlot) {
 		t.Fatalf("client slot label %q is not accepted by the credential backend", clientSlot)
+	}
+}
+
+// TestRegisterClaimsLeaseBeforeDCR pins that a contended registration
+// never creates an upstream client: the lease is claimed before the
+// registration POST, so a writer that cannot own the epoch fails before
+// the external side effect instead of orphaning a client ID and secret.
+func TestRegisterClaimsLeaseBeforeDCR(t *testing.T) {
+	secrets := newFakeSecrets()
+	lease := newFakeLease()
+	// A foreign process already owns the refresh epoch.
+	lease.holdOther()
+	client := newStaticClient(t, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
+
+	var calls int32
+	ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
+	if _, err := client.Register(context.Background(), regMetadata(ts, testIssuer)); !errors.Is(err, ErrLeaseContention) {
+		t.Fatalf("Register = %v, want ErrLeaseContention", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 0 {
+		t.Fatalf("registration endpoint hit %d times, want 0: the DCR must not run without the lease", got)
 	}
 }

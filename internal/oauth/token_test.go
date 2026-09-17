@@ -1244,3 +1244,39 @@ func TestRefreshBlocksStaleCredentialWrite(t *testing.T) {
 	}
 	clock.set(clock.now.Add(time.Minute))
 }
+
+// TestTokenExchangeRejectsErrorDocuments pins the token response
+// validation: a non-2xx status or a contradictory document is never
+// accepted as a usable token, so a refresh or authorization cannot persist
+// credentials from an OAuth error response.
+func TestTokenExchangeRejectsErrorDocuments(t *testing.T) {
+	tests := []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "non-2xx with access token", status: 400, body: `{"access_token":"at-evil","token_type":"Bearer","refresh_token":"rt-evil"}`},
+		{name: "error alongside access token", status: 200, body: `{"access_token":"at-evil","token_type":"Bearer","error":"invalid_client"}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := (&metadataServer{}).start(t)
+			server.tokenStatus = tt.status
+			server.tokenBody = tt.body
+			secrets := newFakeSecrets()
+			lease := newFakeLease()
+			client := clientForServer(t, server, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
+			seedCredentials(t, secrets, "cid-1", "shh", server.ts.URL+"/oauth/token", server.ts.URL+"/oauth", "rt-1")
+
+			if _, err := client.Token(context.Background()); err == nil {
+				t.Fatal("Token accepted an error document")
+			}
+			// The stored credential is untouched: no error-response
+			// credentials were persisted.
+			data := liveCredential(t, lease, secrets)
+			if !strings.Contains(data, `"rt-1"`) || strings.Contains(data, "rt-evil") {
+				t.Fatalf("stored credential changed: %s", data)
+			}
+		})
+	}
+}

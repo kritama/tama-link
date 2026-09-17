@@ -598,11 +598,13 @@ func newStaticClient(t *testing.T, secrets *fakeSecrets, lease *fakeLease, clock
 // metadataServer serves protected-resource and authorization-server metadata
 // plus a token endpoint for one fixture pair.
 type metadataServer struct {
-	t              *testing.T
-	ts             *httptest.Server
-	prm            string
-	as             string
-	tokenBody      string
+	t         *testing.T
+	ts        *httptest.Server
+	prm       string
+	as        string
+	tokenBody string
+	// tokenStatus is the token endpoint's HTTP status; zero means 200.
+	tokenStatus    int
 	tokenDelay     time.Duration
 	tokenReq       *http.Request
 	tokenRaw       []byte
@@ -655,6 +657,11 @@ func (s *metadataServer) start(t *testing.T) *metadataServer {
 			s.tokenCalls++
 			s.tokenReqMu.Unlock()
 			w.Header().Set("Content-Type", "application/json")
+			status := s.tokenStatus
+			if status == 0 {
+				status = http.StatusOK
+			}
+			w.WriteHeader(status)
 			_, _ = fmt.Fprint(w, s.tokenBody)
 		default:
 			http.NotFound(w, r)
