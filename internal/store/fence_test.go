@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"sort"
 	"testing"
 	"time"
 
@@ -222,6 +223,72 @@ func TestRefreshCredentialInvalidationMarker(t *testing.T) {
 	}
 	if invalidated, err := s.RefreshCredentialInvalidated(ctx); err != nil || invalidated {
 		t.Fatalf("marker after clear = %v %v, want absent", invalidated, err)
+	}
+}
+
+// TestCommitCredentialFenceEnqueuesRetiredLabelsAtomically pins that the
+// commit's RetiredLabels are enqueued in the same transaction as the
+// fence advance: a committed migration of a legacy fixed-label record
+// always carries its durable cleanup record, a rejected commit enqueues
+// nothing, and the new live slot is never enqueued against itself.
+func TestCommitCredentialFenceEnqueuesRetiredLabelsAtomically(t *testing.T) {
+	keys, clk := newMemKeys(), newClock()
+	s, _ := openTestStore(t, keys, clk)
+	ctx := context.Background()
+
+	if ok, err := s.ClaimLease(ctx, "oauth/refresh", "owner-a", time.Minute); err != nil || !ok {
+		t.Fatalf("claim = %v %v", ok, err)
+	}
+	// A rejected commit — wrong lease owner — enqueues nothing, not even
+	// its retired labels.
+	stale := store.CredentialFenceCommit{
+		FenceName:       store.ClientFenceName,
+		FenceGeneration: 1,
+		Slot:            "slot-stale",
+		RetiredLabels:   []string{"oauth-client"},
+		LeaseName:       "oauth/refresh",
+		LeaseOwner:      "owner-b",
+		LeaseGeneration: 1,
+	}
+	if ok, err := s.CommitCredentialFence(ctx, stale); err != nil || ok {
+		t.Fatalf("rejected commit = %v %v, want rejected", ok, err)
+	}
+	pending, err := s.RetiredCredentialSlots(ctx, store.ClientFenceName)
+	if err != nil || len(pending) != 0 {
+		t.Fatalf("backlog after rejected commit = %v err=%v, want empty", pending, err)
+	}
+
+	// The live owner's commit enqueues the retired labels atomically with
+	// the advance; empty labels and the new live slot are skipped.
+	ok, err := s.CommitCredentialFence(ctx, store.CredentialFenceCommit{
+		FenceName:       store.ClientFenceName,
+		FenceGeneration: 1,
+		Slot:            "slot-1",
+		PreviousSlot:    "slot-0",
+		RetiredLabels:   []string{"oauth-client", "", "slot-1"},
+		LeaseName:       "oauth/refresh",
+		LeaseOwner:      "owner-a",
+		LeaseGeneration: 1,
+	})
+	if err != nil || !ok {
+		t.Fatalf("commit = %v %v, want committed", ok, err)
+	}
+	pending, err = s.RetiredCredentialSlots(ctx, store.ClientFenceName)
+	if err != nil || len(pending) != 2 {
+		t.Fatalf("backlog = %v err=%v, want the previous slot and the legacy label", pending, err)
+	}
+	sort.Strings(pending)
+	if pending[0] != "oauth-client" || pending[1] != "slot-0" {
+		t.Fatalf("backlog = %v, want [oauth-client slot-0]", pending)
+	}
+
+	// Clearing a retirement record works for a fixed label too.
+	if err := s.ClearRetiredCredentialSlot(ctx, store.ClientFenceName, "oauth-client"); err != nil {
+		t.Fatalf("clear retired legacy label: %v", err)
+	}
+	pending, err = s.RetiredCredentialSlots(ctx, store.ClientFenceName)
+	if err != nil || len(pending) != 1 || pending[0] != "slot-0" {
+		t.Fatalf("backlog after clear = %v err=%v, want [slot-0]", pending, err)
 	}
 }
 

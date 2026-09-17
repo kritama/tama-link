@@ -283,6 +283,13 @@ func (c *Client) storeClient(ctx context.Context, rec *ClientRecord, leaseGenera
 		FenceGeneration: fenceGeneration,
 		Slot:            slot,
 		PreviousSlot:    previous,
+		// The legacy single-label record is dead data once a client fence
+		// exists — reads take the fenced slot and fall back only when no
+		// fence has been committed. Enqueueing it with the advance makes
+		// the migration restart-safe: a crash after the commit, or a
+		// failed deletion, always leaves a durable cleanup record for the
+		// retirement sweep.
+		RetiredLabels:   []string{labelClient},
 		LeaseName:       refreshLeaseName,
 		LeaseOwner:      c.owner,
 		LeaseGeneration: leaseGeneration,
@@ -300,18 +307,17 @@ func (c *Client) storeClient(ctx context.Context, rec *ClientRecord, leaseGenera
 		}
 		return fmt.Errorf("%w: the client record commit was rejected", ErrLeaseContention)
 	}
-	// The legacy single-label record is dead data once a client fence
-	// exists — reads take the fenced slot and fall back only when no
-	// fence has been committed. Retire it so a record treated as absent
-	// on load (an expired or missing secret) does not linger in the
-	// backend. Best effort: the commit is already durable, so a deletion
-	// failure is durably recorded for the retirement sweep instead of
-	// failing the registration it follows.
+	// The commit atomically enqueued the legacy label for retirement.
+	// Delete it now and clear the durable record on success; a failed
+	// deletion keeps the record for a later refresh or logout to retry.
+	// Best effort: the registration is already durable, so a cleanup
+	// failure must not fail the registration it follows.
 	if err := c.secrets.DeleteSecret(labelClient); err != nil {
-		_ = c.lease.RecordRetiredCredentialSlot(
-			context.WithoutCancel(ctx), store.ClientFenceName, labelClient,
-		)
+		return nil
 	}
+	_ = c.lease.ClearRetiredCredentialSlot(
+		context.WithoutCancel(ctx), store.ClientFenceName, labelClient,
+	)
 	return nil
 }
 

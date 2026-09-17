@@ -74,18 +74,22 @@ func (r *probeRunner) run() {
 // probe runs one availability probe and bounds it with probeTimeout. On
 // timeout the request is abandoned, not the worker: the worker stays
 // owned by the runner and serves the next probe once the blocking call
-// returns.
+// returns. One deadline covers both queueing and execution, so a request
+// that waits behind a busy worker cannot extend the documented fixed
+// window.
 func (r *probeRunner) probe(kr keyring.Keyring, key string) error {
 	req := probeRequest{kr: kr, key: key, done: make(chan error, 1)}
+	timer := time.NewTimer(probeTimeout)
+	defer timer.Stop()
 	select {
 	case r.requests <- req:
-	case <-time.After(probeTimeout):
+	case <-timer.C:
 		return fmt.Errorf("credential backend did not accept an availability probe within %s; a keyring unlock prompt is not a supported serve-startup path", probeTimeout)
 	}
 	select {
 	case err := <-req.done:
 		return err
-	case <-time.After(probeTimeout):
+	case <-timer.C:
 		return fmt.Errorf("credential backend did not complete an availability probe within %s; a keyring unlock prompt is not a supported serve-startup path", probeTimeout)
 	}
 }
@@ -100,7 +104,9 @@ func (r *probeRunner) close() {
 }
 
 // runProbe performs the Set/Get/Remove availability cycle on one
-// disposable entry.
+// disposable entry. Every successful Set is followed by a Remove — the
+// entry is disposable, so even a failed read must not leave it behind in
+// the backend.
 func runProbe(kr keyring.Keyring, key string) error {
 	if err := kr.Set(keyring.Item{
 		Key:         key,
@@ -111,6 +117,7 @@ func runProbe(kr keyring.Keyring, key string) error {
 		return err
 	}
 	if _, err := kr.Get(key); err != nil {
+		_ = kr.Remove(key)
 		return err
 	}
 	return kr.Remove(key)

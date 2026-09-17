@@ -39,6 +39,13 @@ type CredentialFenceCommit struct {
 	// atomically enqueued for retirement retry with the fence advance, so
 	// a later deletion failure can never strand the old grant.
 	PreviousSlot string
+	// RetiredLabels are additional fixed-label credentials this commit
+	// makes dead — for example the legacy single-label client record a
+	// first fenced commit replaces. Like PreviousSlot, each is atomically
+	// enqueued for retirement retry with the fence advance, so a crash
+	// after the commit — or a failed deletion — always leaves a durable
+	// cleanup record for the retirement sweep.
+	RetiredLabels []string
 	// LeaseName, LeaseOwner, and LeaseGeneration identify the lease epoch
 	// the writer must still own, unexpired.
 	LeaseName       string
@@ -137,6 +144,17 @@ func (s *Store) CommitCredentialFence(ctx context.Context, commit CredentialFenc
 			ON CONFLICT(name) DO UPDATE SET slot = excluded.slot`,
 			retiredCredentialSlotName(commit.FenceName, commit.PreviousSlot), commit.PreviousSlot); err != nil {
 			return false, fmt.Errorf("%w: record retired credential slot: %w", ErrStateUnavailable, err)
+		}
+	}
+	for _, label := range commit.RetiredLabels {
+		if label == "" || label == commit.PreviousSlot || label == commit.Slot {
+			continue
+		}
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO credential_fence (name, generation, slot) VALUES (?, 0, ?)
+			ON CONFLICT(name) DO UPDATE SET slot = excluded.slot`,
+			retiredCredentialSlotName(commit.FenceName, label), label); err != nil {
+			return false, fmt.Errorf("%w: record retired credential label: %w", ErrStateUnavailable, err)
 		}
 	}
 	if err := tx.Commit(); err != nil {

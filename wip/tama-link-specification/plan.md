@@ -191,7 +191,9 @@ the client retirement backlog for a later refresh or logout to retry. A stale
 registration can therefore never be installed or silently orphaned, and a
 winner's committed record is never touched. The first successful commit also
 retires the legacy single-label record — dead data once a fence exists —
-and durably records a failed deletion so the retirement sweep retries it. Logout clears the
+by enqueueing it in the same transaction as the fence advance, so a crash
+after the commit or a failed deletion always leaves a durable cleanup
+record the retirement sweep retries. Logout clears the
 client fence and removes its slot under the same epoch-bound protocol as
 the refresh fence, so a logout that loses its lease mid-cleanup fails
 retryably and can never wipe a registration installed by the process that

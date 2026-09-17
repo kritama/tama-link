@@ -301,6 +301,86 @@ func TestProbeRetryReusesWorkerAfterTimeout(t *testing.T) {
 	}
 }
 
+// delayedSetKeyring sleeps before each Set and then delegates, modeling
+// a backend whose write takes time.
+type delayedSetKeyring struct {
+	inner *fakeKeyring
+	delay time.Duration
+}
+
+func (d *delayedSetKeyring) Get(key string) (keyring.Item, error) {
+	return d.inner.Get(key)
+}
+
+func (d *delayedSetKeyring) GetMetadata(key string) (keyring.Metadata, error) {
+	return d.inner.GetMetadata(key)
+}
+
+func (d *delayedSetKeyring) Set(item keyring.Item) error {
+	time.Sleep(d.delay)
+	return d.inner.Set(item)
+}
+
+func (d *delayedSetKeyring) Remove(key string) error { return d.inner.Remove(key) }
+func (d *delayedSetKeyring) Keys() ([]string, error) { return d.inner.Keys() }
+
+// TestProbeRemovesEntryAfterReadFailure pins the cleanup after a failed
+// read: the probe entry is disposable, so a backend that stores it but
+// fails the read must not leave it behind — repeated failed startups
+// would otherwise accumulate permanent probe records even while deletion
+// still works.
+func TestProbeRemovesEntryAfterReadFailure(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
+	backend := newFakeKeyring()
+	backend.failGet = true
+	if err := probeBackend("demo", backend); err == nil {
+		t.Fatal("probe succeeded, want the read failure")
+	}
+	backend.mu.Lock()
+	defer backend.mu.Unlock()
+	if len(backend.items) != 0 {
+		t.Fatalf("probe left %d entries behind after the read failure", len(backend.items))
+	}
+}
+
+// TestProbeDeadlineCoversQueueingAndExecution pins the single deadline:
+// a probe accepted just before the shared deadline expires gets only the
+// remaining window, not a fresh one — queueing behind a busy worker
+// cannot extend the documented fixed probe window.
+func TestProbeDeadlineCoversQueueingAndExecution(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
+	probeTimeout = 500 * time.Millisecond
+	t.Cleanup(func() { probeTimeout = 5 * time.Second })
+
+	// Occupy the worker with a probe whose Set blocks until its own
+	// request deadline has already expired.
+	busyBackend := newFakeKeyring()
+	busy := &slowKeyring{started: make(chan struct{}), release: make(chan struct{}), inner: busyBackend}
+	busyErrs := make(chan error, 1)
+	go func() { busyErrs <- probeBackend("demo", busy) }()
+	<-busy.started
+
+	// Queue the next probe behind the busy worker: its shared deadline
+	// starts now and expires well before its 375ms write can finish if
+	// it is accepted right after the release.
+	slow := &delayedSetKeyring{inner: newFakeKeyring(), delay: 375 * time.Millisecond}
+	slowErrs := make(chan error, 1)
+	go func() { slowErrs <- probeBackend("demo", slow) }()
+
+	// Release the worker when the busy probe's own deadline fires; the
+	// queued probe is then accepted with most of its window already
+	// spent. With one shared deadline its write cannot finish in the
+	// remainder; a fresh second window would let it succeed.
+	<-busyErrs
+	close(busy.release)
+
+	if err := <-slowErrs; err == nil {
+		t.Fatal("queued probe succeeded, want the shared deadline to expire")
+	}
+}
+
 // TestProbeKeysAreUniquePerInvocation proves concurrent same-profile
 // starts cannot interfere with each other's availability probes: every
 // probe uses its own unguessable key, and a probe that sees another

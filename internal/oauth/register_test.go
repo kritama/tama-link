@@ -663,6 +663,12 @@ func TestRegisterRetiresLegacyRecordAbsentOnLoad(t *testing.T) {
 			if err != nil || found {
 				t.Fatalf("legacy label = found:%v err:%v, want deleted by the commit", found, err)
 			}
+			// The commit atomically enqueued the legacy label for
+			// retirement; the successful deletion cleared its record.
+			retired, err := lease.RetiredCredentialSlots(ctx, store.ClientFenceName)
+			if err != nil || len(retired) != 0 {
+				t.Fatalf("retirement backlog after successful deletion = %v err:%v, want empty", retired, err)
+			}
 		})
 	}
 }

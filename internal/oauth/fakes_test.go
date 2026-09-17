@@ -388,10 +388,16 @@ func (f *fakeLease) CommitCredentialFence(ctx context.Context, commit store.Cred
 	if !f.fence.commit(commit.FenceName, commit.FenceGeneration, commit.Slot, commit.LeaseOwner) {
 		return false, nil
 	}
-	// The previous slot is atomically enqueued for retirement retry with
+	// Replaced slots are atomically enqueued for retirement retry with
 	// the advance, mirroring the production transaction.
 	if commit.PreviousSlot != "" {
 		f.retire(commit.FenceName, commit.PreviousSlot)
+	}
+	for _, label := range commit.RetiredLabels {
+		if label == "" || label == commit.PreviousSlot || label == commit.Slot {
+			continue
+		}
+		f.retire(commit.FenceName, label)
 	}
 	return true, nil
 }
