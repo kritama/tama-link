@@ -186,8 +186,10 @@ record is fenced like the refresh credential: it is written to a unique
 secure-backend slot and made live only by an atomic fence advance bound to
 the writer's live lease epoch; a writer that loses the lease or whose
 caller cancels before the commit observes it has its advance rejected and
-its own slot rolled back, so a stale registration can never be installed
-and a winner's committed record is never touched. Logout clears the
+its own slot rolled back; a failed rollback deletion is durably enqueued on
+the client retirement backlog for a later refresh or logout to retry. A stale
+registration can therefore never be installed or silently orphaned, and a
+winner's committed record is never touched. Logout clears the
 client fence and removes its slot under the same epoch-bound protocol as
 the refresh fence, so a logout that loses its lease mid-cleanup fails
 retryably and can never wipe a registration installed by the process that

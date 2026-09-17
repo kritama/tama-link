@@ -157,6 +157,130 @@ func TestRegisteredClientTreatsLegacySecretlessRecordAsAbsent(t *testing.T) {
 	}
 }
 
+// TestRegisterRetiresPreviousFencedClientSlot pins replacement of an existing
+// fenced registration: the fence advance retires the old slot, never the new
+// live slot. Draining the backlog must leave the replacement readable.
+func TestRegisterRetiresPreviousFencedClientSlot(t *testing.T) {
+	ctx := context.Background()
+	secrets := newFakeSecrets()
+	lease := newFakeLease()
+	clock := newTestClock(time.Unix(1_700_000_000, 0))
+	client := newStaticClient(t, secrets, lease, clock)
+
+	var firstCalls int32
+	first := registerServer(t,
+		`{"client_id":"cid-old","client_secret":"old-secret","client_secret_expires_at":1700000001}`,
+		http.StatusCreated, &firstCalls)
+	if _, err := client.Register(ctx, regMetadata(first, testIssuer)); err != nil {
+		t.Fatalf("first Register: %v", err)
+	}
+	_, oldSlot, found, err := lease.ReadCredentialFence(ctx, store.ClientFenceName)
+	if err != nil || !found {
+		t.Fatalf("old client fence = slot:%q found:%v err:%v", oldSlot, found, err)
+	}
+
+	clock.set(time.Unix(1_700_000_002, 0))
+	var secondCalls int32
+	second := registerServer(t,
+		`{"client_id":"cid-new","client_secret":"new-secret"}`,
+		http.StatusCreated, &secondCalls)
+	if _, err := client.Register(ctx, regMetadata(second, testIssuer)); err != nil {
+		t.Fatalf("replacement Register: %v", err)
+	}
+	_, newSlot, found, err := lease.ReadCredentialFence(ctx, store.ClientFenceName)
+	if err != nil || !found || newSlot == oldSlot {
+		t.Fatalf("new client fence = slot:%q found:%v err:%v; old slot %q", newSlot, found, err, oldSlot)
+	}
+
+	retired, err := lease.RetiredCredentialSlots(ctx, store.ClientFenceName)
+	if err != nil {
+		t.Fatalf("RetiredCredentialSlots: %v", err)
+	}
+	if len(retired) != 1 || retired[0] != oldSlot {
+		t.Fatalf("retired client slots = %v, want only old slot %q", retired, oldSlot)
+	}
+
+	client.retireFailedSlots(ctx)
+	if _, found, err := secrets.GetSecret(oldSlot); err != nil || found {
+		t.Fatalf("old client slot = found:%v err:%v, want retired", found, err)
+	}
+	if _, found, err := secrets.GetSecret(newSlot); err != nil || !found {
+		t.Fatalf("new client slot = found:%v err:%v, want live", found, err)
+	}
+	stored, found, err := client.RegisteredClient(ctx)
+	if err != nil || !found || stored.ClientID != "cid-new" {
+		t.Fatalf("stored replacement = %+v found:%v err:%v", stored, found, err)
+	}
+}
+
+// TestRegisterRecordsFailedSlotRollback pins every post-write rejection path:
+// if the uncommitted client slot cannot be deleted, it is durably discoverable
+// and a later retirement sweep removes it.
+func TestRegisterRecordsFailedSlotRollback(t *testing.T) {
+	tests := []struct {
+		name          string
+		commitError   bool
+		foreignHolder bool
+		wantErr       error
+	}{
+		{name: "fence commit error", commitError: true, wantErr: ErrBackendUnavailable},
+		{name: "fence commit rejected", foreignHolder: true, wantErr: ErrLeaseContention},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			secrets := newFakeSecrets()
+			lease := newFakeLease()
+			client := newStaticClient(t, secrets, lease, newTestClock(time.Unix(1_700_000_000, 0)))
+			if tt.commitError {
+				lease.fenceCommitErr = errors.New("state write failure")
+			}
+
+			var slot string
+			secrets.setHook = func(label string) {
+				if tt.foreignHolder && strings.HasPrefix(label, store.ClientFenceName+"@") {
+					lease.holdOther()
+				}
+			}
+			secrets.setDoneHook = func(label string) {
+				if strings.HasPrefix(label, store.ClientFenceName+"@") {
+					slot = label
+					secrets.failDeletes(label)
+				}
+			}
+
+			var calls int32
+			ts := registerServer(t, `{"client_id":"cid-1","client_secret":"shh"}`, http.StatusCreated, &calls)
+			if _, err := client.Register(ctx, regMetadata(ts, testIssuer)); !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Register = %v, want %v", err, tt.wantErr)
+			}
+			if slot == "" {
+				t.Fatal("client slot write was not observed")
+			}
+			retired, err := lease.RetiredCredentialSlots(ctx, store.ClientFenceName)
+			if err != nil {
+				t.Fatalf("RetiredCredentialSlots: %v", err)
+			}
+			if len(retired) != 1 || retired[0] != slot {
+				t.Fatalf("retired client slots = %v, want %q", retired, slot)
+			}
+			if _, found, err := secrets.GetSecret(slot); err != nil || !found {
+				t.Fatalf("failed rollback slot = found:%v err:%v, want retained for retry", found, err)
+			}
+
+			secrets.allowDeletes(slot)
+			client.retireFailedSlots(ctx)
+			if _, found, err := secrets.GetSecret(slot); err != nil || found {
+				t.Fatalf("retired rollback slot = found:%v err:%v, want deleted", found, err)
+			}
+			retired, err = lease.RetiredCredentialSlots(ctx, store.ClientFenceName)
+			if err != nil || len(retired) != 0 {
+				t.Fatalf("retirement backlog after retry = %v err:%v, want empty", retired, err)
+			}
+		})
+	}
+}
+
 // TestRegisterRollsBackSlotAfterCallerCancellation pins the fenced
 // commit under a canceled caller: the slot write itself is
 // uninterruptible, so it completes, but the fence commit observes the

@@ -1023,7 +1023,10 @@ aborted, but a writer that loses the lease while the write is in flight —
 or whose caller cancels before the commit is observed — has its fence
 advance rejected and removes its own uncommitted slot, so it can never
 install a stale registration, and a winner whose registration commits in
-between keeps its own fenced record untouched. The fence pointer and its
+between keeps its own fenced record untouched. If that rollback deletion
+fails, the uncommitted slot is durably added to the client retirement backlog
+on a cancellation-independent context so a later refresh or logout retries it
+instead of orphaning a client secret. The fence pointer and its
 clear are therefore the only authority for which registration is live:
 reads take the fenced slot when a client fence has been committed and
 fall back to the legacy single-label record only when no fence exists, a

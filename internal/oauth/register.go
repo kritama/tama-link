@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -250,9 +251,9 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 // unique secure-backend slot, and the fence pointer — advanced atomically
 // against the claimed lease epoch — makes it live. A writer that lost the
 // epoch, or was passed by a concurrent commit, has its advance rejected
-// and removes its own slot; it can never install or remove another
-// writer's record. The caller holds the refresh lease (epoch
-// leaseGeneration).
+// and removes its own slot; a failed rollback is recorded in the durable
+// retirement backlog. It can never install or remove another writer's record.
+// The caller holds the refresh lease (epoch leaseGeneration).
 func (c *Client) storeClient(ctx context.Context, rec *ClientRecord, leaseGeneration int64) error {
 	data, err := json.Marshal(rec)
 	if err != nil {
@@ -263,19 +264,19 @@ func (c *Client) storeClient(ctx context.Context, rec *ClientRecord, leaseGenera
 		return err
 	}
 	if err := c.secrets.SetSecret(slot, data); err != nil {
-		// Best-effort rollback of the uncommitted slot.
-		_ = c.secrets.DeleteSecret(slot)
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+		// A backend may report an uncertain write. Roll back the unique slot;
+		// if deletion also fails, keep a durable cleanup record.
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable,
+			errors.Join(err, c.rollbackClientSlot(ctx, slot)))
 	}
 	generation, previous, found, err := c.lease.ReadCredentialFence(ctx, store.ClientFenceName)
 	if err != nil {
-		_ = c.secrets.DeleteSecret(slot)
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable,
+			errors.Join(err, c.rollbackClientSlot(ctx, slot)))
 	}
 	fenceGeneration := int64(1)
 	if found {
 		fenceGeneration = generation + 1
-		previous = slot
 	}
 	committed, err := c.lease.CommitCredentialFence(ctx, store.CredentialFenceCommit{
 		FenceName:       store.ClientFenceName,
@@ -287,17 +288,37 @@ func (c *Client) storeClient(ctx context.Context, rec *ClientRecord, leaseGenera
 		LeaseGeneration: leaseGeneration,
 	})
 	if err != nil {
-		_ = c.secrets.DeleteSecret(slot)
-		return fmt.Errorf("%w: %w", ErrBackendUnavailable, err)
+		return fmt.Errorf("%w: %w", ErrBackendUnavailable,
+			errors.Join(err, c.rollbackClientSlot(ctx, slot)))
 	}
 	if !committed {
 		// This writer lost the epoch or was passed by a concurrent
 		// commit: the slot is referenced by no fence, so removing it
 		// cannot touch another writer's record.
-		if delErr := c.secrets.DeleteSecret(slot); delErr != nil {
-			return fmt.Errorf("%w: %w", ErrLeaseContention, delErr)
+		if rollbackErr := c.rollbackClientSlot(ctx, slot); rollbackErr != nil {
+			return fmt.Errorf("%w: %w", ErrLeaseContention, rollbackErr)
 		}
 		return fmt.Errorf("%w: the client record commit was rejected", ErrLeaseContention)
+	}
+	return nil
+}
+
+// rollbackClientSlot removes a client-registration slot that never became
+// live. A secure-backend deletion can fail after the slot write succeeded;
+// record that slot durably on a cancellation-independent context so a later
+// refresh or logout can retry it instead of orphaning a client secret.
+func (c *Client) rollbackClientSlot(ctx context.Context, slot string) error {
+	if err := c.secrets.DeleteSecret(slot); err != nil {
+		recordErr := c.lease.RecordRetiredCredentialSlot(
+			context.WithoutCancel(ctx), store.ClientFenceName, slot,
+		)
+		if recordErr != nil {
+			return errors.Join(
+				fmt.Errorf("delete uncommitted client slot: %w", err),
+				fmt.Errorf("record uncommitted client slot for retirement: %w", recordErr),
+			)
+		}
+		return fmt.Errorf("delete uncommitted client slot: %w", err)
 	}
 	return nil
 }
