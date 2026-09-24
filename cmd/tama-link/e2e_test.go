@@ -227,6 +227,27 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	})
 	send(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
 	send(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": map[string]any{}})
+	send(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      3,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "submit",
+			"arguments": map[string]any{
+				"tool":      "message",
+				"arguments": map[string]any{"message": "secret-argument-marker"},
+			},
+		},
+	})
+	send(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      4,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "await",
+			"arguments": map[string]any{"submission_id": "missing"},
+		},
+	})
 
 	type frame struct {
 		ID     json.Number     `json:"id"`
@@ -237,6 +258,8 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	type collected struct {
 		init   json.RawMessage
 		tools  json.RawMessage
+		submit json.RawMessage
+		await  json.RawMessage
 		failed string
 	}
 	result := make(chan collected, 1)
@@ -258,8 +281,12 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 				got.init = f.Result
 			case "2":
 				got.tools = f.Result
+			case "3":
+				got.submit = f.Result
+			case "4":
+				got.await = f.Result
 			}
-			if got.init != nil && got.tools != nil {
+			if got.init != nil && got.tools != nil && got.submit != nil && got.await != nil {
 				result <- got
 				return
 			}
@@ -353,5 +380,14 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 				t.Fatalf("await required = %v", schema.Required)
 			}
 		}
+	}
+	if !strings.Contains(string(got.submit), "authentication_required") {
+		t.Fatalf("submit = %s, want authentication_required from the wired handler", got.submit)
+	}
+	if strings.Contains(string(got.submit), "not_implemented") || strings.Contains(stderrBuf.String(), "secret-argument-marker") {
+		t.Fatalf("submit leaked implementation state or arguments: result %s stderr %q", got.submit, stderrBuf.String())
+	}
+	if !strings.Contains(string(got.await), "submission_not_found") {
+		t.Fatalf("await = %s, want submission_not_found", got.await)
 	}
 }
