@@ -36,6 +36,9 @@ jobs:
           gofmt -l . | tee /tmp/tama-link-unformatted-files
           test ! -s /tmp/tama-link-unformatted-files
 
+      - name: Run TamaMCP conformance fixtures
+        run: go test ./internal/upstream/conformance
+
       - name: Run unit tests
         run: go test ./...
 

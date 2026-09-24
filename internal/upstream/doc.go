@@ -2,8 +2,10 @@
 // client that every TamaMCP adapter uses.
 //
 // The client is single-purpose: it speaks the pinned TamaMCP wire contract
-// (specification commit 6b5db00018d2774834db5a0f00eed5b9b55e1d2e) to a
-// profile-selected upstream endpoint. It never sends initialize,
+// to a profile-selected upstream endpoint. Core and Tasks fixtures are
+// specification commit 6b5db00018d2774834db5a0f00eed5b9b55e1d2e. Subscription
+// fixtures are TamaMCP v0.2.0 (5c80c29e90c49438fbcc331db5c00f9f8f93ee21).
+// It never sends initialize,
 // notifications/initialized, or Mcp-Session-Id, never emits client-requested
 // task augmentation, and has no fallback to a legacy handshake.
 //

@@ -1,0 +1,875 @@
+{
+  "fixtures": [
+    {
+      "eventSchemas": [
+        {
+          "index": 0,
+          "schema": "subscriptions_acknowledged_notification"
+        },
+        {
+          "index": 0,
+          "path": [
+            "params",
+            "notifications"
+          ],
+          "schema": "task_subscription_acknowledged_notifications"
+        },
+        {
+          "index": 1,
+          "schema": "task_status_notification"
+        },
+        {
+          "index": 2,
+          "schema": "subscriptions_listen_response"
+        }
+      ],
+      "expected": {
+        "close": "graceful",
+        "events": [
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": "listen-delivery"
+              },
+              "notifications": {
+                "taskIds": [
+                  "subscription-working"
+                ]
+              }
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/tasks",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": "listen-delivery"
+              },
+              "createdAt": "2026-09-15T12:00:00Z",
+              "lastUpdatedAt": "2026-09-15T12:00:00Z",
+              "pollIntervalMs": 1000,
+              "status": "working",
+              "statusMessage": "Task status is available.",
+              "taskId": "subscription-working",
+              "ttlMs": 86400000
+            }
+          },
+          {
+            "id": "listen-delivery",
+            "jsonrpc": "2.0",
+            "result": {
+              "_meta": {
+                "io.modelcontextprotocol/serverInfo": {
+                  "name": "tama-mcp-task-required",
+                  "version": "0.0.1-test"
+                },
+                "io.modelcontextprotocol/subscriptionId": "listen-delivery"
+              },
+              "resultType": "complete"
+            }
+          }
+        ],
+        "headers": {
+          "cache-control": "no-cache",
+          "content-type": "text/event-stream; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "subscriptions/listen acknowledgement and task delivery",
+      "request": {
+        "body": {
+          "id": "listen-delivery",
+          "jsonrpc": "2.0",
+          "method": "subscriptions/listen",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "notifications": {
+              "taskIds": [
+                "subscription-working"
+              ]
+            }
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "subscriptions/listen"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "publish": "subscription-working",
+          "tasks": [
+            {
+              "createdAt": "2026-09-15T12:00:00Z",
+              "lastUpdatedAt": "2026-09-15T12:00:00Z",
+              "pollIntervalMs": 1000,
+              "resultType": "complete",
+              "status": "working",
+              "statusMessage": "Task status is available.",
+              "taskId": "subscription-working",
+              "ttlMs": 86400000
+            }
+          ]
+        }
+      },
+      "requestExtensionPath": [
+        "params",
+        "notifications"
+      ],
+      "requestExtensionSchema": "task_subscription_notifications",
+      "requestSchema": "subscriptions_listen_request",
+      "requestValid": true
+    },
+    {
+      "eventSchemas": [
+        {
+          "index": 0,
+          "schema": "subscriptions_acknowledged_notification"
+        },
+        {
+          "index": 0,
+          "path": [
+            "params",
+            "notifications"
+          ],
+          "schema": "task_subscription_acknowledged_notifications"
+        },
+        {
+          "index": 1,
+          "schema": "subscriptions_listen_response"
+        }
+      ],
+      "expected": {
+        "close": "graceful",
+        "events": [
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": "listen-authorized-subset"
+              },
+              "notifications": {
+                "taskIds": [
+                  "subscription-own"
+                ]
+              }
+            }
+          },
+          {
+            "id": "listen-authorized-subset",
+            "jsonrpc": "2.0",
+            "result": {
+              "_meta": {
+                "io.modelcontextprotocol/serverInfo": {
+                  "name": "tama-mcp-task-required",
+                  "version": "0.0.1-test"
+                },
+                "io.modelcontextprotocol/subscriptionId": "listen-authorized-subset"
+              },
+              "resultType": "complete"
+            }
+          }
+        ],
+        "headers": {
+          "cache-control": "no-cache",
+          "content-type": "text/event-stream; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "subscriptions/listen authorized task subset",
+      "request": {
+        "body": {
+          "id": "listen-authorized-subset",
+          "jsonrpc": "2.0",
+          "method": "subscriptions/listen",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "notifications": {
+              "taskIds": [
+                "missing",
+                "subscription-own",
+                "subscription-other",
+                "subscription-own"
+              ]
+            }
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "subscriptions/listen"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "tasks": [
+            {
+              "createdAt": "2026-09-15T12:00:00Z",
+              "lastUpdatedAt": "2026-09-15T12:00:00Z",
+              "pollIntervalMs": 1000,
+              "resultType": "complete",
+              "status": "working",
+              "statusMessage": "Task status is available.",
+              "taskId": "subscription-own",
+              "ttlMs": 86400000
+            },
+            {
+              "createdAt": "2026-09-15T12:00:00Z",
+              "lastUpdatedAt": "2026-09-15T12:00:00Z",
+              "ownerKey": "other-owner",
+              "pollIntervalMs": 1000,
+              "resultType": "complete",
+              "status": "working",
+              "statusMessage": "Task status is available.",
+              "taskId": "subscription-other",
+              "ttlMs": 86400000
+            }
+          ]
+        }
+      },
+      "requestExtensionPath": [
+        "params",
+        "notifications"
+      ],
+      "requestExtensionSchema": "task_subscription_notifications",
+      "requestSchema": "subscriptions_listen_request",
+      "requestValid": true
+    },
+    {
+      "eventSchemas": [
+        {
+          "index": 0,
+          "schema": "subscriptions_acknowledged_notification"
+        },
+        {
+          "index": 0,
+          "path": [
+            "params",
+            "notifications"
+          ],
+          "schema": "task_subscription_acknowledged_notifications"
+        },
+        {
+          "index": 1,
+          "schema": "task_status_notification"
+        },
+        {
+          "index": 2,
+          "schema": "subscriptions_listen_response"
+        }
+      ],
+      "expected": {
+        "close": "graceful",
+        "events": [
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": "listen-reconnect"
+              },
+              "notifications": {
+                "taskIds": [
+                  "subscription-completed"
+                ]
+              }
+            }
+          },
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/tasks",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": "listen-reconnect"
+              },
+              "createdAt": "2026-09-15T12:00:00Z",
+              "lastUpdatedAt": "2026-09-15T12:00:01Z",
+              "pollIntervalMs": 1000,
+              "result": {
+                "content": [
+                  {
+                    "text": "done",
+                    "type": "text"
+                  }
+                ],
+                "isError": false,
+                "resultType": "complete"
+              },
+              "status": "completed",
+              "statusMessage": "Task status is available.",
+              "taskId": "subscription-completed",
+              "ttlMs": 86400000
+            }
+          },
+          {
+            "id": "listen-reconnect",
+            "jsonrpc": "2.0",
+            "result": {
+              "_meta": {
+                "io.modelcontextprotocol/serverInfo": {
+                  "name": "tama-mcp-task-required",
+                  "version": "0.0.1-test"
+                },
+                "io.modelcontextprotocol/subscriptionId": "listen-reconnect"
+              },
+              "resultType": "complete"
+            }
+          }
+        ],
+        "headers": {
+          "cache-control": "no-cache",
+          "content-type": "text/event-stream; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "subscriptions/listen reconnect after tasks/get reconciliation",
+      "request": {
+        "body": {
+          "id": "listen-reconnect",
+          "jsonrpc": "2.0",
+          "method": "subscriptions/listen",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "notifications": {
+              "taskIds": [
+                "subscription-completed"
+              ]
+            }
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "subscriptions/listen"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "publish": "subscription-completed",
+          "reconcile": "subscription-completed",
+          "tasks": [
+            {
+              "createdAt": "2026-09-15T12:00:00Z",
+              "lastUpdatedAt": "2026-09-15T12:00:01Z",
+              "pollIntervalMs": 1000,
+              "result": {
+                "content": [
+                  {
+                    "text": "done",
+                    "type": "text"
+                  }
+                ],
+                "isError": false,
+                "resultType": "complete"
+              },
+              "resultType": "complete",
+              "status": "completed",
+              "statusMessage": "Task status is available.",
+              "taskId": "subscription-completed",
+              "ttlMs": 86400000
+            }
+          ]
+        }
+      },
+      "requestExtensionPath": [
+        "params",
+        "notifications"
+      ],
+      "requestExtensionSchema": "task_subscription_notifications",
+      "requestSchema": "subscriptions_listen_request",
+      "requestValid": true
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32021,
+            "data": {
+              "requiredCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              }
+            },
+            "message": "Server requires the extensions capability for this request"
+          },
+          "id": "listen-missing-capability",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "subscriptions/listen missing Tasks capability",
+      "request": {
+        "body": {
+          "id": "listen-missing-capability",
+          "jsonrpc": "2.0",
+          "method": "subscriptions/listen",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {}
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "notifications": {
+              "taskIds": [
+                "subscription-working"
+              ]
+            }
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "subscriptions/listen"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ]
+      },
+      "requestExtensionPath": [
+        "params",
+        "notifications"
+      ],
+      "requestExtensionSchema": "task_subscription_notifications",
+      "requestSchema": "subscriptions_listen_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32600,
+            "message": "Credential has expired"
+          },
+          "id": "listen-expired",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 401
+      },
+      "name": "subscriptions/listen expired credential",
+      "request": {
+        "body": {
+          "id": "listen-expired",
+          "jsonrpc": "2.0",
+          "method": "subscriptions/listen",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "notifications": {
+              "taskIds": []
+            }
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "subscriptions/listen"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "expired"
+          ]
+        ],
+        "setup": {
+          "authorization": "expired"
+        }
+      },
+      "requestExtensionPath": [
+        "params",
+        "notifications"
+      ],
+      "requestExtensionSchema": "task_subscription_notifications",
+      "requestSchema": "subscriptions_listen_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "eventSchemas": [
+        {
+          "index": 0,
+          "schema": "subscriptions_acknowledged_notification"
+        },
+        {
+          "index": 0,
+          "path": [
+            "params",
+            "notifications"
+          ],
+          "schema": "task_subscription_acknowledged_notifications"
+        },
+        {
+          "index": 1,
+          "schema": "subscriptions_listen_response"
+        }
+      ],
+      "expected": {
+        "close": "graceful",
+        "events": [
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": "listen-stale-policy"
+              },
+              "notifications": {
+                "taskIds": [
+                  "subscription-stale"
+                ]
+              }
+            }
+          },
+          {
+            "id": "listen-stale-policy",
+            "jsonrpc": "2.0",
+            "result": {
+              "_meta": {
+                "io.modelcontextprotocol/serverInfo": {
+                  "name": "tama-mcp-task-required",
+                  "version": "0.0.1-test"
+                },
+                "io.modelcontextprotocol/subscriptionId": "listen-stale-policy"
+              },
+              "resultType": "complete"
+            }
+          }
+        ],
+        "headers": {
+          "cache-control": "no-cache",
+          "content-type": "text/event-stream; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "subscriptions/listen stale policy closes stream",
+      "request": {
+        "body": {
+          "id": "listen-stale-policy",
+          "jsonrpc": "2.0",
+          "method": "subscriptions/listen",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "notifications": {
+              "taskIds": [
+                "subscription-stale"
+              ]
+            }
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "subscriptions/listen"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "close": "policy_invalidation",
+          "tasks": [
+            {
+              "createdAt": "2026-09-15T12:00:00Z",
+              "lastUpdatedAt": "2026-09-15T12:00:00Z",
+              "pollIntervalMs": 1000,
+              "resultType": "complete",
+              "status": "working",
+              "statusMessage": "Task status is available.",
+              "taskId": "subscription-stale",
+              "ttlMs": 86400000
+            }
+          ]
+        }
+      },
+      "requestExtensionPath": [
+        "params",
+        "notifications"
+      ],
+      "requestExtensionSchema": "task_subscription_notifications",
+      "requestSchema": "subscriptions_listen_request",
+      "requestValid": true
+    },
+    {
+      "eventSchemas": [
+        {
+          "index": 0,
+          "schema": "subscriptions_acknowledged_notification"
+        },
+        {
+          "index": 0,
+          "path": [
+            "params",
+            "notifications"
+          ],
+          "schema": "task_subscription_acknowledged_notifications"
+        },
+        {
+          "index": 1,
+          "schema": "subscriptions_listen_response"
+        }
+      ],
+      "expected": {
+        "close": "graceful",
+        "events": [
+          {
+            "jsonrpc": "2.0",
+            "method": "notifications/subscriptions/acknowledged",
+            "params": {
+              "_meta": {
+                "io.modelcontextprotocol/subscriptionId": "listen-overflow"
+              },
+              "notifications": {
+                "taskIds": [
+                  "subscription-overflow"
+                ]
+              }
+            }
+          },
+          {
+            "id": "listen-overflow",
+            "jsonrpc": "2.0",
+            "result": {
+              "_meta": {
+                "io.modelcontextprotocol/serverInfo": {
+                  "name": "tama-mcp-task-required",
+                  "version": "0.0.1-test"
+                },
+                "io.modelcontextprotocol/subscriptionId": "listen-overflow"
+              },
+              "resultType": "complete"
+            }
+          }
+        ],
+        "headers": {
+          "cache-control": "no-cache",
+          "content-type": "text/event-stream; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "subscriptions/listen overflow closes stream",
+      "request": {
+        "body": {
+          "id": "listen-overflow",
+          "jsonrpc": "2.0",
+          "method": "subscriptions/listen",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "notifications": {
+              "taskIds": [
+                "subscription-overflow"
+              ]
+            }
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "subscriptions/listen"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "close": "overflow",
+          "tasks": [
+            {
+              "createdAt": "2026-09-15T12:00:00Z",
+              "lastUpdatedAt": "2026-09-15T12:00:00Z",
+              "pollIntervalMs": 1000,
+              "resultType": "complete",
+              "status": "working",
+              "statusMessage": "Task status is available.",
+              "taskId": "subscription-overflow",
+              "ttlMs": 86400000
+            }
+          ]
+        }
+      },
+      "requestExtensionPath": [
+        "params",
+        "notifications"
+      ],
+      "requestExtensionSchema": "task_subscription_notifications",
+      "requestSchema": "subscriptions_listen_request",
+      "requestValid": true
+    }
+  ]
+}

@@ -27,10 +27,15 @@ func (cn *Connection) Execute(ctx context.Context, name string, args json.RawMes
 	if d.Strategy != catalog.StrategyUpstreamTask {
 		return nil, fmt.Errorf("%w: tool %q uses strategy %s", ErrOperationNotAllowed, name, d.Strategy)
 	}
+	headers, err := paramHeaders(d.InputSchema)
+	if err != nil {
+		return nil, fmt.Errorf("%w: tool %q: %v", ErrProtocolMismatch, name, err)
+	}
 	resp, err := cn.adapter.upstream.CallTool(ctx, &upstream.CallToolParams{
 		Name:         name,
 		Arguments:    args,
 		Capabilities: capabilitiesFor(d.TaskSupport),
+		ParamHeaders: headers,
 	})
 	if err != nil {
 		return nil, classify(err)

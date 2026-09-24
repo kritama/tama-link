@@ -62,9 +62,11 @@ Phase 1 is complete. The durable-domain implementation now includes:
   death, terminal capture surviving GC, refresh leasing, WAL recovery,
   integrity), plus worker cancellation and recovery coverage.
 
-Phase 2 is next. The downstream `submit` and `await` handlers deliberately
-remain placeholders until the MCP `2026-07-28` System and App adapter is wired;
-Phase 1's no-upstream exit criteria are satisfied independently of that work.
+Issues #2–#7 have landed the transport, OAuth, catalog boundary, App tasks,
+System replay, and downstream `submit`/`await` handlers. Issue #8's package
+fixture gate runs in CI against the pinned TamaMCP documents. Phase 2 is not
+complete: live migrated-Tama acceptance has not passed, and fixture or mocked
+results must not be reported as that gate.
 
 ## Key architectural decisions (resolving spec open questions)
 
@@ -598,9 +600,10 @@ phase and its dependency order:
    ([#8](https://github.com/kritama/tama-link/issues/8)).
 
 Phase 2 is gated by the package and application layers it consumes. TamaMCP
-Phase 2 is complete; task subscriptions remain tracked by
-`kritama/tama-mcp#9`. Live Link acceptance additionally waits for the
-Tama-owned adapters and endpoint migration beginning with `upmaru/tama#123`.
+Phase 2 is complete. Package task subscriptions landed in
+`kritama/tama-mcp#9` and are pinned for the fixture gate at `v0.2.0`. Live
+Link acceptance additionally waits for the Tama-owned adapters and endpoint
+migration beginning with `upmaru/tama#123`.
 
 ## Phase 3 — client progress and acceptance
 
@@ -669,10 +672,10 @@ The current revision also resolves G8-G10 and G12-G15:
 
 ## Remaining gates and deferred work
 
-1. **TamaMCP subscription dependency:** package Phase 3 issue
-   `kritama/tama-mcp#9` must complete the task-ID subscription and notification
-   contract before Link can claim its subscription path. Polling work may
-   proceed first because `tasks/get` is the recovery source of truth.
+1. **TamaMCP subscription fixtures:** `kritama/tama-mcp#9` is complete.
+   Link's fixture gate consumes the immutable subscription document at
+   TamaMCP `v0.2.0`. That does not close live acceptance. Polling remains
+   the recovery source of truth when a stream is absent, dropped, or closed.
 
 2. **Tama application migration:** `upmaru/tama#123` and the subsequent System,
    App, OAuth composition, and Phoenix PubSub endpoint migration must expose the

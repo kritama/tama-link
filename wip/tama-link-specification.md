@@ -747,9 +747,13 @@ client-requested task augmentation, `tasks/result`, or `tasks/list`.
 
 The Phase 2 wire baseline is the TamaMCP specification at commit
 `6b5db00018d2774834db5a0f00eed5b9b55e1d2e`, including its immutable core and
-Tasks conformance pins. A different TamaMCP revision is supported only after
-its compatibility bounds and fixtures are reviewed and the profile contract
-is regenerated.
+Tasks conformance pins. Subscription fixtures were not in that commit. They
+are pinned to TamaMCP `v0.2.0`
+(`5c80c29e90c49438fbcc331db5c00f9f8f93ee21`), the release that published
+them. The protocol version is unchanged, so this pin does not regenerate
+profile bounds. A different TamaMCP revision is supported only after its
+compatibility bounds and fixtures are reviewed and the profile contract is
+regenerated. Package fixture results are not live acceptance.
 
 Every request is independently authenticated and carries
 `MCP-Protocol-Version`, `Mcp-Method`, conditional `Mcp-Name`, and matching
@@ -1324,8 +1328,9 @@ The first complete implementation is not done until automated tests prove:
 
 ## Remaining acceptance gates
 
-TamaMCP Phase 2 is complete, while task subscriptions remain tracked by
-`kritama/tama-mcp#9`. Live Link acceptance waits for the Tama-owned persistence,
+TamaMCP Phase 2 is complete. Package task subscriptions landed in
+`kritama/tama-mcp#9` and are exercised by the pinned fixture gate. Live Link
+acceptance has not passed. It still waits for the Tama-owned persistence,
 runner, PubSub, System, App, OAuth-composition, and endpoint migration beginning
 with `upmaru/tama#123`. The migrated endpoint must be verified for stateless
 discovery, standard headers, owner-bound task lookup, input responses,

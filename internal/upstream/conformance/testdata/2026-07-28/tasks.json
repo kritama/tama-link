@@ -1,0 +1,2298 @@
+{
+  "fixtures": [
+    {
+      "expected": {
+        "body": {
+          "id": "task-create-1",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "tama-mcp-task-required",
+                "version": "0.0.1-test"
+              }
+            },
+            "createdAt": "2026-09-14T12:00:00Z",
+            "lastUpdatedAt": "2026-09-14T12:00:00Z",
+            "pollIntervalMs": 1000,
+            "resultType": "task",
+            "status": "working",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-phase2-1",
+            "ttlMs": 86400000
+          }
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "tools/call task creation",
+      "request": {
+        "body": {
+          "id": "task-create-1",
+          "jsonrpc": "2.0",
+          "method": "tools/call",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "arguments": {
+              "value": "hello"
+            },
+            "name": "task_required"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tools/call"
+          ],
+          [
+            "mcp-name",
+            "task_required"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ]
+      },
+      "requestSchema": "call_tool_request",
+      "requestValid": true,
+      "responseEnvelopeSchema": "result_response",
+      "responsePath": [
+        "result"
+      ],
+      "responseSchema": "create_task_result"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32021,
+            "data": {
+              "requiredCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              }
+            },
+            "message": "Server requires the extensions capability for this request"
+          },
+          "id": "task-create-missing-capability",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "tools/call task creation missing capability",
+      "request": {
+        "body": {
+          "id": "task-create-missing-capability",
+          "jsonrpc": "2.0",
+          "method": "tools/call",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {}
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "arguments": {
+              "value": "hello"
+            },
+            "name": "task_required"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tools/call"
+          ],
+          [
+            "mcp-name",
+            "task_required"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ]
+      },
+      "requestSchema": "call_tool_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "id": "get-working",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "tama-mcp-task-required",
+                "version": "0.0.1-test"
+              }
+            },
+            "createdAt": "2026-09-14T12:00:00Z",
+            "lastUpdatedAt": "2026-09-14T12:00:00Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "working",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-get-working",
+            "ttlMs": 86400000
+          }
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "tasks/get working",
+      "request": {
+        "body": {
+          "id": "get-working",
+          "jsonrpc": "2.0",
+          "method": "tasks/get",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-get-working"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/get"
+          ],
+          [
+            "mcp-name",
+            "task-get-working"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "lastUpdatedAt": "2026-09-14T12:00:00Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "working",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-get-working",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "get_task_request",
+      "requestValid": true,
+      "responseEnvelopeSchema": "result_response",
+      "responsePath": [
+        "result"
+      ],
+      "responseSchema": "get_task_result"
+    },
+    {
+      "expected": {
+        "body": {
+          "id": "get-input_required",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "tama-mcp-task-required",
+                "version": "0.0.1-test"
+              }
+            },
+            "createdAt": "2026-09-14T12:00:00Z",
+            "inputRequests": {
+              "approval": {
+                "method": "elicitation/create",
+                "params": {
+                  "message": "Approve?",
+                  "mode": "form",
+                  "requestedSchema": {
+                    "properties": {
+                      "approved": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "approved"
+                    ],
+                    "type": "object"
+                  }
+                }
+              }
+            },
+            "lastUpdatedAt": "2026-09-14T12:00:01Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "input_required",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-get-input_required",
+            "ttlMs": 86400000
+          }
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "tasks/get input_required",
+      "request": {
+        "body": {
+          "id": "get-input_required",
+          "jsonrpc": "2.0",
+          "method": "tasks/get",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-get-input_required"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/get"
+          ],
+          [
+            "mcp-name",
+            "task-get-input_required"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "inputRequests": {
+              "approval": {
+                "method": "elicitation/create",
+                "params": {
+                  "message": "Approve?",
+                  "mode": "form",
+                  "requestedSchema": {
+                    "properties": {
+                      "approved": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "approved"
+                    ],
+                    "type": "object"
+                  }
+                }
+              }
+            },
+            "lastUpdatedAt": "2026-09-14T12:00:01Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "input_required",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-get-input_required",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "get_task_request",
+      "requestValid": true,
+      "responseEnvelopeSchema": "result_response",
+      "responsePath": [
+        "result"
+      ],
+      "responseSchema": "get_task_result"
+    },
+    {
+      "expected": {
+        "body": {
+          "id": "get-completed",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "tama-mcp-task-required",
+                "version": "0.0.1-test"
+              }
+            },
+            "createdAt": "2026-09-14T12:00:00Z",
+            "lastUpdatedAt": "2026-09-14T12:00:02Z",
+            "pollIntervalMs": 1000,
+            "result": {
+              "content": [
+                {
+                  "text": "done",
+                  "type": "text"
+                }
+              ],
+              "isError": false,
+              "resultType": "complete"
+            },
+            "resultType": "complete",
+            "status": "completed",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-get-completed",
+            "ttlMs": 86400000
+          }
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "tasks/get completed",
+      "request": {
+        "body": {
+          "id": "get-completed",
+          "jsonrpc": "2.0",
+          "method": "tasks/get",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-get-completed"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/get"
+          ],
+          [
+            "mcp-name",
+            "task-get-completed"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "lastUpdatedAt": "2026-09-14T12:00:02Z",
+            "pollIntervalMs": 1000,
+            "result": {
+              "content": [
+                {
+                  "text": "done",
+                  "type": "text"
+                }
+              ],
+              "isError": false,
+              "resultType": "complete"
+            },
+            "resultType": "complete",
+            "status": "completed",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-get-completed",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "get_task_request",
+      "requestValid": true,
+      "responseEnvelopeSchema": "result_response",
+      "responsePath": [
+        "result"
+      ],
+      "responseSchema": "get_task_result"
+    },
+    {
+      "expected": {
+        "body": {
+          "id": "get-failed",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "tama-mcp-task-required",
+                "version": "0.0.1-test"
+              }
+            },
+            "createdAt": "2026-09-14T12:00:00Z",
+            "error": {
+              "code": -32603,
+              "message": "Durable execution failed"
+            },
+            "lastUpdatedAt": "2026-09-14T12:00:03Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "failed",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-get-failed",
+            "ttlMs": 86400000
+          }
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "tasks/get failed",
+      "request": {
+        "body": {
+          "id": "get-failed",
+          "jsonrpc": "2.0",
+          "method": "tasks/get",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-get-failed"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/get"
+          ],
+          [
+            "mcp-name",
+            "task-get-failed"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "error": {
+              "code": -32603,
+              "message": "Durable execution failed"
+            },
+            "lastUpdatedAt": "2026-09-14T12:00:03Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "failed",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-get-failed",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "get_task_request",
+      "requestValid": true,
+      "responseEnvelopeSchema": "result_response",
+      "responsePath": [
+        "result"
+      ],
+      "responseSchema": "get_task_result"
+    },
+    {
+      "expected": {
+        "body": {
+          "id": "get-cancelled",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "tama-mcp-task-required",
+                "version": "0.0.1-test"
+              }
+            },
+            "createdAt": "2026-09-14T12:00:00Z",
+            "lastUpdatedAt": "2026-09-14T12:00:04Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "cancelled",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-get-cancelled",
+            "ttlMs": 86400000
+          }
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "tasks/get cancelled",
+      "request": {
+        "body": {
+          "id": "get-cancelled",
+          "jsonrpc": "2.0",
+          "method": "tasks/get",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-get-cancelled"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/get"
+          ],
+          [
+            "mcp-name",
+            "task-get-cancelled"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "lastUpdatedAt": "2026-09-14T12:00:04Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "cancelled",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-get-cancelled",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "get_task_request",
+      "requestValid": true,
+      "responseEnvelopeSchema": "result_response",
+      "responsePath": [
+        "result"
+      ],
+      "responseSchema": "get_task_result"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32602,
+            "message": "Task was not found"
+          },
+          "id": "get-missing",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "tasks/get unknown task",
+      "request": {
+        "body": {
+          "id": "get-missing",
+          "jsonrpc": "2.0",
+          "method": "tasks/get",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "missing-task"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/get"
+          ],
+          [
+            "mcp-name",
+            "missing-task"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ]
+      },
+      "requestSchema": "get_task_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32602,
+            "message": "Task was not found"
+          },
+          "id": "get-unauthorized",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "tasks/get unauthorized task",
+      "request": {
+        "body": {
+          "id": "get-unauthorized",
+          "jsonrpc": "2.0",
+          "method": "tasks/get",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-get-unauthorized"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/get"
+          ],
+          [
+            "mcp-name",
+            "task-get-unauthorized"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "other"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "lastUpdatedAt": "2026-09-14T12:00:00Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "working",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-get-unauthorized",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "get_task_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32020,
+            "message": "Header mismatch: Mcp-Name header \"different-task\" does not match \"task-get-header-mismatch\""
+          },
+          "id": "get-header-mismatch",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "tasks/get header and body task ID disagreement",
+      "request": {
+        "body": {
+          "id": "get-header-mismatch",
+          "jsonrpc": "2.0",
+          "method": "tasks/get",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-get-header-mismatch"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/get"
+          ],
+          [
+            "mcp-name",
+            "different-task"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ]
+      },
+      "requestSchema": "get_task_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32021,
+            "data": {
+              "requiredCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              }
+            },
+            "message": "Server requires the extensions capability for this request"
+          },
+          "id": "get-no-capability",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "tasks/get missing capability",
+      "request": {
+        "body": {
+          "id": "get-no-capability",
+          "jsonrpc": "2.0",
+          "method": "tasks/get",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {}
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-get-no-capability"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/get"
+          ],
+          [
+            "mcp-name",
+            "task-get-no-capability"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ]
+      },
+      "requestSchema": "get_task_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "id": "update-partial",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "tama-mcp-task-required",
+                "version": "0.0.1-test"
+              }
+            },
+            "resultType": "complete"
+          }
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "tasks/update partial input responses",
+      "request": {
+        "body": {
+          "id": "update-partial",
+          "jsonrpc": "2.0",
+          "method": "tasks/update",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "inputResponses": {
+              "approval": {
+                "action": "accept",
+                "content": {
+                  "approved": true
+                }
+              }
+            },
+            "taskId": "task-update-partial"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/update"
+          ],
+          [
+            "mcp-name",
+            "task-update-partial"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "inputRequests": {
+              "approval": {
+                "method": "elicitation/create",
+                "params": {
+                  "message": "Approve?",
+                  "mode": "form",
+                  "requestedSchema": {
+                    "properties": {
+                      "approved": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "approved"
+                    ],
+                    "type": "object"
+                  }
+                }
+              },
+              "followup": {
+                "method": "elicitation/create",
+                "params": {
+                  "message": "Continue?",
+                  "mode": "form",
+                  "requestedSchema": {
+                    "properties": {
+                      "approved": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "approved"
+                    ],
+                    "type": "object"
+                  }
+                }
+              }
+            },
+            "lastUpdatedAt": "2026-09-14T12:00:01Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "input_required",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-update-partial",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "update_task_request",
+      "requestValid": true,
+      "responseEnvelopeSchema": "result_response",
+      "responsePath": [
+        "result"
+      ],
+      "responseSchema": "update_task_result"
+    },
+    {
+      "expected": {
+        "body": {
+          "id": "update-complete",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "tama-mcp-task-required",
+                "version": "0.0.1-test"
+              }
+            },
+            "resultType": "complete"
+          }
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "tasks/update complete input responses",
+      "request": {
+        "body": {
+          "id": "update-complete",
+          "jsonrpc": "2.0",
+          "method": "tasks/update",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "inputResponses": {
+              "approval": {
+                "action": "decline"
+              }
+            },
+            "taskId": "task-update-complete"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/update"
+          ],
+          [
+            "mcp-name",
+            "task-update-complete"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "inputRequests": {
+              "approval": {
+                "method": "elicitation/create",
+                "params": {
+                  "message": "Approve?",
+                  "mode": "form",
+                  "requestedSchema": {
+                    "properties": {
+                      "approved": {
+                        "type": "boolean"
+                      }
+                    },
+                    "required": [
+                      "approved"
+                    ],
+                    "type": "object"
+                  }
+                }
+              }
+            },
+            "lastUpdatedAt": "2026-09-14T12:00:01Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "input_required",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-update-complete",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "update_task_request",
+      "requestValid": true,
+      "responseEnvelopeSchema": "result_response",
+      "responsePath": [
+        "result"
+      ],
+      "responseSchema": "update_task_result"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32602,
+            "message": "Task was not found"
+          },
+          "id": "update-missing",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "tasks/update invalid task",
+      "request": {
+        "body": {
+          "id": "update-missing",
+          "jsonrpc": "2.0",
+          "method": "tasks/update",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "inputResponses": {},
+            "taskId": "task-update-missing"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/update"
+          ],
+          [
+            "mcp-name",
+            "task-update-missing"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ]
+      },
+      "requestSchema": "update_task_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32602,
+            "message": "Request does not match the protocol schema: At /params/inputResponses: Expected type object, got array"
+          },
+          "id": "update-invalid-responses",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "tasks/update invalid response shape",
+      "request": {
+        "body": {
+          "id": "update-invalid-responses",
+          "jsonrpc": "2.0",
+          "method": "tasks/update",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "inputResponses": [],
+            "taskId": "task-update-invalid-responses"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/update"
+          ],
+          [
+            "mcp-name",
+            "task-update-invalid-responses"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ]
+      },
+      "requestSchema": "update_task_request",
+      "requestValid": false,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32602,
+            "message": "Task is not in a state that accepts this operation"
+          },
+          "id": "update-working",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "tasks/update outside input_required",
+      "request": {
+        "body": {
+          "id": "update-working",
+          "jsonrpc": "2.0",
+          "method": "tasks/update",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "inputResponses": {},
+            "taskId": "task-update-working"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/update"
+          ],
+          [
+            "mcp-name",
+            "task-update-working"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "lastUpdatedAt": "2026-09-14T12:00:00Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "working",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-update-working",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "update_task_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "id": "cancel-working",
+          "jsonrpc": "2.0",
+          "result": {
+            "_meta": {
+              "io.modelcontextprotocol/serverInfo": {
+                "name": "tama-mcp-task-required",
+                "version": "0.0.1-test"
+              }
+            },
+            "resultType": "complete"
+          }
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 200
+      },
+      "name": "tasks/cancel cooperative acknowledgement",
+      "request": {
+        "body": {
+          "id": "cancel-working",
+          "jsonrpc": "2.0",
+          "method": "tasks/cancel",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-cancel-working"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/cancel"
+          ],
+          [
+            "mcp-name",
+            "task-cancel-working"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "lastUpdatedAt": "2026-09-14T12:00:00Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "working",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-cancel-working",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "cancel_task_request",
+      "requestValid": true,
+      "responseEnvelopeSchema": "result_response",
+      "responsePath": [
+        "result"
+      ],
+      "responseSchema": "cancel_task_result"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32602,
+            "message": "Task was not found"
+          },
+          "id": "cancel-missing",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "tasks/cancel invalid task",
+      "request": {
+        "body": {
+          "id": "cancel-missing",
+          "jsonrpc": "2.0",
+          "method": "tasks/cancel",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-cancel-missing"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/cancel"
+          ],
+          [
+            "mcp-name",
+            "task-cancel-missing"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ]
+      },
+      "requestSchema": "cancel_task_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32602,
+            "message": "Task is not in a state that accepts this operation"
+          },
+          "id": "cancel-completed",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "tasks/cancel race with completed",
+      "request": {
+        "body": {
+          "id": "cancel-completed",
+          "jsonrpc": "2.0",
+          "method": "tasks/cancel",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-cancel-completed"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/cancel"
+          ],
+          [
+            "mcp-name",
+            "task-cancel-completed"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "lastUpdatedAt": "2026-09-14T12:00:02Z",
+            "pollIntervalMs": 1000,
+            "result": {
+              "content": [
+                {
+                  "text": "done",
+                  "type": "text"
+                }
+              ],
+              "isError": false,
+              "resultType": "complete"
+            },
+            "resultType": "complete",
+            "status": "completed",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-cancel-completed",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "cancel_task_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32602,
+            "message": "Task is not in a state that accepts this operation"
+          },
+          "id": "cancel-failed",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "tasks/cancel race with failed",
+      "request": {
+        "body": {
+          "id": "cancel-failed",
+          "jsonrpc": "2.0",
+          "method": "tasks/cancel",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-cancel-failed"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/cancel"
+          ],
+          [
+            "mcp-name",
+            "task-cancel-failed"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "error": {
+              "code": -32603,
+              "message": "Durable execution failed"
+            },
+            "lastUpdatedAt": "2026-09-14T12:00:03Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "failed",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-cancel-failed",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "cancel_task_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32602,
+            "message": "Task is not in a state that accepts this operation"
+          },
+          "id": "cancel-cancelled",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 400
+      },
+      "name": "tasks/cancel race with cancelled",
+      "request": {
+        "body": {
+          "id": "cancel-cancelled",
+          "jsonrpc": "2.0",
+          "method": "tasks/cancel",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            },
+            "taskId": "task-cancel-cancelled"
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/cancel"
+          ],
+          [
+            "mcp-name",
+            "task-cancel-cancelled"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ],
+        "setup": {
+          "task": {
+            "createdAt": "2026-09-14T12:00:00Z",
+            "lastUpdatedAt": "2026-09-14T12:00:04Z",
+            "pollIntervalMs": 1000,
+            "resultType": "complete",
+            "status": "cancelled",
+            "statusMessage": "Queued for durable execution.",
+            "taskId": "task-cancel-cancelled",
+            "ttlMs": 86400000
+          }
+        }
+      },
+      "requestSchema": "cancel_task_request",
+      "requestValid": true,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32601,
+            "message": "Method not found: tasks/result"
+          },
+          "id": "unsupported-tasks-result",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 404
+      },
+      "name": "tasks/result remains rejected",
+      "request": {
+        "body": {
+          "id": "unsupported-tasks-result",
+          "jsonrpc": "2.0",
+          "method": "tasks/result",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            }
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/result"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ]
+      },
+      "requestSchema": "get_task_request",
+      "requestValid": false,
+      "responseSchema": "error_response"
+    },
+    {
+      "expected": {
+        "body": {
+          "error": {
+            "code": -32601,
+            "message": "Method not found: tasks/list"
+          },
+          "id": "unsupported-tasks-list",
+          "jsonrpc": "2.0"
+        },
+        "headers": {
+          "content-type": "application/json; charset=utf-8"
+        },
+        "status": 404
+      },
+      "name": "tasks/list remains rejected",
+      "request": {
+        "body": {
+          "id": "unsupported-tasks-list",
+          "jsonrpc": "2.0",
+          "method": "tasks/list",
+          "params": {
+            "_meta": {
+              "io.modelcontextprotocol/clientCapabilities": {
+                "extensions": {
+                  "io.modelcontextprotocol/tasks": {}
+                }
+              },
+              "io.modelcontextprotocol/clientInfo": {
+                "name": "test-client",
+                "version": "1.0.0"
+              },
+              "io.modelcontextprotocol/protocolVersion": "2026-07-28"
+            }
+          }
+        },
+        "headers": [
+          [
+            "mcp-protocol-version",
+            "2026-07-28"
+          ],
+          [
+            "mcp-method",
+            "tasks/list"
+          ],
+          [
+            "content-type",
+            "application/json"
+          ],
+          [
+            "accept",
+            "application/json, text/event-stream"
+          ],
+          [
+            "x-test-token",
+            "ok"
+          ]
+        ]
+      },
+      "requestSchema": "get_task_request",
+      "requestValid": false,
+      "responseSchema": "error_response"
+    }
+  ],
+  "schemaFixtures": [
+    {
+      "name": "working detailed task profile",
+      "schema": "task_profile",
+      "valid": true,
+      "value": {
+        "createdAt": "2026-09-14T12:00:00Z",
+        "lastUpdatedAt": "2026-09-14T12:00:00Z",
+        "pollIntervalMs": 1000,
+        "resultType": "complete",
+        "status": "working",
+        "statusMessage": "Queued for durable execution.",
+        "taskId": "schema-working",
+        "ttlMs": 86400000
+      }
+    },
+    {
+      "name": "input_required detailed task profile",
+      "schema": "task_profile",
+      "valid": true,
+      "value": {
+        "createdAt": "2026-09-14T12:00:00Z",
+        "inputRequests": {
+          "approval": {
+            "method": "elicitation/create",
+            "params": {
+              "message": "Approve?",
+              "mode": "form",
+              "requestedSchema": {
+                "properties": {
+                  "approved": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "approved"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        },
+        "lastUpdatedAt": "2026-09-14T12:00:01Z",
+        "pollIntervalMs": 1000,
+        "resultType": "complete",
+        "status": "input_required",
+        "statusMessage": "Queued for durable execution.",
+        "taskId": "schema-input_required",
+        "ttlMs": 86400000
+      }
+    },
+    {
+      "name": "completed detailed task profile",
+      "schema": "task_profile",
+      "valid": true,
+      "value": {
+        "createdAt": "2026-09-14T12:00:00Z",
+        "lastUpdatedAt": "2026-09-14T12:00:02Z",
+        "pollIntervalMs": 1000,
+        "result": {
+          "content": [
+            {
+              "text": "done",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        },
+        "resultType": "complete",
+        "status": "completed",
+        "statusMessage": "Queued for durable execution.",
+        "taskId": "schema-completed",
+        "ttlMs": 86400000
+      }
+    },
+    {
+      "name": "failed detailed task profile",
+      "schema": "task_profile",
+      "valid": true,
+      "value": {
+        "createdAt": "2026-09-14T12:00:00Z",
+        "error": {
+          "code": -32603,
+          "message": "Durable execution failed"
+        },
+        "lastUpdatedAt": "2026-09-14T12:00:03Z",
+        "pollIntervalMs": 1000,
+        "resultType": "complete",
+        "status": "failed",
+        "statusMessage": "Queued for durable execution.",
+        "taskId": "schema-failed",
+        "ttlMs": 86400000
+      }
+    },
+    {
+      "name": "cancelled detailed task profile",
+      "schema": "task_profile",
+      "valid": true,
+      "value": {
+        "createdAt": "2026-09-14T12:00:00Z",
+        "lastUpdatedAt": "2026-09-14T12:00:04Z",
+        "pollIntervalMs": 1000,
+        "resultType": "complete",
+        "status": "cancelled",
+        "statusMessage": "Queued for durable execution.",
+        "taskId": "schema-cancelled",
+        "ttlMs": 86400000
+      }
+    },
+    {
+      "name": "working task rejects cross-state result",
+      "schema": "task_profile",
+      "valid": false,
+      "value": {
+        "createdAt": "2026-09-14T12:00:00Z",
+        "lastUpdatedAt": "2026-09-14T12:00:00Z",
+        "pollIntervalMs": 1000,
+        "result": {
+          "content": [
+            {
+              "text": "done",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        },
+        "resultType": "complete",
+        "status": "working",
+        "statusMessage": "Queued for durable execution.",
+        "taskId": "schema-invalid-working",
+        "ttlMs": 86400000
+      }
+    },
+    {
+      "name": "input_required task rejects cross-state result",
+      "schema": "task_profile",
+      "valid": false,
+      "value": {
+        "createdAt": "2026-09-14T12:00:00Z",
+        "inputRequests": {
+          "approval": {
+            "method": "elicitation/create",
+            "params": {
+              "message": "Approve?",
+              "mode": "form",
+              "requestedSchema": {
+                "properties": {
+                  "approved": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "approved"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        },
+        "lastUpdatedAt": "2026-09-14T12:00:01Z",
+        "pollIntervalMs": 1000,
+        "result": {
+          "content": [
+            {
+              "text": "done",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        },
+        "resultType": "complete",
+        "status": "input_required",
+        "statusMessage": "Queued for durable execution.",
+        "taskId": "schema-invalid-input_required",
+        "ttlMs": 86400000
+      }
+    },
+    {
+      "name": "completed task rejects cross-state inputRequests",
+      "schema": "task_profile",
+      "valid": false,
+      "value": {
+        "createdAt": "2026-09-14T12:00:00Z",
+        "inputRequests": {
+          "approval": {
+            "method": "elicitation/create",
+            "params": {
+              "message": "Approve?",
+              "mode": "form",
+              "requestedSchema": {
+                "properties": {
+                  "approved": {
+                    "type": "boolean"
+                  }
+                },
+                "required": [
+                  "approved"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        },
+        "lastUpdatedAt": "2026-09-14T12:00:02Z",
+        "pollIntervalMs": 1000,
+        "result": {
+          "content": [
+            {
+              "text": "done",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        },
+        "resultType": "complete",
+        "status": "completed",
+        "statusMessage": "Queued for durable execution.",
+        "taskId": "schema-invalid-completed",
+        "ttlMs": 86400000
+      }
+    },
+    {
+      "name": "failed task rejects cross-state result",
+      "schema": "task_profile",
+      "valid": false,
+      "value": {
+        "createdAt": "2026-09-14T12:00:00Z",
+        "error": {
+          "code": -32603,
+          "message": "Durable execution failed"
+        },
+        "lastUpdatedAt": "2026-09-14T12:00:03Z",
+        "pollIntervalMs": 1000,
+        "result": {
+          "content": [
+            {
+              "text": "done",
+              "type": "text"
+            }
+          ],
+          "isError": false,
+          "resultType": "complete"
+        },
+        "resultType": "complete",
+        "status": "failed",
+        "statusMessage": "Queued for durable execution.",
+        "taskId": "schema-invalid-failed",
+        "ttlMs": 86400000
+      }
+    },
+    {
+      "name": "cancelled task rejects cross-state error",
+      "schema": "task_profile",
+      "valid": false,
+      "value": {
+        "createdAt": "2026-09-14T12:00:00Z",
+        "error": {
+          "code": -32603,
+          "message": "Durable execution failed"
+        },
+        "lastUpdatedAt": "2026-09-14T12:00:04Z",
+        "pollIntervalMs": 1000,
+        "resultType": "complete",
+        "status": "cancelled",
+        "statusMessage": "Queued for durable execution.",
+        "taskId": "schema-invalid-cancelled",
+        "ttlMs": 86400000
+      }
+    },
+    {
+      "name": "task profile rejects an unsafe integer TTL",
+      "schema": "task_profile",
+      "valid": false,
+      "value": {
+        "createdAt": "2026-09-14T12:00:00Z",
+        "lastUpdatedAt": "2026-09-14T12:00:00Z",
+        "pollIntervalMs": 1000,
+        "resultType": "complete",
+        "status": "working",
+        "statusMessage": "Queued for durable execution.",
+        "taskId": "schema-unsafe-integer",
+        "ttlMs": 9007199254740992
+      }
+    }
+  ]
+}

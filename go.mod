@@ -7,6 +7,7 @@ require (
 	github.com/cockroachdb/apd/v3 v3.2.3
 	github.com/modelcontextprotocol/go-sdk v1.7.0
 	golang.org/x/sys v0.47.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.58.0
 )
 
