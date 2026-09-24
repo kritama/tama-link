@@ -75,14 +75,6 @@ func TestSubmitRejectedCases(t *testing.T) {
 			want: contract.CodeInvalidRequest,
 		},
 		{
-			name: "task-backed operation not enabled",
-			in: contract.SubmitInput{
-				Tool: "message", ClientRequestID: "r-4",
-				Arguments: json.RawMessage(`{"message":"hi"}`),
-			},
-			want: contract.CodeNotImplemented,
-		},
-		{
 			name: "guarded operation rejected before upstream",
 			in:   contract.SubmitInput{Tool: "guarded", ClientRequestID: "r-5", Arguments: json.RawMessage(`{"note":"n"}`)},
 			want: contract.CodeOperationNotAllowed,
@@ -107,18 +99,25 @@ func TestSubmitTaskToolNotEnabled(t *testing.T) {
 	t.Parallel()
 
 	f := newFakeTama(t)
-	svc, _, _ := fixtureApp(t, f)
+	svc, st, _ := fixtureApp(t, f)
 
-	_, appErr := svc.Submit(context.Background(), contract.SubmitInput{
+	out, appErr := svc.Submit(context.Background(), contract.SubmitInput{
 		Tool:            "message",
 		ClientRequestID: "r-task",
 		Arguments:       json.RawMessage(`{"message":"hi"}`),
 	})
-	if appErr == nil || appErr.Code != contract.CodeNotImplemented {
-		t.Fatalf("error = %+v, want not_implemented", appErr)
+	if appErr != nil {
+		t.Fatalf("submit: %s", appErr.Message)
 	}
-	if f.calls.Load() != 0 {
-		t.Fatalf("fixture upstream was touched: %d calls", f.calls.Load())
+	if out.SubmissionID == "" {
+		t.Fatal("accepted task submission has no id")
+	}
+	sub, err := st.GetSubmission(context.Background(), out.SubmissionID)
+	if err != nil {
+		t.Fatalf("read accepted submission: %v", err)
+	}
+	if sub.Strategy != string(catalog.StrategyUpstreamTask) {
+		t.Fatalf("strategy = %s", sub.Strategy)
 	}
 }
 
@@ -133,7 +132,6 @@ func TestSubmitRejectionsLeaveNoTrace(t *testing.T) {
 	svc, _, _ := fixtureApp(t, f)
 
 	rejected := []contract.SubmitInput{
-		{Tool: "message", ClientRequestID: "clean-1", Arguments: json.RawMessage(`{"message":"hi"}`)},
 		{Tool: "guarded", ClientRequestID: "clean-1", Arguments: json.RawMessage(`{"note":"n"}`)},
 		{Tool: "unstable", ClientRequestID: "clean-1", Arguments: json.RawMessage(`{"note":"n"}`)},
 		{Tool: "status", ClientRequestID: "clean-1", Arguments: json.RawMessage(`{"detail":5}`)},

@@ -76,10 +76,17 @@ func (t *TaskState) IsTerminal() bool {
 // are durable and independent of any HTTP connection; lookup is
 // authenticated independently on every call.
 func (c *Client) TaskGet(ctx context.Context, taskID string) (*TaskState, error) {
+	return c.TaskGetWithin(ctx, taskID, 0)
+}
+
+// TaskGetWithin is TaskGet with one response-body bound. A positive
+// maxResponseBytes replaces the client's configured bound so a recovered
+// submission is read under the limit it was accepted with.
+func (c *Client) TaskGetWithin(ctx context.Context, taskID string, maxResponseBytes int64) (*TaskState, error) {
 	if taskID == "" {
 		return nil, fmt.Errorf("task id is required")
 	}
-	raw, err := c.call(ctx, MethodTaskGet, taskID, json.RawMessage(`{"taskId":`+jsonString(taskID)+`}`), 0)
+	raw, err := c.call(ctx, MethodTaskGet, taskID, json.RawMessage(`{"taskId":`+jsonString(taskID)+`}`), maxResponseBytes)
 	if err != nil {
 		return nil, err
 	}

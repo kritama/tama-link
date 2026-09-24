@@ -20,13 +20,9 @@ const awaitPollInterval = 250 * time.Millisecond
 // durable state or its terminal result. Cancellation stops the local wait
 // promptly; it never changes accepted upstream or local work.
 func (s *Service) Await(ctx context.Context, in contract.AwaitInput) (contract.AwaitOutput, *contract.Error) {
-	sub, err := s.store.GetSubmission(ctx, in.SubmissionID)
-	if err != nil {
-		if errors.Is(err, store.ErrNotFound) {
-			return contract.AwaitOutput{}, failed(contract.CodeSubmissionNotFound,
-				"No submission with that identifier exists for this profile.")
-		}
-		return contract.AwaitOutput{}, s.storeError(err)
+	sub, be := s.loadForAwait(ctx, in.SubmissionID)
+	if be != nil {
+		return contract.AwaitOutput{}, be
 	}
 	after, be := parseCursor(in.Cursor)
 	if be != nil {
@@ -39,6 +35,11 @@ func (s *Service) Await(ctx context.Context, in contract.AwaitInput) (contract.A
 	if after > sub.Sequence {
 		return contract.AwaitOutput{}, failed(contract.CodeInvalidRequest,
 			"cursor %s is beyond the submission's event sequence %d.", in.Cursor, sub.Sequence)
+	}
+	// A caller that is already gone stops before any upstream update or
+	// wait. The independent read above is the freshest state we can return.
+	if ctx.Err() != nil {
+		return s.buildOutput(sub, after), nil
 	}
 	if be := s.beforeWait(ctx, sub, in); be != nil {
 		return contract.AwaitOutput{}, be
@@ -56,22 +57,42 @@ func (s *Service) Await(ctx context.Context, in contract.AwaitInput) (contract.A
 	return s.buildOutput(sub, after), nil
 }
 
+// loadForAwait reads the submission for one await. A cancelled caller
+// cannot use its own context for the read; the independent final-read
+// deadline still returns the freshest durable snapshot instead of a store
+// error.
+func (s *Service) loadForAwait(ctx context.Context, id string) (*store.Submission, *contract.Error) {
+	sub, err := s.store.GetSubmission(ctx, id)
+	if err == nil {
+		return sub, nil
+	}
+	if errors.Is(err, store.ErrNotFound) {
+		return nil, failed(contract.CodeSubmissionNotFound,
+			"No submission with that identifier exists for this profile.")
+	}
+	if ctx.Err() == nil {
+		return nil, s.storeError(err)
+	}
+	// Use the fixed deadline, not the test override: a parallel test may
+	// shrink the post-wait fallback without owning this read.
+	readCtx, cancel := context.WithTimeout(context.Background(), defaultFinalReadTimeout)
+	defer cancel()
+	return s.reload(readCtx, id)
+}
+
+func finalReadTimeout() time.Duration {
+	if v := finalReadTimeoutOverride.Load(); v != 0 {
+		return time.Duration(v)
+	}
+	return defaultFinalReadTimeout
+}
+
 // beforeWait performs the work one await call may do before its bounded
 // wait: input-response handling for task-backed submissions. System
 // submissions never produce input requests, so any responses for them are
 // invalid.
-func (s *Service) beforeWait(_ context.Context, sub *store.Submission, in contract.AwaitInput) *contract.Error {
-	if len(in.InputResponses) == 0 {
-		return nil
-	}
-	// Input requests exist only in the App task workflow. No submission can
-	// be input_required in this build slice, so any responses are invalid.
-	if sub.Status != contract.StatusInputRequired {
-		return failed(contract.CodeInvalidRequest,
-			"input_responses is only accepted while the submission is input_required.")
-	}
-	return failed(contract.CodeNotImplemented,
-		"Task-backed input responses are not enabled in this build.")
+func (s *Service) beforeWait(ctx context.Context, sub *store.Submission, in contract.AwaitInput) *contract.Error {
+	return s.applyInputResponses(ctx, sub, in)
 }
 
 // resolveWait maps timeout_ms to one bounded long-poll duration. Zero uses
@@ -145,11 +166,7 @@ func setFinalReadTimeout(d time.Duration) { finalReadTimeoutOverride.Store(int64
 // caller can await again; a real storage failure still reaches the caller
 // instead of being reported as a successful pending response.
 func (s *Service) finalState(sub *store.Submission) (*store.Submission, *contract.Error) {
-	timeout := defaultFinalReadTimeout
-	if v := finalReadTimeoutOverride.Load(); v != 0 {
-		timeout = time.Duration(v)
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), finalReadTimeout())
 	defer cancel()
 	reloaded, cerr := s.reload(ctx, sub.ID)
 	if cerr != nil {
@@ -227,7 +244,10 @@ func (s *Service) buildOutput(sub *store.Submission, after int64) contract.Await
 		// Polling guidance is only meaningful for work that can still
 		// change: the documented terminal response omits it, so a client
 		// scheduling retries off this field stops once terminal is true.
-		out.NextPollMS = 1000
+		out.NextPollMS = pollGuidance(sub)
+		if sub.Status == contract.StatusInputRequired && len(sub.InputRequests) > 0 {
+			out.InputRequests = sub.InputRequests
+		}
 		return out
 	}
 	if sub.CompletedAt != nil {
@@ -244,9 +264,13 @@ func (s *Service) buildOutput(sub *store.Submission, after int64) contract.Await
 			"The terminal result is no longer retained for this submission."))
 		return out
 	case contract.StatusExpired:
-		out.Error = contractPtr(contract.NewError(contract.CodeSubmissionExpired,
-			"The terminal result is no longer retained for this submission."))
-		return out
+		// A payload-free tombstone has no stored error. An upstream TTL
+		// expiry keeps the stable error captured with the terminal state.
+		if sub.ErrorCode == "" {
+			out.Error = contractPtr(contract.NewError(contract.CodeSubmissionExpired,
+				"The terminal result is no longer retained for this submission."))
+			return out
+		}
 	}
 	if sub.ErrorCode != "" {
 		err := contract.Error{
@@ -260,3 +284,11 @@ func (s *Service) buildOutput(sub *store.Submission, after int64) contract.Await
 }
 
 func contractPtr(e contract.Error) *contract.Error { return &e }
+
+func pollGuidance(sub *store.Submission) int {
+	ms := sub.TaskPollIntervalMs
+	if ms <= 0 || ms > 60_000 {
+		return 1000
+	}
+	return int(ms)
+}

@@ -42,6 +42,9 @@ func classify(err error) *contract.Error {
 	case errors.Is(err, tama2026.ErrUnexpectedTaskResult):
 		return stable(contract.CodeOperationContractMismatch,
 			"The upstream returned a task result for a pinned synchronous operation.")
+	case errors.Is(err, tama2026.ErrTaskUnavailable):
+		return stable(contract.CodeUpstreamExecutionFailed,
+			"The upstream task is not available for this profile.")
 	case errors.Is(err, tama2026.ErrOperationNotAllowed):
 		return stable(contract.CodeOperationNotAllowed,
 			"The selected profile does not allow this operation to execute.")
@@ -56,6 +59,11 @@ func classify(err error) *contract.Error {
 	}
 	return stable(contract.CodeUpstreamUnavailable,
 		"The upstream endpoint is currently unavailable.")
+}
+
+func responseTooLarge(err error) bool {
+	var ue *upstream.Error
+	return errors.As(err, &ue) && ue.Kind == upstream.KindTooLarge
 }
 
 func stable(code contract.Code, message string) *contract.Error {

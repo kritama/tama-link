@@ -21,6 +21,18 @@ type Executor struct {
 	conns verifiedConnection
 }
 
+// MemoConnect returns a resolver that calls resolve once and reuses the
+// verified connection. A failed resolve is not cached. System execution and
+// the App task runner must share one memoized resolver so discovery is not
+// repeated per submission.
+func MemoConnect(resolve func(ctx context.Context) (*tama2026.Connection, error)) func(context.Context) (*tama2026.Connection, error) {
+	if resolve == nil {
+		panic("application: connection resolver is required")
+	}
+	shared := &verifiedConnection{resolve: resolve}
+	return shared.get
+}
+
 // NewExecutor builds the System-path worker executor over one connection
 // resolver. The resolver may establish the connection lazily; its error is
 // classified before the submission fails.

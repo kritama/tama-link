@@ -32,8 +32,10 @@ func (s *Store) GetSubmission(ctx context.Context, id string) (*Submission, erro
 
 func scanSubmission(row *sql.Row) (*Submission, error) {
 	var sub Submission
-	var argsEnc, eventsEnc, resultEnc []byte
+	var argsEnc, eventsEnc, resultEnc, inputEnc, evidenceEnc []byte
 	var taskID sql.NullString
+	var taskCapabilities, taskUpdatedAt string
+	var taskTTLMs, taskPollMs int64
 	var status string
 	var errorCode, errorMessage sql.NullString
 	var errorRetryable int
@@ -49,6 +51,7 @@ func scanSubmission(row *sql.Row) (*Submission, error) {
 		&sub.AcceptedLimits.EventBytes, &sub.AcceptedLimits.MaxEvents, &sub.AcceptedLimits.EventsBytes,
 		&payloadRetentionMs, &tombstoneRetentionMs,
 		&createdMs, &updatedMs, &completedAt, &payloadExpiresAt,
+		&taskTTLMs, &taskPollMs, &taskCapabilities, &taskUpdatedAt, &inputEnc, &evidenceEnc,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("scan submission: %w", err)
@@ -68,6 +71,12 @@ func scanSubmission(row *sql.Row) (*Submission, error) {
 	sub.encEvents = eventsEnc
 	sub.encResult = resultEnc
 	sub.TaskID = taskID.String
+	sub.TaskTTLMs = taskTTLMs
+	sub.TaskPollIntervalMs = taskPollMs
+	sub.TaskCapabilities = taskCapabilities
+	sub.TaskUpdatedAt = taskUpdatedAt
+	sub.encInputRequests = inputEnc
+	sub.encTerminalEvidence = evidenceEnc
 	if errorCode.Valid {
 		sub.ErrorCode = errorCode.String
 	}
@@ -106,6 +115,20 @@ func (s *Store) decryptSubmission(sub *Submission) error {
 			return unreadableSubmissionPayload(sub.ID, "events", err)
 		}
 		sub.Events = decoded
+	}
+	if len(sub.encInputRequests) > 0 {
+		raw, err := s.cipher.open(sub.encInputRequests, sub.ID, "input-requests")
+		if err != nil {
+			return unreadableSubmissionPayload(sub.ID, "input requests", err)
+		}
+		sub.InputRequests = raw
+	}
+	if len(sub.encTerminalEvidence) > 0 {
+		raw, err := s.cipher.open(sub.encTerminalEvidence, sub.ID, "terminal-evidence")
+		if err != nil {
+			return unreadableSubmissionPayload(sub.ID, "terminal evidence", err)
+		}
+		sub.TerminalEvidence = raw
 	}
 	if len(sub.encResult) > 0 {
 		result, err := s.cipher.open(sub.encResult, sub.ID, "result")
