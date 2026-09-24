@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,25 @@ import (
 )
 
 // demoProfileForWrite builds the demo profile without test helpers.
+// syncBuffer is a stderr sink that child processes and the test can use
+// at the same time. os/exec writes from its own goroutine until Wait.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func demoProfileForWrite() profile.Profile {
 	op := catalog.Descriptor{
 		Name:        "message",
@@ -194,7 +214,7 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stdout pipe: %v", err)
 	}
-	var stderrBuf bytes.Buffer
+	var stderrBuf syncBuffer
 	cmd.Stderr = &stderrBuf
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start serve: %v", err)
@@ -227,6 +247,27 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	})
 	send(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
 	send(map[string]any{"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": map[string]any{}})
+	send(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      3,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name": "submit",
+			"arguments": map[string]any{
+				"tool":      "message",
+				"arguments": map[string]any{"message": "secret-argument-marker"},
+			},
+		},
+	})
+	send(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      4,
+		"method":  "tools/call",
+		"params": map[string]any{
+			"name":      "await",
+			"arguments": map[string]any{"submission_id": "missing"},
+		},
+	})
 
 	type frame struct {
 		ID     json.Number     `json:"id"`
@@ -237,6 +278,8 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	type collected struct {
 		init   json.RawMessage
 		tools  json.RawMessage
+		submit json.RawMessage
+		await  json.RawMessage
 		failed string
 	}
 	result := make(chan collected, 1)
@@ -258,8 +301,12 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 				got.init = f.Result
 			case "2":
 				got.tools = f.Result
+			case "3":
+				got.submit = f.Result
+			case "4":
+				got.await = f.Result
 			}
-			if got.init != nil && got.tools != nil {
+			if got.init != nil && got.tools != nil && got.submit != nil && got.await != nil {
 				result <- got
 				return
 			}
@@ -323,21 +370,44 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	}
 
 	for _, tool := range toolsResult.Tools {
-		if tool.Name != "submit" {
-			continue
+		switch tool.Name {
+		case "submit":
+			var schema struct {
+				Properties struct {
+					Tool struct {
+						Enum []string `json:"enum"`
+					} `json:"tool"`
+				} `json:"properties"`
+			}
+			if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+				t.Fatalf("unmarshal submit input schema: %v", err)
+			}
+			if len(schema.Properties.Tool.Enum) != 0 {
+				t.Fatalf("submit tool enum = %v, want unconstrained", schema.Properties.Tool.Enum)
+			}
+		case "await":
+			var schema struct {
+				Properties map[string]json.RawMessage `json:"properties"`
+				Required   []string                   `json:"required"`
+			}
+			if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+				t.Fatalf("unmarshal await input schema: %v", err)
+			}
+			if _, ok := schema.Properties["input_responses"]; !ok {
+				t.Fatal("await schema missing input_responses")
+			}
+			if !slices.Equal(schema.Required, []string{"submission_id"}) {
+				t.Fatalf("await required = %v", schema.Required)
+			}
 		}
-		var schema struct {
-			Properties struct {
-				Tool struct {
-					Enum []string `json:"enum"`
-				} `json:"tool"`
-			} `json:"properties"`
-		}
-		if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
-			t.Fatalf("unmarshal submit input schema: %v", err)
-		}
-		if want := []string{"message"}; !slices.Equal(schema.Properties.Tool.Enum, want) {
-			t.Fatalf("submit tool enum = %v, want %v", schema.Properties.Tool.Enum, want)
-		}
+	}
+	if !strings.Contains(string(got.submit), "authentication_required") {
+		t.Fatalf("submit = %s, want authentication_required from the wired handler", got.submit)
+	}
+	if strings.Contains(string(got.submit), "not_implemented") || strings.Contains(stderrBuf.String(), "secret-argument-marker") {
+		t.Fatalf("submit leaked implementation state or arguments: result %s stderr %q", got.submit, stderrBuf.String())
+	}
+	if !strings.Contains(string(got.await), "submission_not_found") {
+		t.Fatalf("await = %s, want submission_not_found", got.await)
 	}
 }

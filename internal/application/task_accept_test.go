@@ -16,7 +16,6 @@ import (
 	"github.com/kritama/tama-link/internal/profile"
 	"github.com/kritama/tama-link/internal/store"
 	"github.com/kritama/tama-link/internal/upstream"
-	"github.com/kritama/tama-link/internal/worker"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -148,7 +147,7 @@ func awaitFromReopenedStore(t *testing.T, dbPath, keyPath, endpoint, subID strin
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	p, err := newFixtureProfile(endpoint)
+	p, err := newFixtureProfile(endpoint, profile.KindApp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,17 +156,12 @@ func awaitFromReopenedStore(t *testing.T, dbPath, keyPath, endpoint, subID strin
 		upstreamCalls++
 		return nil, errUpstreamCalled
 	}
-	workerService, err := worker.NewService(st, NewExecutor(connect), worker.Config{Owner: "reopen", LeaseTTL: time.Minute})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(workerService.Stop)
 	tasks, err := NewTaskService(st, connect, TaskConfig{Owner: "reopen-tasks", LeaseTTL: time.Minute, SweepInterval: time.Hour})
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(tasks.Stop)
-	svc, err := New(Config{Profile: p, Store: st, Connect: connect, Worker: workerService, Tasks: tasks, AdapterVersion: "test"})
+	svc, err := New(Config{Profile: p, Store: st, Connect: connect, Tasks: tasks, AdapterVersion: "test"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,19 +270,18 @@ func taskProcessScenario() int {
 		return 2
 	}
 	defer func() { _ = st.Close() }()
-	p, err := newFixtureProfile(endpoint)
+	p, err := newFixtureProfile(endpoint, profile.KindApp)
 	if err != nil {
 		return 3
 	}
 	if binding == "unproven" {
 		stripReplayBinding(p)
 	}
-	svc, tasks, workerService, err := scenarioService(st, p, endpoint)
+	svc, tasks, err := scenarioService(st, p, endpoint)
 	if err != nil {
 		return 4
 	}
 	defer tasks.Stop()
-	defer workerService.Stop()
 	_ = tasks.Start(context.Background())
 	switch phase {
 	case "a":
@@ -361,7 +354,7 @@ func scenarioPhaseB(st *store.Store, tasks *TaskService, mode string) int {
 	return 9
 }
 
-func scenarioService(st *store.Store, p *profile.Profile, endpoint string) (*Service, *TaskService, *worker.Service, error) {
+func scenarioService(st *store.Store, p *profile.Profile, endpoint string) (*Service, *TaskService, error) {
 	up, err := upstream.New(upstream.Config{
 		Endpoint:           endpoint,
 		ClientInfo:         mcp.Implementation{Name: "tama-link", Version: "test"},
@@ -371,38 +364,29 @@ func scenarioService(st *store.Store, p *profile.Profile, endpoint string) (*Ser
 		HTTPClient:         &http.Client{},
 	})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	adapter, err := tama2026.New(tama2026.Config{Profile: *p, Upstream: up, AdapterVersion: "test"})
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	connect := MemoConnect(func(ctx context.Context) (*tama2026.Connection, error) { return adapter.Connect(ctx) })
-	workerService, err := worker.NewService(st, NewExecutor(connect), worker.Config{
-		Owner:    "proc-" + strconv.Itoa(os.Getpid()),
-		LeaseTTL: 30 * time.Second,
-	})
-	if err != nil {
-		return nil, nil, nil, err
-	}
 	tasks, err := NewTaskService(st, connect, TaskConfig{
 		Owner:         "proc-tasks-" + strconv.Itoa(os.Getpid()),
 		LeaseTTL:      30 * time.Second,
 		SweepInterval: time.Hour,
 	})
 	if err != nil {
-		workerService.Stop()
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
 	svc, err := New(Config{
-		Profile: p, Store: st, Connect: connect, Worker: workerService, Tasks: tasks, AdapterVersion: "test",
+		Profile: p, Store: st, Connect: connect, Tasks: tasks, AdapterVersion: "test",
 	})
 	if err != nil {
 		tasks.Stop()
-		workerService.Stop()
-		return nil, nil, nil, err
+		return nil, nil, err
 	}
-	return svc, tasks, workerService, nil
+	return svc, tasks, nil
 }
 
 func stripReplayBinding(p *profile.Profile) {

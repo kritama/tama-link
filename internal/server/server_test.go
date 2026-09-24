@@ -48,7 +48,20 @@ func testProfile() *profile.Profile {
 
 func connectTestServer(t *testing.T, p *profile.Profile) *mcp.ClientSession {
 	t.Helper()
-	return connectServer(t, New(p, "test", nil))
+	srv, err := New(p, "test", &fakeApp{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return connectServer(t, srv)
+}
+
+func mustServer(t *testing.T, p *profile.Profile, app App) *mcp.Server {
+	t.Helper()
+	srv, err := New(p, "test", app)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return srv
 }
 
 func connectServer(t *testing.T, srv *mcp.Server) *mcp.ClientSession {
@@ -105,6 +118,14 @@ func TestSubmitPreservesJSONNumbersAcrossMCPBoundary(t *testing.T) {
 	}
 	if got, want := string(captured), `{"identifier":9007199254740993}`; got != want {
 		t.Fatalf("captured arguments = %s, want %s", got, want)
+	}
+}
+
+func TestServerRequiresApplication(t *testing.T) {
+	t.Parallel()
+
+	if _, err := New(testProfile(), "test", nil); err == nil {
+		t.Fatal("nil application constructed a server")
 	}
 }
 
@@ -177,7 +198,7 @@ func TestServerRoutesRemovedToolRetriesToApp(t *testing.T) {
 	t.Parallel()
 
 	app := &fakeApp{}
-	clientSession := connectServer(t, New(testProfile(), "test", app))
+	clientSession := connectServer(t, mustServer(t, testProfile(), app))
 
 	// "removed" is not in the pinned catalog. The transport must not
 	// reject it: the retry carries an accepted request's idempotency key.
@@ -268,7 +289,7 @@ func TestServerAppSubmitSuccessAndError(t *testing.T) {
 	t.Parallel()
 
 	app := &fakeApp{}
-	clientSession := connectServer(t, New(testProfile(), "test", app))
+	clientSession := connectServer(t, mustServer(t, testProfile(), app))
 
 	// Success path renders the structured output.
 	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{
@@ -291,7 +312,7 @@ func TestServerAppSubmitSuccessAndError(t *testing.T) {
 	failed := &fakeApp{}
 	ce := contract.NewError(contract.CodeInvalidRequest, "bad")
 	failed.submitErr = &ce
-	failedSession := connectServer(t, New(testProfile(), "test", failed))
+	failedSession := connectServer(t, mustServer(t, testProfile(), failed))
 	failResult, err := failedSession.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      contract.ToolSubmit,
 		Arguments: map[string]any{"tool": "message", "client_request_id": "r-2", "arguments": map[string]any{"message": "hi"}},
@@ -312,7 +333,7 @@ func TestServerAppSubmitSuccessAndError(t *testing.T) {
 func TestServerAppAwait(t *testing.T) {
 	t.Parallel()
 
-	clientSession := connectServer(t, New(testProfile(), "test", &fakeApp{}))
+	clientSession := connectServer(t, mustServer(t, testProfile(), &fakeApp{}))
 	result, err := clientSession.CallTool(context.Background(), &mcp.CallToolParams{
 		Name:      contract.ToolAwait,
 		Arguments: map[string]any{"submission_id": "sub-1", "timeout_ms": 0},

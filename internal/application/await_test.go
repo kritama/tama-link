@@ -289,6 +289,9 @@ func TestAwaitRejectsCursorBeyondSequence(t *testing.T) {
 func queuedSubmission(t *testing.T, f *fakeTama) (*Service, *store.Store, string) {
 	t.Helper()
 	cfg := fixtureConfigFor(t, f, limits.Default())
+	if cfg.Worker != nil {
+		cfg.Worker.Stop()
+	}
 	svc, err := New(cfg)
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -304,11 +307,15 @@ func queuedSubmission(t *testing.T, f *fakeTama) (*Service, *store.Store, string
 func TestAwaitFinalReadDeadlineFallsBackToSnapshot(t *testing.T) {
 	t.Parallel()
 
-	setFinalReadTimeout(time.Nanosecond)
-	t.Cleanup(func() { setFinalReadTimeout(0) })
-
 	f := newFakeTama(t)
 	svc, st, id := queuedSubmission(t, f)
+	svc.finalReadTimeout = 20 * time.Millisecond
+	svc.finalReadHold = func(ctx context.Context) {
+		// A concurrent worker can advance the row while this read is in
+		// flight. Waiting out the deadline must keep that newer row unread.
+		_, _ = st.Transition(context.Background(), id, contract.StatusQueued, store.TransitionDetail{})
+		<-ctx.Done()
+	}
 	sub, err := st.GetSubmission(context.Background(), id)
 	if err != nil {
 		t.Fatalf("GetSubmission: %v", err)

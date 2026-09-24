@@ -277,6 +277,56 @@ func TestLoadRejectsMalformedDocuments(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsMixedAppAndSystemOperations(t *testing.T) {
+	t.Parallel()
+
+	p := validProfile()
+	system := testDescriptor("status")
+	system.Strategy = catalog.StrategyLocalReplayable
+	system.TaskSupport = catalog.TaskSupportForbidden
+	digest, err := system.ComputeDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	system.Digest = digest
+	p.Operations = append(p.Operations, system)
+	if err := p.Validate(p.Name); err == nil || !strings.Contains(err.Error(), "mixes app and system") {
+		t.Fatalf("mixed profile error = %v", err)
+	}
+}
+
+func TestKindTreatsUnsupportedAsNeutral(t *testing.T) {
+	t.Parallel()
+
+	p := validProfile()
+	unsupported := testDescriptor("future")
+	unsupported.Strategy = catalog.StrategyUnsupported
+	unsupported.TaskSupport = catalog.TaskSupportForbidden
+	digest, err := unsupported.ComputeDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsupported.Digest = digest
+	p.Operations = append(p.Operations, unsupported)
+	kind, err := p.Kind()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != KindApp {
+		t.Fatalf("kind = %s, want app", kind)
+	}
+}
+
+func TestValidateRequiresEndpointForKind(t *testing.T) {
+	t.Parallel()
+
+	p := validProfile()
+	p.Endpoint = "https://tama.example/mcp/system"
+	if err := p.Validate(p.Name); err == nil || !strings.Contains(err.Error(), "/mcp/app") {
+		t.Fatalf("app endpoint error = %v", err)
+	}
+}
+
 func TestValidate(t *testing.T) {
 	t.Parallel()
 

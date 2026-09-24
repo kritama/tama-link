@@ -26,9 +26,10 @@ type Config struct {
 	// upstream request goes through that connection. Required.
 	Connect func(ctx context.Context) (*tama2026.Connection, error)
 	// Worker executes local_replayable submissions under the durable lease.
-	// Required.
+	// Required for a system profile and forbidden for an app profile.
 	Worker *worker.Service
-	// Tasks drives owner-bound App submissions. Required.
+	// Tasks drives owner-bound App submissions. Required for an app profile
+	// and forbidden for a system profile.
 	Tasks *TaskService
 	// AdapterVersion identifies the adapter build recorded on accepted
 	// submissions. Required.
@@ -57,6 +58,14 @@ type Service struct {
 	now              func() time.Time
 	// inputDeliveryTTL is renewed across tasks/update. Tests shorten it.
 	inputDeliveryTTL time.Duration
+	// finalReadTimeout bounds the independent read after a wait ends and
+	// the mark written after a successful tasks/update. Tests shorten it
+	// on this service only. Zero uses the default. A package-level
+	// override would change every parallel test.
+	finalReadTimeout time.Duration
+	// finalReadHold runs after that deadline context is created and before
+	// the read. Tests use it to outlive the deadline. Nil in production.
+	finalReadHold func(context.Context)
 }
 
 // New validates cfg and builds a Service.
@@ -70,11 +79,27 @@ func New(cfg Config) (*Service, error) {
 	if cfg.Connect == nil {
 		return nil, errors.New("connect function is required")
 	}
-	if cfg.Worker == nil {
-		return nil, errors.New("worker is required")
+	kind, err := cfg.Profile.Kind()
+	if err != nil {
+		return nil, err
 	}
-	if cfg.Tasks == nil {
-		return nil, errors.New("task service is required")
+	switch kind {
+	case profile.KindApp:
+		if cfg.Tasks == nil {
+			return nil, errors.New("task service is required")
+		}
+		if cfg.Worker != nil {
+			return nil, errors.New("app profile must not start the system worker")
+		}
+	case profile.KindSystem:
+		if cfg.Worker == nil {
+			return nil, errors.New("worker is required")
+		}
+		if cfg.Tasks != nil {
+			return nil, errors.New("system profile must not start the app task service")
+		}
+	default:
+		return nil, fmt.Errorf("unknown profile kind %q", kind)
 	}
 	if cfg.AdapterVersion == "" {
 		return nil, errors.New("adapter version is required")

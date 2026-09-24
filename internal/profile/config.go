@@ -158,6 +158,9 @@ func (p *Profile) Validate(expected Name) error {
 		}
 		seen[op.Name] = true
 	}
+	if _, err := p.Kind(); err != nil {
+		return err
+	}
 	if p.Digest != "" {
 		if err := p.CheckDigest(); err != nil {
 			return err
