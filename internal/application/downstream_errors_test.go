@@ -102,3 +102,25 @@ func TestDownstreamProfileAdvertisesOnlyItsOperations(t *testing.T) {
 		t.Fatalf("app tool on system profile = %v", rejected.StructuredContent)
 	}
 }
+
+func TestDownstreamAppProfileRejectsSystemOperations(t *testing.T) {
+	t.Parallel()
+
+	session := connectTaskDownstream(t, newTaskUpstream(t))
+	listed, err := session.ListTools(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range listed.Tools {
+		if tool.Name == contract.ToolSubmit && strings.Contains(tool.Description, "status") {
+			t.Fatalf("app profile advertised the system operation: %q", tool.Description)
+		}
+		if tool.Name == contract.ToolSubmit && !strings.Contains(tool.Description, "message") {
+			t.Fatalf("app profile omitted its operation: %q", tool.Description)
+		}
+	}
+	rejected := callDownstream(t, session, contract.ToolSubmit, systemSubmitBody("sys-on-app", "unit"))
+	if !rejected.IsError || downstreamCode(t, rejected) != contract.CodeOperationNotAllowed {
+		t.Fatalf("system tool on app profile = %v", rejected.StructuredContent)
+	}
+}

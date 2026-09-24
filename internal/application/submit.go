@@ -157,9 +157,18 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 		// stream and dispatch: appending an accepted event after the row
 		// advanced would corrupt the progress sequence, and re-offering an
 		// already running work is at best noise.
-		if d.Strategy == catalog.StrategyUpstreamTask {
+		switch d.Strategy {
+		case catalog.StrategyUpstreamTask:
+			if s.tasks == nil {
+				return contract.SubmitOutput{}, failed(contract.CodeOperationNotAllowed,
+					"Operation %q is not owned by the selected profile.", d.Name)
+			}
 			s.tasks.Dispatch(sub.ID)
-		} else {
+		default:
+			if s.worker == nil {
+				return contract.SubmitOutput{}, failed(contract.CodeOperationNotAllowed,
+					"Operation %q is not owned by the selected profile.", d.Name)
+			}
 			s.worker.Dispatch(sub.ID)
 		}
 	}

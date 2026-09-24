@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -181,23 +182,6 @@ func TestDownstreamAwaitCursorTimeoutCancellationAndErrors(t *testing.T) {
 		}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	started := time.Now()
-	result, err := session.CallTool(ctx, &mcp.CallToolParams{
-		Name:      contract.ToolAwait,
-		Arguments: json.RawMessage(awaitBody(submitted.SubmissionID, 5000, "", "")),
-	})
-	if time.Since(started) > 2*time.Second {
-		t.Fatalf("cancelled await took %s", time.Since(started))
-	}
-	if err == nil && result != nil && result.IsError {
-		t.Fatalf("cancelled await became a tool error: %v", result.StructuredContent)
-	}
-	if up.cancelCount() != 0 {
-		t.Fatalf("cancellation called tasks/cancel %d times", up.cancelCount())
-	}
-
 	missing := callDownstream(t, session, contract.ToolAwait, `{"timeout_ms":1}`)
 	if !missing.IsError || downstreamCode(t, missing) != contract.CodeInvalidRequest {
 		t.Fatalf("missing submission_id = %v", missing.StructuredContent)
@@ -210,6 +194,83 @@ func TestDownstreamAwaitCursorTimeoutCancellationAndErrors(t *testing.T) {
 	if !badCursor.IsError || downstreamCode(t, badCursor) != contract.CodeInvalidRequest {
 		t.Fatalf("bad cursor = %v", badCursor.StructuredContent)
 	}
+}
+
+func TestDownstreamCancellationStopsActiveWait(t *testing.T) {
+	t.Parallel()
+
+	up := newTaskUpstream(t)
+	up.onGet = func(int) (int, string) {
+		return http.StatusOK, taskState("working", "2026-09-11T10:00:02Z", "")
+	}
+	svc, st := taskApp(t, up)
+	entered := make(chan struct{})
+	finished := make(chan struct{})
+	session := connectService(t, &awaitSignal{Service: svc, entered: entered, finished: finished})
+	accepted := callDownstream(t, session, contract.ToolSubmit, `{"tool":"message","client_request_id":"cancel-1","arguments":{"message":"hello"}}`)
+	var submitted contract.SubmitOutput
+	decodeDownstream(t, accepted, &submitted)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if awaitDownstream(t, session, submitted.SubmissionID, 20, "").Status == contract.StatusRunning {
+			break
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := session.CallTool(ctx, &mcp.CallToolParams{
+			Name:      contract.ToolAwait,
+			Arguments: json.RawMessage(awaitBody(submitted.SubmissionID, 20000, "", "")),
+		})
+		done <- err
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("await handler did not start")
+	}
+	cancel()
+	select {
+	case <-finished:
+	case <-time.After(2 * time.Second):
+		t.Fatal("server await did not return after cancellation")
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("client call did not return after the server await finished")
+	}
+	sub, err := st.GetSubmission(context.Background(), submitted.SubmissionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sub.Status != contract.StatusRunning {
+		t.Fatalf("status after cancellation = %s", sub.Status)
+	}
+	if up.cancelCount() != 0 {
+		t.Fatalf("cancellation called tasks/cancel %d times", up.cancelCount())
+	}
+}
+
+type awaitSignal struct {
+	*Service
+	entered  chan struct{}
+	finished chan struct{}
+	once     sync.Once
+}
+
+func (a *awaitSignal) Await(ctx context.Context, in contract.AwaitInput) (contract.AwaitOutput, *contract.Error) {
+	long := in.TimeoutMS >= 20000
+	if long {
+		a.once.Do(func() { close(a.entered) })
+	}
+	out, err := a.Service.Await(ctx, in)
+	if long {
+		close(a.finished)
+	}
+	return out, err
 }
 
 func connectDownstream(t *testing.T, f *fakeTama) *mcp.ClientSession {
@@ -226,7 +287,24 @@ func connectTaskDownstream(t *testing.T, up *taskUpstream) *mcp.ClientSession {
 
 func connectApp(t *testing.T, svc *Service) *mcp.ClientSession {
 	t.Helper()
-	srv := server.New(svc.profile, "test", svc)
+	return connectService(t, svc)
+}
+
+func connectService(t *testing.T, app server.App) *mcp.ClientSession {
+	t.Helper()
+	svc, ok := app.(*Service)
+	if !ok {
+		if signaled, ok := app.(*awaitSignal); ok {
+			svc = signaled.Service
+		}
+	}
+	if svc == nil {
+		t.Fatal("downstream server requires a service profile")
+	}
+	srv, err := server.New(svc.profile, "test", app)
+	if err != nil {
+		t.Fatal(err)
+	}
 	serverTransport, clientTransport := mcp.NewInMemoryTransports()
 	serverSession, err := srv.Connect(context.Background(), serverTransport, nil)
 	if err != nil {

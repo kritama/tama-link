@@ -99,7 +99,8 @@ func TestSubmitTaskToolNotEnabled(t *testing.T) {
 	t.Parallel()
 
 	f := newFakeTama(t)
-	svc, st, _ := fixtureApp(t, f)
+	cfg := appFixtureConfigWith(t, f, limits.Default(), nil)
+	svc, st, _ := appFromConfig(t, cfg)
 
 	out, appErr := svc.Submit(context.Background(), contract.SubmitInput{
 		Tool:            "message",

@@ -52,7 +52,10 @@ func TestServeStackSpeaksStdioWithoutPlatformKeyring(t *testing.T) {
 		_ = serverWriter.Close()
 	})
 
-	srv := server.New(p, version.Version, app)
+	srv, err := server.New(p, version.Version, app)
+	if err != nil {
+		t.Fatal(err)
+	}
 	runErr := make(chan error, 1)
 	go func() {
 		runErr <- srv.Run(ctx, &mcp.IOTransport{Reader: serverReader, Writer: serverWriter})

@@ -28,7 +28,7 @@ func TestTerminalEvidenceSurvivesReopenAndStaysHidden(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := dir + "/state.db"
 	keys := newMemKeys()
-	cfg := fixtureConfigAt(t, &fakeTama{ts: up.ts}, limits.Default(), nil, nil, dbPath, keys)
+	cfg := appFixtureConfigAt(t, &fakeTama{ts: up.ts}, limits.Default(), nil, nil, dbPath, keys)
 	svc, st, _ := appFromConfig(t, cfg)
 	out, appErr := svc.Submit(context.Background(), messageInput("evidence"))
 	if appErr != nil {
@@ -82,7 +82,7 @@ func TestCancellationEvidenceSurvivesReopen(t *testing.T) {
 	dir := t.TempDir()
 	dbPath := dir + "/state.db"
 	keys := newMemKeys()
-	cfg := fixtureConfigAt(t, &fakeTama{ts: up.ts}, limits.Default(), nil, nil, dbPath, keys)
+	cfg := appFixtureConfigAt(t, &fakeTama{ts: up.ts}, limits.Default(), nil, nil, dbPath, keys)
 	svc, st, _ := appFromConfig(t, cfg)
 	out, appErr := svc.Submit(context.Background(), messageInput("cancel-evidence"))
 	if appErr != nil {

@@ -3,6 +3,7 @@ package server
 
 import (
 	"context"
+	"errors"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
@@ -21,8 +22,6 @@ const (
 	// workflowInstructions is Tama Link's own workflow and local safety
 	// constraints, always the first source of server instructions.
 	workflowInstructions = "Use submit to start one durable Tama operation, then call await with the returned submission_id until terminal is true. Submit each operation once and reuse client_request_id when retrying so retries stay idempotent."
-
-	notImplementedMessage = "Tama Link's upstream adapter is not implemented in the repository foundation"
 )
 
 // App is the application service behind the two downstream tools. Handlers
@@ -34,36 +33,32 @@ type App interface {
 }
 
 // New creates a client-facing MCP server for one validated profile with
-// exactly the submit and await tools. When app is nil the tools fail with
-// not_implemented, which is the repository-foundation behavior.
-func New(p *profile.Profile, buildVersion string, app App) *mcp.Server {
+// exactly the submit and await tools. The application is required: a server
+// cannot advertise those tools without a service that implements them.
+func New(p *profile.Profile, buildVersion string, app App) (*mcp.Server, error) {
+	if p == nil {
+		return nil, errors.New("profile is required")
+	}
+	if app == nil {
+		return nil, errors.New("application is required")
+	}
 	ops := p.Catalog().Callable()
 
 	instance := mcp.NewServer(
 		&mcp.Implementation{Name: serverName, Version: buildVersion},
 		&mcp.ServerOptions{Instructions: composeInstructions(p.Instructions)},
 	)
-
-	var submitOp submitOperation = submit
-	var awaitOp awaitOperation = await
-	if app != nil {
-		submitOp = appSubmitOperation(app)
-		awaitOp = appAwaitOperation(app)
-	}
-
 	instance.AddTool(&mcp.Tool{
 		Name:        contract.ToolSubmit,
 		Description: composeSubmitDescription(ops),
 		InputSchema: submitInputSchema(),
-	}, submitHandler(submitOp))
-
+	}, submitHandler(appSubmitOperation(app)))
 	instance.AddTool(&mcp.Tool{
 		Name:        contract.ToolAwait,
 		Description: awaitDescription,
 		InputSchema: awaitInputSchema(),
-	}, awaitHandler(awaitOp))
-
-	return instance
+	}, awaitHandler(appAwaitOperation(app)))
+	return instance, nil
 }
 
 // awaitInputSchema describes the stable await fields. input_responses is a
@@ -169,14 +164,4 @@ func submitInputSchema() map[string]any {
 		},
 		"required": []string{"tool"},
 	}
-}
-
-func submit(_ context.Context, _ *mcp.CallToolRequest, _ contract.SubmitInput) (*mcp.CallToolResult, any, error) {
-	notImplemented := contract.NewError(contract.CodeNotImplemented, notImplementedMessage)
-	return &mcp.CallToolResult{IsError: true}, contract.ErrorOutput{Error: &notImplemented}, nil
-}
-
-func await(_ context.Context, _ *mcp.CallToolRequest, _ contract.AwaitInput) (*mcp.CallToolResult, any, error) {
-	notImplemented := contract.NewError(contract.CodeNotImplemented, notImplementedMessage)
-	return &mcp.CallToolResult{IsError: true}, contract.ErrorOutput{Error: &notImplemented}, nil
 }

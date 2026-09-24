@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"sync"
 	"time"
@@ -75,14 +76,18 @@ func runServe(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 		return 2
 	}
 
-	app, cleanup, err := buildApp(ctx, p, cfg.configDir, credential.New)
+	app, cleanup, err := buildApp(ctx, p, cfg.configDir, openServeCredentials)
 	if err != nil {
 		writef(stderr, "tama-link: %v\n", err)
 		return 2
 	}
 	defer cleanup()
 
-	srv := server.New(p, version.Version, app)
+	srv, err := server.New(p, version.Version, app)
+	if err != nil {
+		writef(stderr, "tama-link: %v\n", err)
+		return 2
+	}
 	if err := srv.Run(ctx, &mcp.StdioTransport{}); err != nil {
 		writef(stderr, "tama-link: MCP server failed: %v\n", err)
 		return 1
@@ -149,21 +154,9 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 			Version: version.Version,
 		},
 		ClientCapabilities: []byte(`{"extensions":{"io.modelcontextprotocol/tasks":{}}}`),
-		TokenProvider: func(ctx context.Context) (string, error) {
-			tok, err := oauthClient.Token(ctx)
-			if err != nil {
-				// Refresh-lease contention is transient: the credential is
-				// valid and the winning process is refreshing it. Report
-				// contention so the failure defers the work instead of
-				// recording an authentication rejection.
-				if errors.Is(err, oauth.ErrLeaseContention) {
-					return "", fmt.Errorf("%w: %w", upstream.ErrTokenContended, err)
-				}
-				return "", err
-			}
-			return tok, nil
-		},
-		MaxResponseBytes: int64(limits.ResponseBytes),
+		TokenProvider:      serveToken(oauthClient),
+		MaxResponseBytes:   int64(limits.ResponseBytes),
+		HTTPClient:         serveHTTPClient(),
 	})
 	if err != nil {
 		_ = st.Close()
@@ -184,49 +177,66 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 		return adapter.Connect(ctx)
 	}
 	connect = application.MemoConnect(connect)
-	executor := application.NewExecutor(connect)
-	workerService, err := worker.NewService(st, executor, worker.Config{
-		Owner:    fmt.Sprintf("tama-link/%d", os.Getpid()),
-		LeaseTTL: workerLeaseTTL,
-	})
+	kind, err := p.Kind()
 	if err != nil {
 		_ = st.Close()
-		return nil, nil, fmt.Errorf("configure worker: %w", err)
+		return nil, nil, err
 	}
-	taskService, err := application.NewTaskService(st, connect, application.TaskConfig{
-		Owner:       fmt.Sprintf("tama-link/%d", os.Getpid()),
-		LeaseTTL:    workerLeaseTTL,
-		Credentials: oauthClient,
-	})
-	if err != nil {
-		workerService.Stop()
+	var workerService *worker.Service
+	var taskService *application.TaskService
+	switch kind {
+	case profile.KindApp:
+		taskService, err = application.NewTaskService(st, connect, application.TaskConfig{
+			Owner:       fmt.Sprintf("tama-link/%d", os.Getpid()),
+			LeaseTTL:    workerLeaseTTL,
+			Credentials: oauthClient,
+		})
+		if err != nil {
+			_ = st.Close()
+			return nil, nil, fmt.Errorf("configure task runner: %w", err)
+		}
+	case profile.KindSystem:
+		workerService, err = worker.NewService(st, application.NewExecutor(connect), worker.Config{
+			Owner:    fmt.Sprintf("tama-link/%d", os.Getpid()),
+			LeaseTTL: workerLeaseTTL,
+		})
+		if err != nil {
+			_ = st.Close()
+			return nil, nil, fmt.Errorf("configure worker: %w", err)
+		}
+	default:
 		_ = st.Close()
-		return nil, nil, fmt.Errorf("configure task runner: %w", err)
+		return nil, nil, fmt.Errorf("unknown profile kind %q", kind)
 	}
 
 	app, err := application.New(application.Config{
-		Profile:        p,
-		Store:          st,
-		Connect:        connect,
-		Worker:         workerService,
-		Tasks:          taskService,
-		AdapterVersion: version.Version,
-		CredentialsReady: func(ctx context.Context) (bool, error) {
-			return oauthClient.HasCredentials(ctx)
-		},
+		Profile:          p,
+		Store:            st,
+		Connect:          connect,
+		Worker:           workerService,
+		Tasks:            taskService,
+		AdapterVersion:   version.Version,
+		CredentialsReady: serveCredentialsReady(oauthClient),
 	})
 	if err != nil {
-		taskService.Stop()
-		workerService.Stop()
+		if taskService != nil {
+			taskService.Stop()
+		}
+		if workerService != nil {
+			workerService.Stop()
+		}
 		_ = st.Close()
 		return nil, nil, fmt.Errorf("configure application: %w", err)
 	}
 
-	// Startup recovery offers every pending replayable submission to the
-	// bounded worker pool and returns immediately: a large backlog runs in
-	// the background and must not delay the MCP server accepting clients.
-	_ = workerService.Start(ctx)
-	_ = taskService.Start(ctx)
+	// Startup recovery offers pending work for this profile's execution
+	// model and returns immediately. The other model is not started.
+	if workerService != nil {
+		_ = workerService.Start(ctx)
+	}
+	if taskService != nil {
+		_ = taskService.Start(ctx)
+	}
 
 	// Retention sweeps run for the process lifetime under an owned,
 	// cancellable context: cleanup cancels before the store closes and
@@ -240,14 +250,60 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 	}()
 
 	cleanup := func() {
-		taskService.Stop()
-		workerService.Stop()
+		if taskService != nil {
+			taskService.Stop()
+		}
+		if workerService != nil {
+			workerService.Stop()
+		}
 		stopGC()
 		gcWg.Wait()
 		_ = st.Close()
 	}
 	return app, cleanup, nil
 }
+
+// openServeCredentials resolves the platform credential backend. A
+// fixture-tagged test binary may replace it; production builds keep this.
+var openServeCredentials = credential.New
+
+func serveToken(client *oauth.Client) func(context.Context) (string, error) {
+	if tokenFromFixture != nil {
+		return tokenFromFixture
+	}
+	return func(ctx context.Context) (string, error) {
+		tok, err := client.Token(ctx)
+		if err != nil {
+			if errors.Is(err, oauth.ErrLeaseContention) {
+				return "", fmt.Errorf("%w: %w", upstream.ErrTokenContended, err)
+			}
+			return "", err
+		}
+		return tok, nil
+	}
+}
+
+func serveCredentialsReady(client *oauth.Client) func(context.Context) (bool, error) {
+	if credentialsReadyFromFixture != nil {
+		return credentialsReadyFromFixture
+	}
+	return client.HasCredentials
+}
+
+func serveHTTPClient() *http.Client {
+	if httpClientFromFixture != nil {
+		return httpClientFromFixture()
+	}
+	return nil
+}
+
+// Fixture hooks stay nil in production builds. The fixture-tagged file sets
+// them only when the acceptance environment is present.
+var (
+	tokenFromFixture            func(context.Context) (string, error)
+	credentialsReadyFromFixture func(context.Context) (bool, error)
+	httpClientFromFixture       func() *http.Client
+)
 
 func parseServeFlags(args []string, stderr io.Writer) (serveConfig, bool) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)

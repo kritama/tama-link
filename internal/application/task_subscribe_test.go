@@ -148,7 +148,7 @@ func TestTaskSubscriptionSnapshotsAndFallback(t *testing.T) {
 		}
 		fire := make(chan time.Time, 1)
 		session := &fakeSession{expiry: time.Now().Add(time.Hour)}
-		cfg := fixtureConfigTuned(t, &fakeTama{ts: up.ts}, limits.Default(), nil, func(taskCfg *TaskConfig) {
+		cfg := appFixtureConfigTuned(t, &fakeTama{ts: up.ts}, limits.Default(), nil, func(taskCfg *TaskConfig) {
 			taskCfg.Credentials = session
 			taskCfg.Now = time.Now
 			taskCfg.After = func(time.Duration) <-chan time.Time { return fire }

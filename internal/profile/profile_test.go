@@ -277,6 +277,34 @@ func TestLoadRejectsMalformedDocuments(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsMixedAppAndSystemOperations(t *testing.T) {
+	t.Parallel()
+
+	p := validProfile()
+	system := testDescriptor("status")
+	system.Strategy = catalog.StrategyLocalReplayable
+	system.TaskSupport = catalog.TaskSupportForbidden
+	digest, err := system.ComputeDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	system.Digest = digest
+	p.Operations = append(p.Operations, system)
+	if err := p.Validate(p.Name); err == nil || !strings.Contains(err.Error(), "mixes app and system") {
+		t.Fatalf("mixed profile error = %v", err)
+	}
+}
+
+func TestValidateRequiresEndpointForKind(t *testing.T) {
+	t.Parallel()
+
+	p := validProfile()
+	p.Endpoint = "https://tama.example/mcp/system"
+	if err := p.Validate(p.Name); err == nil || !strings.Contains(err.Error(), "/mcp/app") {
+		t.Fatalf("app endpoint error = %v", err)
+	}
+}
+
 func TestValidate(t *testing.T) {
 	t.Parallel()
 

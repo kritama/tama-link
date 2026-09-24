@@ -658,14 +658,14 @@ func taskApp(t *testing.T, up *taskUpstream) (*Service, *store.Store) {
 
 func taskAppLimits(t *testing.T, up *taskUpstream, limitsCfg limits.Limits) (*Service, *store.Store) {
 	t.Helper()
-	cfg := fixtureConfigWith(t, &fakeTama{ts: up.ts}, limitsCfg, nil)
+	cfg := appFixtureConfigWith(t, &fakeTama{ts: up.ts}, limitsCfg, nil)
 	svc, st, _ := appFromConfig(t, cfg)
 	return svc, st
 }
 
 func taskAppWithoutReplayBinding(t *testing.T, up *taskUpstream) (*Service, *store.Store) {
 	t.Helper()
-	cfg := fixtureConfigWith(t, &fakeTama{ts: up.ts}, limits.Default(), func(p *profile.Profile) {
+	cfg := appFixtureConfigWith(t, &fakeTama{ts: up.ts}, limits.Default(), func(p *profile.Profile) {
 		for i := range p.Operations {
 			if p.Operations[i].Name != "message" {
 				continue

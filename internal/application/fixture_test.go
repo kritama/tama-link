@@ -170,18 +170,7 @@ func (m *memKeys) CreateStateKey() (string, []byte, error) {
 	return id, key[:], nil
 }
 
-// fixtureProfile builds a profile pinning the fixture server's two tools:
-// status (synchronous, locally replayable) and message (task-backed).
-func fixtureProfile(t *testing.T, endpoint string) *profile.Profile {
-	t.Helper()
-	p, err := newFixtureProfile(endpoint)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return p
-}
-
-func newFixtureProfile(endpoint string) (*profile.Profile, error) {
+func newFixtureProfile(endpoint string, kind profile.Kind) (*profile.Profile, error) {
 	status := catalog.Descriptor{
 		Name:         "status",
 		Description:  "Read status",
@@ -228,16 +217,23 @@ func newFixtureProfile(endpoint string) (*profile.Profile, error) {
 		}
 		d.Digest = digest
 	}
+	base := strings.TrimSuffix(strings.TrimSuffix(endpoint, "/mcp/app"), "/mcp/system")
+	path := "/mcp/system"
+	operations := []catalog.Descriptor{status, guarded, unstable}
+	if kind == profile.KindApp {
+		path = "/mcp/app"
+		operations = []catalog.Descriptor{message}
+	}
 	p := &profile.Profile{
 		Version:      profile.SchemaVersion,
 		Name:         profile.Name("fixture"),
-		Origin:       strings.TrimSuffix(strings.TrimPrefix(endpoint, "http://"), "/mcp/app"),
-		Endpoint:     endpoint,
+		Origin:       strings.TrimPrefix(strings.TrimPrefix(base, "https://"), "http://"),
+		Endpoint:     base + path,
 		Issuer:       "http://issuer.invalid",
 		Instructions: fixtureInstructions,
 		Bounds:       profile.Bounds{ProtocolMin: "2026-07-28", ProtocolMax: "2026-07-28"},
 		State:        profile.StateRefs{Database: "fixture", Credentials: "fixture"},
-		Operations:   []catalog.Descriptor{status, message, guarded, unstable},
+		Operations:   operations,
 	}
 	return p, nil
 }
@@ -276,16 +272,26 @@ func fixtureConfigTuned(
 	tune func(*TaskConfig),
 ) Config {
 	t.Helper()
-	endpoint := f.ts.URL + "/mcp/app"
-	p := fixtureProfile(t, endpoint)
-	if mutate != nil {
-		mutate(p)
-	}
-
-	return fixtureConfigAt(t, f, limitsCfg, mutate, tune, t.TempDir()+"/state.db", newMemKeys())
+	return fixtureConfigKind(t, f, limitsCfg, profile.KindSystem, mutate, tune, t.TempDir()+"/state.db", newMemKeys())
 }
 
-func fixtureConfigAt(
+func appFixtureConfigWith(t *testing.T, f *fakeTama, limitsCfg limits.Limits, mutate func(*profile.Profile)) Config {
+	t.Helper()
+	return fixtureConfigKind(t, f, limitsCfg, profile.KindApp, mutate, nil, t.TempDir()+"/state.db", newMemKeys())
+}
+
+func appFixtureConfigTuned(
+	t *testing.T,
+	f *fakeTama,
+	limitsCfg limits.Limits,
+	mutate func(*profile.Profile),
+	tune func(*TaskConfig),
+) Config {
+	t.Helper()
+	return fixtureConfigKind(t, f, limitsCfg, profile.KindApp, mutate, tune, t.TempDir()+"/state.db", newMemKeys())
+}
+
+func appFixtureConfigAt(
 	t *testing.T,
 	f *fakeTama,
 	limitsCfg limits.Limits,
@@ -295,11 +301,29 @@ func fixtureConfigAt(
 	keys store.KeyProvider,
 ) Config {
 	t.Helper()
-	endpoint := f.ts.URL + "/mcp/app"
-	p := fixtureProfile(t, endpoint)
+	return fixtureConfigKind(t, f, limitsCfg, profile.KindApp, mutate, tune, dbPath, keys)
+}
+
+func fixtureConfigKind(
+	t *testing.T,
+	f *fakeTama,
+	limitsCfg limits.Limits,
+	kind profile.Kind,
+	mutate func(*profile.Profile),
+	tune func(*TaskConfig),
+	dbPath string,
+	keys store.KeyProvider,
+) Config {
+	t.Helper()
+	endpoint := f.ts.URL
+	p, err := newFixtureProfile(endpoint, kind)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if mutate != nil {
 		mutate(p)
 	}
+	endpoint = p.Endpoint
 	st, err := store.Open(context.Background(), dbPath, keys, store.Config{Limits: limitsCfg})
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
@@ -326,36 +350,40 @@ func fixtureConfigAt(
 	}
 	connect := MemoConnect(func(ctx context.Context) (*tama2026.Connection, error) { return adapter.Connect(ctx) })
 
-	workerService, err := worker.NewService(st, NewExecutor(connect), worker.Config{
-		Owner:    "fixture-worker",
-		LeaseTTL: 30 * time.Second,
-	})
-	if err != nil {
-		t.Fatalf("worker.NewService: %v", err)
-	}
-	t.Cleanup(workerService.Stop)
-	taskCfg := TaskConfig{
-		Owner:         "fixture-tasks",
-		LeaseTTL:      30 * time.Second,
-		SweepInterval: 50 * time.Millisecond,
-	}
-	if tune != nil {
-		tune(&taskCfg)
-	}
-	taskService, err := NewTaskService(st, connect, taskCfg)
-	if err != nil {
-		t.Fatalf("task service: %v", err)
-	}
-	t.Cleanup(taskService.Stop)
-
-	return Config{
+	cfg := Config{
 		Profile:        p,
 		Store:          st,
 		Connect:        connect,
-		Worker:         workerService,
-		Tasks:          taskService,
 		AdapterVersion: "test-adapter",
 	}
+	switch kind {
+	case profile.KindApp:
+		taskCfg := TaskConfig{
+			Owner:         "fixture-tasks",
+			LeaseTTL:      30 * time.Second,
+			SweepInterval: 50 * time.Millisecond,
+		}
+		if tune != nil {
+			tune(&taskCfg)
+		}
+		taskService, err := NewTaskService(st, connect, taskCfg)
+		if err != nil {
+			t.Fatalf("task service: %v", err)
+		}
+		t.Cleanup(taskService.Stop)
+		cfg.Tasks = taskService
+	default:
+		workerService, err := worker.NewService(st, NewExecutor(connect), worker.Config{
+			Owner:    "fixture-worker",
+			LeaseTTL: 30 * time.Second,
+		})
+		if err != nil {
+			t.Fatalf("worker.NewService: %v", err)
+		}
+		t.Cleanup(workerService.Stop)
+		cfg.Worker = workerService
+	}
+	return cfg
 }
 
 // appFromConfig builds the Service from a caller-customized fixture Config,
@@ -367,10 +395,14 @@ func appFromConfig(t *testing.T, cfg Config) (*Service, *store.Store, *worker.Se
 		t.Fatalf("application.New: %v", err)
 	}
 	t.Cleanup(func() { _ = cfg.Store.Close() })
-	t.Cleanup(cfg.Worker.Stop)
-	t.Cleanup(cfg.Tasks.Stop)
-	_ = cfg.Worker.Start(context.Background())
-	_ = cfg.Tasks.Start(context.Background())
+	if cfg.Worker != nil {
+		t.Cleanup(cfg.Worker.Stop)
+		_ = cfg.Worker.Start(context.Background())
+	}
+	if cfg.Tasks != nil {
+		t.Cleanup(cfg.Tasks.Stop)
+		_ = cfg.Tasks.Start(context.Background())
+	}
 	return svc, cfg.Store, cfg.Worker
 }
 

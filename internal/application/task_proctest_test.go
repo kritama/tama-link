@@ -13,9 +13,9 @@ import (
 	"github.com/kritama/tama-link/internal/adapter/tama2026"
 	"github.com/kritama/tama-link/internal/contract"
 	"github.com/kritama/tama-link/internal/limits"
+	"github.com/kritama/tama-link/internal/profile"
 	"github.com/kritama/tama-link/internal/store"
 	"github.com/kritama/tama-link/internal/upstream"
-	"github.com/kritama/tama-link/internal/worker"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -33,7 +33,7 @@ func TestInputDeliverySingleWinnerAcrossProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	profile, err := newFixtureProfile(up.ts.URL + "/mcp/app")
+	profile, err := newFixtureProfile(up.ts.URL+"/mcp/app", profile.KindApp)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +117,7 @@ func inputDeliveryScenario() int {
 		return 2
 	}
 	defer func() { _ = st.Close() }()
-	p, err := newFixtureProfile(endpoint)
+	p, err := newFixtureProfile(endpoint, profile.KindApp)
 	if err != nil {
 		return 3
 	}
@@ -137,17 +137,12 @@ func inputDeliveryScenario() int {
 		return 5
 	}
 	connect := MemoConnect(func(ctx context.Context) (*tama2026.Connection, error) { return adapter.Connect(ctx) })
-	workerService, err := worker.NewService(st, NewExecutor(connect), worker.Config{Owner: "proc", LeaseTTL: 30 * time.Second})
-	if err != nil {
-		return 6
-	}
-	defer workerService.Stop()
 	tasks, err := NewTaskService(st, connect, TaskConfig{Owner: "proc-tasks", LeaseTTL: 30 * time.Second})
 	if err != nil {
 		return 7
 	}
 	defer tasks.Stop()
-	svc, err := New(Config{Profile: p, Store: st, Connect: connect, Worker: workerService, Tasks: tasks, AdapterVersion: "test"})
+	svc, err := New(Config{Profile: p, Store: st, Connect: connect, Tasks: tasks, AdapterVersion: "test"})
 	if err != nil {
 		return 8
 	}
