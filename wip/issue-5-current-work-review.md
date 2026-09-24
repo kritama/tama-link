@@ -404,7 +404,6 @@ Verified on 2026-09-24:
 - Tama Link #8 (conformance and live Tama acceptance): open.
 
 Findings 6 and 7 are resolved, so no local Issue #5 acceptance finding remains.
-Delivery still requires committing and pushing the branch, opening a pull
-request, and verifying exact-head CI and review state. Live migrated-Tama
+Pull request #11 is open, and its review threads are resolved. Live migrated-Tama
 acceptance remains an external gate and must not be inferred from fixture,
 static, or local unit-test results.
