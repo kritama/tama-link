@@ -34,9 +34,9 @@ has to classify the fixture's authorization and subset responses.
 
 ```sh
 TAMA_LINK_COMPOSE_FILE=/absolute/path/compose.yml \
-TAMA_LINK_COMPOSE_TAMAMCP_SHA=<sha-or-release> \
-TAMA_LINK_COMPOSE_TAMA_SHA=<sha-or-release> \
-TAMA_LINK_COMPOSE_PROVIDER_SHA=<sha-or-release> \
+TAMA_LINK_COMPOSE_TAMAMCP_SHA=<sha-or-semver-release> \
+TAMA_LINK_COMPOSE_TAMA_SHA=<sha-or-semver-release> \
+TAMA_LINK_COMPOSE_PROVIDER_SHA=<sha-or-semver-release> \
 make compose-accept
 ```
 
@@ -44,6 +44,9 @@ The command always resolves the Compose model with `docker compose config`
 before inspecting it. A raw file read is not resolved configuration, whether
 or not the file uses `include`. If resolution fails, the pin check fails
 closed. It then requires services named `tama`, `tama-mcp`, and `provider`.
+Reported revisions must be Git SHA prefixes of at least seven hexadecimal
+characters or SemVer release identifiers such as `v0.2.0`; moving names and
+arbitrary dotted strings are rejected.
 Each reported revision must be that service's image tag, its image digest, or
 the git ref of a remote build source. A mutable tag such as `:latest` or
 `:stable`, an untagged image, a local build context, a build argument, or a
@@ -81,9 +84,9 @@ them does not make the current command exercise a runtime.
 TAMA_LINK_LIVE=1 \
 TAMA_LINK_LIVE_APP_ENDPOINT=https://tama.app.localhost/mcp/app \
 TAMA_LINK_LIVE_SYSTEM_ENDPOINT=https://tama.app.localhost/mcp/system \
-TAMA_LINK_LIVE_TAMAMCP_SHA=<sha-or-release> \
-TAMA_LINK_LIVE_TAMA_SHA=<sha-or-release> \
-TAMA_LINK_LIVE_PROVIDER_SHA=<sha-or-release> \
+TAMA_LINK_LIVE_TAMAMCP_SHA=<sha-or-semver-release> \
+TAMA_LINK_LIVE_TAMA_SHA=<sha-or-semver-release> \
+TAMA_LINK_LIVE_PROVIDER_SHA=<sha-or-semver-release> \
 make live-accept
 ```
 
@@ -98,7 +101,8 @@ against the migrated runtime. The file is absent until then. A present file
 must validate as live evidence, not as a fixture summary. Required fields:
 
 - `gate`: `live`
-- `tamamcp_sha`, `tama_sha`, `provider_sha`: exact SHAs or release identifiers
+- `tamamcp_sha`, `tama_sha`, `provider_sha`: Git SHA prefixes or SemVer release
+  identifiers
 - `profiles`: includes `app` and `system`
 - `checks`: every item below is `true`
 - `app_restart`: same non-empty `task_id` and `task_id_after_restart`,

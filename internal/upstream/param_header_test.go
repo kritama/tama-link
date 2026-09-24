@@ -1,6 +1,7 @@
 package upstream
 
 import (
+	"context"
 	"net/http"
 	"testing"
 )
@@ -41,5 +42,24 @@ func TestRenderParamHeadersRejectsWrongType(t *testing.T) {
 	}
 	if http.CanonicalHeaderKey("Mcp-Param-Enabled") != "Mcp-Param-Enabled" {
 		t.Fatal("header canonicalization changed")
+	}
+}
+
+func TestCallToolAllowsEmptyParamHeaderValue(t *testing.T) {
+	ts := newTestServer(t, func(rec *recordedRequest) (int, string, string) {
+		return http.StatusOK, "application/json", jsonReply(rec.BodyID, `{"resultType":"complete"}`)
+	})
+	client := newTestClient(t, ts)
+	_, err := client.CallTool(context.Background(), &CallToolParams{
+		Name:         "message",
+		Arguments:    []byte(`{"note":""}`),
+		ParamHeaders: []ParamHeader{{Name: "Note", Path: []string{"note"}, Type: "string"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	values := ts.requests[0].Headers.Values("Mcp-Param-Note")
+	if len(values) != 1 || values[0] != "" {
+		t.Fatalf("Mcp-Param-Note = %#v, want one empty value", values)
 	}
 }

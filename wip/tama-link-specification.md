@@ -1335,7 +1335,9 @@ runner, PubSub, System, App, OAuth-composition, and endpoint migration beginning
 with `upmaru/tama#123`. The migrated endpoint must be verified for stateless
 discovery, standard headers, owner-bound task lookup, input responses,
 subscription recovery, terminal capture through `tasks/get`, and production
-ingress availability.
+ingress availability. Compatibility evidence identifies TamaMCP, Tama, and the
+provider with Git SHA prefixes or SemVer release identifiers; moving names and
+arbitrary dotted strings are not immutable evidence.
 
 Codex, OpenCode, and plain MCP fixtures must prove stable caller-owned
 `client_context.thread_id` behavior. The SQLite, lease, GC, encryption-key, and

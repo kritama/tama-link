@@ -11,21 +11,27 @@ import (
 // are not substitutes.
 const GateLive = "live"
 
-// RequiredChecks are the live observations Issue #8 requires. A missing or
-// false check means the live gate has not passed.
-var RequiredChecks = []string{
-	"oauth",
-	"owner_isolation",
-	"input_update",
-	"notification_delivery",
-	"polling_recovery",
-	"terminal_success",
-	"terminal_failure",
-	"link_restart",
-	"tama_restart",
-	"expired_credentials",
-	"ambiguous_replay",
-	"system_recovery",
+func requiredChecks() [12]string {
+	return [...]string{
+		"oauth",
+		"owner_isolation",
+		"input_update",
+		"notification_delivery",
+		"polling_recovery",
+		"terminal_success",
+		"terminal_failure",
+		"link_restart",
+		"tama_restart",
+		"expired_credentials",
+		"ambiguous_replay",
+		"system_recovery",
+	}
+}
+
+// RequiredChecks returns a copy of the live observations Issue #8 requires.
+func RequiredChecks() []string {
+	checks := requiredChecks()
+	return checks[:]
 }
 
 // TaskRecovery is the App restart or ambiguous-replay observation. Graph
@@ -82,7 +88,7 @@ func Validate(e Evidence) error {
 		return err
 	}
 	var missing []string
-	for _, check := range RequiredChecks {
+	for _, check := range requiredChecks() {
 		if !e.Checks[check] {
 			missing = append(missing, check)
 		}
@@ -122,17 +128,16 @@ func validateTaskRecovery(name string, recovery TaskRecovery, minCalls int) erro
 	return nil
 }
 
-// RevisionOK accepts a git SHA prefix or a dotted release identifier.
-// Floating tags such as latest are not revisions.
+// RevisionOK accepts a git SHA prefix or a SemVer release identifier.
 func RevisionOK(value string) bool {
 	value = strings.TrimSpace(value)
-	if value == "" || strings.ContainsAny(value, " \t\n") || strings.EqualFold(value, "latest") {
+	if value == "" || strings.ContainsAny(value, " \t\n") {
 		return false
 	}
 	if hexSHA(value) {
 		return len(value) >= 7
 	}
-	return strings.Contains(value, ".") && len(value) >= 5
+	return semverRelease(value)
 }
 
 func hexSHA(value string) bool {
@@ -144,4 +149,67 @@ func hexSHA(value string) bool {
 		}
 	}
 	return value != ""
+}
+
+func semverRelease(value string) bool {
+	value = strings.TrimPrefix(value, "v")
+	core, build, ok := strings.Cut(value, "+")
+	if ok && (!validIdentifiers(build, false) || strings.Contains(build, "+")) {
+		return false
+	}
+	core, prerelease, hasPrerelease := strings.Cut(core, "-")
+	if hasPrerelease && !validIdentifiers(prerelease, true) {
+		return false
+	}
+	parts := strings.Split(core, ".")
+	if len(parts) != 3 {
+		return false
+	}
+	for _, part := range parts {
+		if !validNumericIdentifier(part, true) {
+			return false
+		}
+	}
+	return true
+}
+
+func validIdentifiers(value string, rejectNumericLeadingZero bool) bool {
+	if value == "" {
+		return false
+	}
+	for _, identifier := range strings.Split(value, ".") {
+		if identifier == "" {
+			return false
+		}
+		numeric := true
+		for _, r := range identifier {
+			if r < '0' || r > '9' {
+				numeric = false
+			}
+			if !validIdentifierRune(r) {
+				return false
+			}
+		}
+		if rejectNumericLeadingZero && numeric && len(identifier) > 1 && identifier[0] == '0' {
+			return false
+		}
+	}
+	return true
+}
+
+func validIdentifierRune(r rune) bool {
+	return (r >= '0' && r <= '9') || (r >= 'A' && r <= 'Z') ||
+		(r >= 'a' && r <= 'z') || r == '-'
+}
+
+func validNumericIdentifier(value string, rejectLeadingZero bool) bool {
+	if value == "" || (rejectLeadingZero && len(value) > 1 && value[0] == '0') {
+		return false
+	}
+	for _, r := range value {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return true
 }

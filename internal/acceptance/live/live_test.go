@@ -54,5 +54,5 @@ func missingEnv(names ...string) []string {
 }
 
 func unimplementedChecks() error {
-	return fmt.Errorf("live acceptance has not passed: %s\nupmaru/tama#123 and the System/App/PubSub migration are not recorded, so this command does not write compatibility evidence", strings.Join(acceptance.RequiredChecks, ", "))
+	return fmt.Errorf("live acceptance has not passed: %s\nupmaru/tama#123 and the System/App/PubSub migration are not recorded, so this command does not write compatibility evidence", strings.Join(acceptance.RequiredChecks(), ", "))
 }

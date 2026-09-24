@@ -687,6 +687,8 @@ The current revision also resolves G8-G10 and G12-G15:
    `server/discover`, standard headers, per-request authorization/capabilities,
    owner-bound task recovery, `tasks/update`, subscription acknowledgement and
    reconnect, terminal capture through `tasks/get`, and production ingress.
+   Record TamaMCP, Tama, and provider revisions only as Git SHA prefixes or
+   SemVer release identifiers; reject moving names and arbitrary dotted strings.
 
 4. **Client identity acceptance:** Codex, OpenCode, and plain MCP fixtures must
    prove the D11 conversation-identity contract. Until they pass, retain the

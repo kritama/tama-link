@@ -82,7 +82,8 @@ func TestDroppedSubscriptionReconcilesThroughTaskGet(t *testing.T) {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write(rewriteID(completed.Expected.Body, completed.RequestID(), rpc.ID))
+		response := rewriteID(completed.Expected.Body, completed.RequestID(), rpc.ID)
+		_, _ = w.Write(rewriteID(response, "task-get-completed", "subscription-stale"))
 	}))
 	defer server.Close()
 	client := newClient(t, server.URL)
@@ -100,17 +101,15 @@ func TestDroppedSubscriptionReconcilesThroughTaskGet(t *testing.T) {
 	if snapshots != 0 {
 		t.Fatalf("dropped stream delivered %d snapshots", snapshots)
 	}
-	state, err := client.TaskGet(context.Background(), "task-get-completed")
+	state, err := client.TaskGet(context.Background(), "subscription-stale")
 	if err != nil {
 		t.Fatalf("tasks/get recovery: %v", err)
 	}
-	if !state.IsTerminal() {
-		t.Fatalf("recovered status %s, want terminal", state.Status)
+	if !state.IsTerminal() || state.TaskID != "subscription-stale" {
+		t.Fatalf("recovered task = %s status %s, want subscription-stale terminal", state.TaskID, state.Status)
 	}
-	for _, method := range calls {
-		if method == upstream.MethodCallTool || forbiddenMethod(method) {
-			t.Errorf("recovery emitted %s", method)
-		}
+	if len(calls) != 2 || calls[0] != upstream.MethodSubscribe || calls[1] != upstream.MethodTaskGet {
+		t.Fatalf("calls = %v, want subscriptions/listen then tasks/get", calls)
 	}
 }
 

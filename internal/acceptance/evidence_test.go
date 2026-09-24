@@ -34,7 +34,7 @@ func TestValidateRejectsFixtureShapedEvidence(t *testing.T) {
 		Profiles:    []string{"app", "system"},
 		Checks:      map[string]bool{},
 	}
-	for _, check := range RequiredChecks {
+	for _, check := range RequiredChecks() {
 		record.Checks[check] = true
 	}
 	if err := Validate(record); err == nil {
@@ -43,11 +43,21 @@ func TestValidateRejectsFixtureShapedEvidence(t *testing.T) {
 }
 
 func TestRevisionOKAcceptsSHAOrRelease(t *testing.T) {
-	if !RevisionOK("5c80c29") || !RevisionOK("v0.2.0") {
+	if !RevisionOK("5c80c29") || !RevisionOK("v0.2.0") || !RevisionOK("1.2.3-rc.1+build.5") {
 		t.Fatal("sha prefix or release identifier rejected")
 	}
-	if RevisionOK("latest") || RevisionOK("abc") || RevisionOK("") {
-		t.Fatal("floating or empty revision accepted")
+	for _, revision := range []string{"latest", "main.branch", "v1.2", "v01.2.3", "v1.2.3-01", "abc", ""} {
+		if RevisionOK(revision) {
+			t.Fatalf("moving or malformed revision %q accepted", revision)
+		}
+	}
+}
+
+func TestRequiredChecksReturnsCopy(t *testing.T) {
+	checks := RequiredChecks()
+	checks[0] = "mutated"
+	if RequiredChecks()[0] == "mutated" {
+		t.Fatal("caller mutated the required-check contract")
 	}
 }
 
@@ -82,7 +92,7 @@ func TestValidateRejectsChecksWithoutRecoveryInvariants(t *testing.T) {
 
 func completeEvidence() Evidence {
 	checks := map[string]bool{}
-	for _, check := range RequiredChecks {
+	for _, check := range RequiredChecks() {
 		checks[check] = true
 	}
 	return Evidence{
@@ -114,7 +124,8 @@ func TestValidateRequiresBothProfilesAndEveryCheck(t *testing.T) {
 	if err := Validate(record); err == nil {
 		t.Fatal("system profile was not required")
 	}
-	record.Profiles = []string{"app", "system"}
+	record = completeEvidence()
+	delete(record.Checks, RequiredChecks()[0])
 	if err := Validate(record); err == nil {
 		t.Fatal("missing checks were accepted")
 	}

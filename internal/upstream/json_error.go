@@ -15,17 +15,19 @@ func jsonRPCErrorCode(data []byte) (int, bool) {
 		return 0, false
 	}
 	if msg, err := jsonrpc.DecodeMessage(data); err == nil {
-		if werr, ok := asWireError(msg); ok {
+		if werr, ok := asWireError(msg); ok && werr.Code != 0 {
 			return int(werr.Code), true
 		}
 	}
 	var body struct {
-		Error *struct {
-			Code int `json:"code"`
+		JSONRPC string `json:"jsonrpc"`
+		Error   *struct {
+			Code *int `json:"code"`
 		} `json:"error"`
 	}
-	if json.Unmarshal(data, &body) != nil || body.Error == nil {
+	if json.Unmarshal(data, &body) != nil || body.JSONRPC != "2.0" ||
+		body.Error == nil || body.Error.Code == nil || *body.Error.Code == 0 {
 		return 0, false
 	}
-	return body.Error.Code, true
+	return *body.Error.Code, true
 }

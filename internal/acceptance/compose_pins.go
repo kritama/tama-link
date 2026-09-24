@@ -8,8 +8,6 @@ import (
 	"os/exec"
 	"strings"
 	"time"
-
-	"gopkg.in/yaml.v3"
 )
 
 // Compose service names the pin check requires. A file that does not name
@@ -100,13 +98,23 @@ func dockerComposeConfig(path string) ([]byte, error) {
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
-		detail := strings.TrimSpace(stderr.String())
-		if detail == "" {
-			detail = err.Error()
-		}
-		return nil, fmt.Errorf("%s", detail)
+		return nil, composeCommandError(ctx, stderr.String(), err)
 	}
 	return out, nil
+}
+
+func composeCommandError(ctx context.Context, stderr string, err error) error {
+	detail := strings.TrimSpace(stderr)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		if detail == "" {
+			return fmt.Errorf("docker compose config: %w: %w", ctxErr, err)
+		}
+		return fmt.Errorf("docker compose config: %s: %w: %w", detail, ctxErr, err)
+	}
+	if detail == "" {
+		return fmt.Errorf("docker compose config: %w", err)
+	}
+	return fmt.Errorf("docker compose config: %s: %w", detail, err)
 }
 
 func parseComposeJSON(body []byte) (map[string]composeService, error) {
@@ -135,32 +143,6 @@ func parseComposeJSON(body []byte) (map[string]composeService, error) {
 	}
 	if len(out) == 0 {
 		return nil, fmt.Errorf("resolved compose model has no services")
-	}
-	return out, nil
-}
-
-func parseComposeYAML(body []byte) (map[string]composeService, error) {
-	var doc struct {
-		Services map[string]struct {
-			Image      string `yaml:"image"`
-			Build      any    `yaml:"build"`
-			PullPolicy string `yaml:"pull_policy"`
-		} `yaml:"services"`
-	}
-	if err := yaml.Unmarshal(body, &doc); err != nil {
-		return nil, fmt.Errorf("parse compose file: %w", err)
-	}
-	out := make(map[string]composeService, len(doc.Services))
-	for name, service := range doc.Services {
-		out[name] = composeService{
-			Image:      service.Image,
-			BuildRef:   immutableBuildRef(service.Build),
-			PullPolicy: service.PullPolicy,
-			HasBuild:   service.Build != nil,
-		}
-	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("compose file has no services")
 	}
 	return out, nil
 }

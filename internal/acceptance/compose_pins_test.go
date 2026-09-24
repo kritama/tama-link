@@ -1,6 +1,13 @@
 package acceptance
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+
+	"gopkg.in/yaml.v3"
+)
 
 func TestComposePinsRejectUnrelatedTopology(t *testing.T) {
 	err := checkComposeSource(t, "services:\n  unrelated:\n    image: busybox\n")
@@ -152,6 +159,48 @@ func TestParseComposeJSONPreservesBuildSelection(t *testing.T) {
 	}
 }
 
+func TestParseComposeJSONResolvedBuildContexts(t *testing.T) {
+	tests := []struct {
+		name       string
+		context    string
+		wantRef    string
+		wantPinned bool
+	}{
+		{name: "absolute local context", context: "/workspace/tama", wantPinned: false},
+		{name: "normalized remote git context", context: "https://github.com/example/tama.git#abcdef1", wantRef: "abcdef1", wantPinned: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body := fmt.Sprintf(`{"services":{"tama":{"build":{"context":%q}}}}`, tt.context)
+			services, err := parseComposeJSON([]byte(body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := services[ServiceTama]
+			if !got.HasBuild || got.BuildRef != tt.wantRef {
+				t.Fatalf("resolved build = %#v, want ref %q", got, tt.wantRef)
+			}
+			if RevisionOK(got.BuildRef) != tt.wantPinned {
+				t.Fatalf("RevisionOK(%q) = %t, want %t", got.BuildRef, RevisionOK(got.BuildRef), tt.wantPinned)
+			}
+		})
+	}
+}
+
+func TestComposeCommandErrorPreservesCauses(t *testing.T) {
+	execErr := errors.New("process failed")
+	err := composeCommandError(context.Background(), "invalid compose", execErr)
+	if !errors.Is(err, execErr) {
+		t.Fatalf("execution error was not wrapped: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err = composeCommandError(ctx, "", execErr)
+	if !errors.Is(err, context.Canceled) || !errors.Is(err, execErr) {
+		t.Fatalf("cancellation and execution errors were not preserved: %v", err)
+	}
+}
+
 func TestComposePinsRequireImmutableImageOrBuildRef(t *testing.T) {
 	err := checkComposeSource(t, `
 services:
@@ -183,7 +232,7 @@ func TestComposePinsIgnoreRevisionInsideRepositoryPath(t *testing.T) {
 	err := checkComposeSource(t, `
 services:
   tama:
-    image: ghcr.io/example/tama:stable
+    image: ghcr.io/example/tama:abcdef1
   tama-mcp:
     build:
       context: https://github.com/example/abcdef0.git#main
@@ -202,6 +251,32 @@ func checkComposeSource(t *testing.T, body string) error {
 		t.Fatal(err)
 	}
 	return checkServices(services, reviewRevisions())
+}
+
+func parseComposeYAML(body []byte) (map[string]composeService, error) {
+	var doc struct {
+		Services map[string]struct {
+			Image      string `yaml:"image"`
+			Build      any    `yaml:"build"`
+			PullPolicy string `yaml:"pull_policy"`
+		} `yaml:"services"`
+	}
+	if err := yaml.Unmarshal(body, &doc); err != nil {
+		return nil, fmt.Errorf("parse compose file: %w", err)
+	}
+	out := make(map[string]composeService, len(doc.Services))
+	for name, service := range doc.Services {
+		out[name] = composeService{
+			Image:      service.Image,
+			BuildRef:   immutableBuildRef(service.Build),
+			PullPolicy: service.PullPolicy,
+			HasBuild:   service.Build != nil,
+		}
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("compose file has no services")
+	}
+	return out, nil
 }
 
 func reviewRevisions() ComposeRevisions {

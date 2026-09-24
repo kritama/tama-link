@@ -214,7 +214,7 @@ func (c *Client) doRequest(ctx context.Context, method, name string, params, met
 		return "", nil, err
 	}
 	for key, values := range paramHeaders {
-		if len(values) != 1 || values[0] == "" {
+		if len(values) != 1 {
 			return "", nil, fmt.Errorf("parameter header %s must be a single value", key)
 		}
 		req.Header[key] = []string{values[0]}
