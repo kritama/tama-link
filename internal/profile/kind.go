@@ -31,7 +31,7 @@ func (p *Profile) Kind() (Kind, error) {
 	}
 	endpoint, err := url.Parse(p.Endpoint)
 	if err != nil {
-		return "", fmt.Errorf("endpoint %q is not a URL: %v", p.Endpoint, err)
+		return "", fmt.Errorf("parse endpoint %q: %w", p.Endpoint, err)
 	}
 	if err := checkEndpointKind(endpoint, kind); err != nil {
 		return "", err
@@ -45,8 +45,10 @@ func kindFromOperations(ops []catalog.Descriptor) (Kind, error) {
 		switch op.Strategy {
 		case catalog.StrategyUpstreamTask:
 			app = true
-		case catalog.StrategyLocalReplayable, catalog.StrategyLocalGuarded, catalog.StrategyUnsupported:
+		case catalog.StrategyLocalReplayable, catalog.StrategyLocalGuarded:
 			system = true
+		case catalog.StrategyUnsupported:
+			// An unsupported operation does not choose an execution service.
 		default:
 			return "", fmt.Errorf("operation %q has unknown strategy %q", op.Name, op.Strategy)
 		}

@@ -295,6 +295,28 @@ func TestValidateRejectsMixedAppAndSystemOperations(t *testing.T) {
 	}
 }
 
+func TestKindTreatsUnsupportedAsNeutral(t *testing.T) {
+	t.Parallel()
+
+	p := validProfile()
+	unsupported := testDescriptor("future")
+	unsupported.Strategy = catalog.StrategyUnsupported
+	unsupported.TaskSupport = catalog.TaskSupportForbidden
+	digest, err := unsupported.ComputeDigest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	unsupported.Digest = digest
+	p.Operations = append(p.Operations, unsupported)
+	kind, err := p.Kind()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if kind != KindApp {
+		t.Fatalf("kind = %s, want app", kind)
+	}
+}
+
 func TestValidateRequiresEndpointForKind(t *testing.T) {
 	t.Parallel()
 

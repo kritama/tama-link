@@ -15,18 +15,21 @@ import (
 	"github.com/kritama/tama-link/internal/credential"
 )
 
-func init() {
+func fixtureHooks() serveHooks {
 	if os.Getenv("TAMA_LINK_FIXTURE") != "1" {
-		return
+		return serveHooks{}
 	}
-	openServeCredentials = func(namespace string) (*credential.Keyring, error) {
-		return credential.NewWithBackend(namespace, newProcessKeyring()), nil
+	hooks := serveHooks{
+		open: func(namespace string) (*credential.Keyring, error) {
+			return credential.NewWithBackend(namespace, newProcessKeyring()), nil
+		},
+		token: func(context.Context) (string, error) { return "fixture-token", nil },
+		ready: func(context.Context) (bool, error) { return true, nil },
 	}
-	tokenFromFixture = func(context.Context) (string, error) { return "fixture-token", nil }
-	credentialsReadyFromFixture = func(context.Context) (bool, error) { return true, nil }
 	if path := os.Getenv("TAMA_LINK_FIXTURE_CA"); path != "" {
-		httpClientFromFixture = func() *http.Client { return httpClientTrusting(path) }
+		hooks.httpClient = func() *http.Client { return httpClientTrusting(path) }
 	}
+	return hooks
 }
 
 func httpClientTrusting(path string) *http.Client {

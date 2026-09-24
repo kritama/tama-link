@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -308,8 +309,9 @@ type binarySession struct {
 	t          *testing.T
 	sendWriter io.WriteCloser
 	nextID     int
-	stderr     *strings.Builder
+	stderr     *syncBuffer
 	read       chan binaryFrame
+	done       chan struct{}
 }
 
 type binaryFrame struct {
@@ -330,17 +332,19 @@ func startBinaryServe(t *testing.T, bin, configDir, name, caPath string) *binary
 	if err != nil {
 		t.Fatal(err)
 	}
-	var stderr strings.Builder
-	cmd.Stderr = &stderr
+	stderr := &syncBuffer{}
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
+	done := make(chan struct{})
 	t.Cleanup(func() {
+		close(done)
 		_ = stdin.Close()
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 	})
-	session := &binarySession{t: t, nextID: 1, stderr: &stderr, read: make(chan binaryFrame, 8)}
+	session := &binarySession{t: t, nextID: 1, stderr: stderr, read: make(chan binaryFrame, 8), done: done}
 	go func() {
 		scanner := bufio.NewScanner(stdout)
 		for scanner.Scan() {
@@ -348,7 +352,11 @@ func startBinaryServe(t *testing.T, bin, configDir, name, caPath string) *binary
 			if err := json.Unmarshal(scanner.Bytes(), &frame); err != nil {
 				return
 			}
-			session.read <- frame
+			select {
+			case session.read <- frame:
+			case <-done:
+				return
+			}
 		}
 	}()
 	// stdin is an io.WriteCloser, not *os.File. Store it through a small wrapper.
@@ -358,9 +366,11 @@ func startBinaryServe(t *testing.T, bin, configDir, name, caPath string) *binary
 
 func (s *binarySession) initialize() {
 	s.t.Helper()
+	id := s.nextID
+	s.nextID++
 	s.send(map[string]any{
 		"jsonrpc": "2.0",
-		"id":      s.nextID,
+		"id":      id,
 		"method":  "initialize",
 		"params": map[string]any{
 			"protocolVersion": "2025-03-26",
@@ -368,8 +378,7 @@ func (s *binarySession) initialize() {
 			"clientInfo":      map[string]any{"name": "binary-workflow", "version": "0"},
 		},
 	})
-	s.nextID++
-	s.wait()
+	_ = s.waitFor(id)
 	s.send(map[string]any{"jsonrpc": "2.0", "method": "notifications/initialized"})
 }
 
@@ -388,7 +397,7 @@ func (s *binarySession) callRaw(method string, params any) map[string]any {
 	id := s.nextID
 	s.nextID++
 	s.send(map[string]any{"jsonrpc": "2.0", "id": id, "method": method, "params": params})
-	frame := s.wait()
+	frame := s.waitFor(id)
 	if len(frame.Error) > 0 {
 		s.t.Fatalf("%s error: %s stderr=%s", method, frame.Error, s.stderr.String())
 	}
@@ -415,9 +424,23 @@ func (s *binarySession) wait() binaryFrame {
 	select {
 	case frame := <-s.read:
 		return frame
+	case <-s.done:
+		s.t.Fatal("server stopped while waiting for a frame")
+		return binaryFrame{}
 	case <-time.After(15 * time.Second):
 		s.t.Fatalf("timed out waiting for a frame; stderr=%s", s.stderr.String())
 		return binaryFrame{}
+	}
+}
+
+func (s *binarySession) waitFor(id int) binaryFrame {
+	s.t.Helper()
+	want := strconv.Itoa(id)
+	for {
+		frame := s.wait()
+		if frame.ID.String() == want {
+			return frame
+		}
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +20,25 @@ import (
 )
 
 // demoProfileForWrite builds the demo profile without test helpers.
+// syncBuffer is a stderr sink that child processes and the test can use
+// at the same time. os/exec writes from its own goroutine until Wait.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 func demoProfileForWrite() profile.Profile {
 	op := catalog.Descriptor{
 		Name:        "message",
@@ -194,7 +214,7 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	if err != nil {
 		t.Fatalf("stdout pipe: %v", err)
 	}
-	var stderrBuf bytes.Buffer
+	var stderrBuf syncBuffer
 	cmd.Stderr = &stderrBuf
 	if err := cmd.Start(); err != nil {
 		t.Fatalf("start serve: %v", err)

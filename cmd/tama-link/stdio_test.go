@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/99designs/keyring"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
@@ -35,8 +36,10 @@ func TestServeStackSpeaksStdioWithoutPlatformKeyring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	app, cleanup, err := buildApp(context.Background(), p, configDir, func(namespace string) (*credential.Keyring, error) {
-		return credential.NewWithBackend(namespace, newMemoryKeyring()), nil
+	app, cleanup, err := buildApp(context.Background(), p, configDir, serveHooks{
+		open: func(namespace string) (*credential.Keyring, error) {
+			return credential.NewWithBackend(namespace, newMemoryKeyring()), nil
+		},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -126,7 +129,8 @@ func TestServeStackSpeaksStdioWithoutPlatformKeyring(t *testing.T) {
 		if err != nil && ctx.Err() == nil {
 			t.Fatalf("server run: %v", err)
 		}
-	default:
+	case <-time.After(5 * time.Second):
+		t.Fatal("server did not stop after cancellation")
 	}
 }
 

@@ -76,7 +76,11 @@ func runServe(ctx context.Context, args []string, _ io.Writer, stderr io.Writer)
 		return 2
 	}
 
-	app, cleanup, err := buildApp(ctx, p, cfg.configDir, openServeCredentials)
+	hooks := fixtureHooks()
+	if hooks.open == nil {
+		hooks.open = credential.New
+	}
+	app, cleanup, err := buildApp(ctx, p, cfg.configDir, hooks)
 	if err != nil {
 		writef(stderr, "tama-link: %v\n", err)
 		return 2
@@ -120,12 +124,12 @@ func stateLayout(p *profile.Profile, configDir string) (dbPath string, namespace
 // backend, encrypted state store, OAuth client, stateless upstream client,
 // verified adapter, leased worker, and the application service. The cleanup
 // callback shuts down the worker and closes the store.
-func buildApp(ctx context.Context, p *profile.Profile, configDir string, open credentialOpener) (server.App, func(), error) {
+func buildApp(ctx context.Context, p *profile.Profile, configDir string, hooks serveHooks) (server.App, func(), error) {
 	dbPath, namespace, err := stateLayout(p, configDir)
 	if err != nil {
 		return nil, nil, err
 	}
-	kr, err := open(namespace)
+	kr, err := hooks.open(namespace)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open credential backend: %w", err)
 	}
@@ -154,9 +158,9 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 			Version: version.Version,
 		},
 		ClientCapabilities: []byte(`{"extensions":{"io.modelcontextprotocol/tasks":{}}}`),
-		TokenProvider:      serveToken(oauthClient),
+		TokenProvider:      hooks.tokenProvider(oauthClient),
 		MaxResponseBytes:   int64(limits.ResponseBytes),
-		HTTPClient:         serveHTTPClient(),
+		HTTPClient:         hooks.client(),
 	})
 	if err != nil {
 		_ = st.Close()
@@ -180,7 +184,7 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 	kind, err := p.Kind()
 	if err != nil {
 		_ = st.Close()
-		return nil, nil, err
+		return nil, nil, fmt.Errorf("resolve profile kind: %w", err)
 	}
 	var workerService *worker.Service
 	var taskService *application.TaskService
@@ -216,7 +220,7 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 		Worker:           workerService,
 		Tasks:            taskService,
 		AdapterVersion:   version.Version,
-		CredentialsReady: serveCredentialsReady(oauthClient),
+		CredentialsReady: hooks.credentialsReady(oauthClient),
 	})
 	if err != nil {
 		if taskService != nil {
@@ -263,13 +267,18 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 	return app, cleanup, nil
 }
 
-// openServeCredentials resolves the platform credential backend. A
-// fixture-tagged test binary may replace it; production builds keep this.
-var openServeCredentials = credential.New
+// serveHooks carries the process-start dependencies that a fixture build
+// may replace. The zero value uses the production credential and token path.
+type serveHooks struct {
+	open       credentialOpener
+	token      func(context.Context) (string, error)
+	ready      func(context.Context) (bool, error)
+	httpClient func() *http.Client
+}
 
-func serveToken(client *oauth.Client) func(context.Context) (string, error) {
-	if tokenFromFixture != nil {
-		return tokenFromFixture
+func (h serveHooks) tokenProvider(client *oauth.Client) func(context.Context) (string, error) {
+	if h.token != nil {
+		return h.token
 	}
 	return func(ctx context.Context) (string, error) {
 		tok, err := client.Token(ctx)
@@ -283,27 +292,19 @@ func serveToken(client *oauth.Client) func(context.Context) (string, error) {
 	}
 }
 
-func serveCredentialsReady(client *oauth.Client) func(context.Context) (bool, error) {
-	if credentialsReadyFromFixture != nil {
-		return credentialsReadyFromFixture
+func (h serveHooks) credentialsReady(client *oauth.Client) func(context.Context) (bool, error) {
+	if h.ready != nil {
+		return h.ready
 	}
 	return client.HasCredentials
 }
 
-func serveHTTPClient() *http.Client {
-	if httpClientFromFixture != nil {
-		return httpClientFromFixture()
+func (h serveHooks) client() *http.Client {
+	if h.httpClient != nil {
+		return h.httpClient()
 	}
 	return nil
 }
-
-// Fixture hooks stay nil in production builds. The fixture-tagged file sets
-// them only when the acceptance environment is present.
-var (
-	tokenFromFixture            func(context.Context) (string, error)
-	credentialsReadyFromFixture func(context.Context) (bool, error)
-	httpClientFromFixture       func() *http.Client
-)
 
 func parseServeFlags(args []string, stderr io.Writer) (serveConfig, bool) {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)

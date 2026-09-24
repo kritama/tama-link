@@ -120,12 +120,12 @@ func TestBuildAppKeepsProfilesIsolated(t *testing.T) {
 	alpha := wiringProfile(t, "alpha", "https://alpha.example", "alpha.tool")
 	beta := wiringProfile(t, "beta", "https://beta.example", "beta.tool")
 
-	appA, cleanupA, err := buildApp(context.Background(), alpha, configDir, open)
+	appA, cleanupA, err := buildApp(context.Background(), alpha, configDir, serveHooks{open: open})
 	if err != nil {
 		t.Fatalf("buildApp alpha: %v", err)
 	}
 	defer cleanupA()
-	appB, cleanupB, err := buildApp(context.Background(), beta, configDir, open)
+	appB, cleanupB, err := buildApp(context.Background(), beta, configDir, serveHooks{open: open})
 	if err != nil {
 		t.Fatalf("buildApp beta: %v", err)
 	}
