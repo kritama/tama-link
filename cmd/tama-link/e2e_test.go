@@ -323,21 +323,35 @@ func TestServeBinaryStdioHandshake(t *testing.T) {
 	}
 
 	for _, tool := range toolsResult.Tools {
-		if tool.Name != "submit" {
-			continue
-		}
-		var schema struct {
-			Properties struct {
-				Tool struct {
-					Enum []string `json:"enum"`
-				} `json:"tool"`
-			} `json:"properties"`
-		}
-		if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
-			t.Fatalf("unmarshal submit input schema: %v", err)
-		}
-		if want := []string{"message"}; !slices.Equal(schema.Properties.Tool.Enum, want) {
-			t.Fatalf("submit tool enum = %v, want %v", schema.Properties.Tool.Enum, want)
+		switch tool.Name {
+		case "submit":
+			var schema struct {
+				Properties struct {
+					Tool struct {
+						Enum []string `json:"enum"`
+					} `json:"tool"`
+				} `json:"properties"`
+			}
+			if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+				t.Fatalf("unmarshal submit input schema: %v", err)
+			}
+			if len(schema.Properties.Tool.Enum) != 0 {
+				t.Fatalf("submit tool enum = %v, want unconstrained", schema.Properties.Tool.Enum)
+			}
+		case "await":
+			var schema struct {
+				Properties map[string]json.RawMessage `json:"properties"`
+				Required   []string                   `json:"required"`
+			}
+			if err := json.Unmarshal(tool.InputSchema, &schema); err != nil {
+				t.Fatalf("unmarshal await input schema: %v", err)
+			}
+			if _, ok := schema.Properties["input_responses"]; !ok {
+				t.Fatal("await schema missing input_responses")
+			}
+			if !slices.Equal(schema.Required, []string{"submission_id"}) {
+				t.Fatalf("await required = %v", schema.Required)
+			}
 		}
 	}
 }
