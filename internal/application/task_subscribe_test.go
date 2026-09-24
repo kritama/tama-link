@@ -14,6 +14,26 @@ import (
 	"github.com/kritama/tama-link/internal/limits"
 )
 
+func TestNextWatchDelayBacksOffUntilThePollCap(t *testing.T) {
+	t.Parallel()
+
+	capDelay := 400 * time.Millisecond
+	delay := nextWatchDelay(taskPollFloor, false, capDelay)
+	if delay != 40*time.Millisecond {
+		t.Fatalf("first backoff = %s", delay)
+	}
+	delay = nextWatchDelay(delay, false, capDelay)
+	if delay != 80*time.Millisecond {
+		t.Fatalf("second backoff = %s", delay)
+	}
+	if got := nextWatchDelay(300*time.Millisecond, false, capDelay); got != capDelay {
+		t.Fatalf("capped backoff = %s", got)
+	}
+	if got := nextWatchDelay(capDelay, true, capDelay); got != taskPollFloor {
+		t.Fatalf("reset = %s", got)
+	}
+}
+
 func TestTaskSubscriptionSnapshotsAndFallback(t *testing.T) {
 	t.Parallel()
 
@@ -148,6 +168,43 @@ func TestTaskSubscriptionSnapshotsAndFallback(t *testing.T) {
 		if up.subscribeCount() < 2 {
 			t.Fatalf("subscribes = %d, want a resubscribe after expiry", up.subscribeCount())
 		}
+	})
+
+	t.Run("equal timestamp status change is applied", func(t *testing.T) {
+		t.Parallel()
+		up := newTaskUpstream(t)
+		var advanced atomic.Bool
+		up.onGet = func(int) (int, string) {
+			if !advanced.Load() {
+				return http.StatusOK, taskState("input_required", "2026-09-11T10:00:05Z", taskInputRequests())
+			}
+			return http.StatusOK, taskState("working", "2026-09-11T10:00:05Z", "")
+		}
+		svc, st := taskApp(t, up)
+		out := submitMessage(t, svc, "same-stamp")
+		waitStatus(t, st, out, contract.StatusInputRequired)
+		advanced.Store(true)
+		waitStatus(t, st, out, contract.StatusRunning)
+	})
+
+	t.Run("dropped subscription backs off", func(t *testing.T) {
+		t.Parallel()
+		up := newTaskUpstream(t)
+		up.pollIntervalMs = 400
+		up.onGet = func(int) (int, string) {
+			return http.StatusOK, strings.Replace(taskState("working", "2026-09-11T10:00:02Z", ""), `"pollIntervalMs":20`, `"pollIntervalMs":400`, 1)
+		}
+		up.onSubscribe = func(w http.ResponseWriter, _ *http.Request, id string) {
+			writeSSE(w, ackSSE(id, "task-1"))
+		}
+		svc, _ := taskApp(t, up)
+		_ = submitMessage(t, svc, "backoff")
+		waitUntil(t, func() bool { return up.subscribeCount() > 0 })
+		time.Sleep(250 * time.Millisecond)
+		if up.subscribeCount() > 5 {
+			t.Fatalf("subscribes = %d, want backoff instead of a 20ms reconnect storm", up.subscribeCount())
+		}
+		svc.tasks.Stop()
 	})
 
 	t.Run("duplicate snapshot does not regress", func(t *testing.T) {

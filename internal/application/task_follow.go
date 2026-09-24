@@ -61,7 +61,7 @@ func (r *taskRunner) follow(
 	}
 	go func() {
 		defer watchers.Done()
-		r.watch(watchCtx, cn, sub.TaskID, apply, reconcile, terminal)
+		r.watch(watchCtx, cn, sub.ID, sub.TaskID, apply, reconcile, terminal)
 	}()
 
 	timer := time.NewTimer(0)

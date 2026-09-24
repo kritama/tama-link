@@ -133,7 +133,16 @@ func (s *Service) deliverInput(ctx context.Context, id, owner string, canonical 
 	if err := cn.UpdateTask(updateCtx, sub.TaskID, encoded); err != nil {
 		return classify(err)
 	}
-	still, err := s.store.CommitLease(ctx, name, owner, generation)
+	return s.recordDeliveredInput(ctx, id, name, owner, generation, pending)
+}
+
+// recordDeliveredInput marks a tasks/update that already succeeded. The
+// caller's context can be cancelled after that acceptance; the mark must
+// still be attempted so the next replay does not send the same input again.
+func (s *Service) recordDeliveredInput(ctx context.Context, id, name, owner string, generation int64, pending []string) *contract.Error {
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalReadTimeout())
+	defer cancel()
+	still, err := s.store.CommitLease(persistCtx, name, owner, generation)
 	if err != nil {
 		return s.storeError(err)
 	}
@@ -142,7 +151,7 @@ func (s *Service) deliverInput(ctx context.Context, id, owner string, canonical 
 		// lease. Leave the IDs unmarked so a later exact replay can resend.
 		return nil
 	}
-	if err := s.store.MarkInputResponsesSent(ctx, id, pending); err != nil {
+	if err := s.store.MarkInputResponsesSent(persistCtx, id, pending); err != nil {
 		return s.storeError(err)
 	}
 	return nil

@@ -3,10 +3,12 @@ package store_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/kritama/tama-link/internal/contract"
+	"github.com/kritama/tama-link/internal/limits"
 	"github.com/kritama/tama-link/internal/store"
 )
 
@@ -49,5 +51,45 @@ func TestCaptureTerminalEvidenceIsAtomicWithTheLease(t *testing.T) {
 	}
 	if got.Status != contract.StatusFailed || string(got.TerminalEvidence) != string(evidence) {
 		t.Fatalf("captured = %s %s", got.Status, got.TerminalEvidence)
+	}
+}
+
+func TestOversizedTerminalEvidenceDoesNotClaimCompletion(t *testing.T) {
+	t.Parallel()
+
+	lim := limits.Default()
+	lim.ResultBytes = 32
+	st, err := store.Open(context.Background(), t.TempDir()+"/state.db", newMemKeys(), store.Config{Limits: lim, Now: newClock().Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	created, _, err := st.CreateSubmission(context.Background(), testSubmission("sub-oversize", "oversize"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, status := range []contract.Status{contract.StatusQueued, contract.StatusRunning} {
+		if _, err := st.Transition(context.Background(), created.ID, status, store.TransitionDetail{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	owner := "owner-oversize"
+	if ok, err := st.ClaimLease(context.Background(), "submission/"+created.ID, owner, time.Minute); err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	evidence := []byte(strings.Repeat("x", 64))
+	got, err := st.CaptureTerminalLeased(context.Background(), created.ID, "submission/"+created.ID, owner,
+		contract.StatusFailed, contract.NewError(contract.CodeUpstreamExecutionFailed, "The upstream task failed."), evidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != contract.StatusFailed || got.ErrorCode != string(contract.CodeResultTooLarge) {
+		t.Fatalf("status = %s %s", got.Status, got.ErrorCode)
+	}
+	if strings.Contains(got.ErrorMessage, "completed") || !strings.Contains(got.ErrorMessage, "terminal evidence") {
+		t.Fatalf("message = %q", got.ErrorMessage)
+	}
+	if len(got.TerminalEvidence) != 0 {
+		t.Fatal("oversized evidence was stored")
 	}
 }

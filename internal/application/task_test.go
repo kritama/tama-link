@@ -599,6 +599,21 @@ func TestTaskRestartResumesSameTask(t *testing.T) {
 	}
 }
 
+func TestTaskQueuedRowIsAFirstCall(t *testing.T) {
+	t.Parallel()
+
+	up := newTaskUpstream(t)
+	svc, st := taskAppWithoutReplayBinding(t, up)
+	svc.tasks.Stop()
+	id := seedQueuedTask(t, st, svc, "queued-first")
+	recovered := startTaskService(t, st, svc.connect)
+	_ = recovered.Start(context.Background())
+	waitStatus(t, st, id, contract.StatusCompleted)
+	if up.callCount() != 1 {
+		t.Fatalf("queued recovery calls = %d, want 1", up.callCount())
+	}
+}
+
 func TestTaskAmbiguousReplayRequiresIdempotencyProof(t *testing.T) {
 	t.Parallel()
 
@@ -669,6 +684,15 @@ func taskAppWithoutReplayBinding(t *testing.T, up *taskUpstream) (*Service, *sto
 
 func seedRunningTask(t *testing.T, st *store.Store, svc *Service, id string) string {
 	t.Helper()
+	subID := seedQueuedTask(t, st, svc, id)
+	if _, err := st.Transition(context.Background(), subID, contract.StatusRunning, store.TransitionDetail{}); err != nil {
+		t.Fatal(err)
+	}
+	return subID
+}
+
+func seedQueuedTask(t *testing.T, st *store.Store, svc *Service, id string) string {
+	t.Helper()
 	d, ok := svc.profile.Catalog().Find("message")
 	if !ok {
 		t.Fatal("message descriptor missing")
@@ -688,9 +712,6 @@ func seedRunningTask(t *testing.T, st *store.Store, svc *Service, id string) str
 		t.Fatalf("seed: %v", err)
 	}
 	if _, err := st.Transition(context.Background(), sub.ID, contract.StatusQueued, store.TransitionDetail{}); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := st.Transition(context.Background(), sub.ID, contract.StatusRunning, store.TransitionDetail{}); err != nil {
 		t.Fatal(err)
 	}
 	return sub.ID

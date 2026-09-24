@@ -27,15 +27,17 @@ goes through `await` with a connector that fails if called, and ambiguous
 replay compares the canonical calls and rejects an identifier reused with
 different arguments. Live Tama acceptance remains Issue #8.
 
-The focused acceptance suite passes five repeated race-enabled runs, and the
-full `make check` gate passes. Local Issue #5 acceptance is complete. Delivery
-still requires a committed and pushed branch, a pull request, and exact-head CI
-and review evidence.
+Pull request #11 is open from `feature/phase-2-app-tasks` to `develop`. The
+CodeRabbit review on that pull request is addressed in the working tree:
+equal-timestamp observations stay eligible, a successful `tasks/update` is
+marked on a context the caller cannot cancel, a `queued` row is still a first
+call, subscription reconnects back off to the stored poll interval, and
+oversized failure evidence no longer says the operation completed.
 
 ## Acceptance completion plan
 
-Issue #5 can be closed after the three remaining local gaps below are replaced
-with black-box fixture evidence and the repository gate passes. Live validation
+Historical. The three local gaps below were the close criteria for Issue #5.
+They are implemented, and Findings 6 and 7 are resolved. Live validation
 against migrated Tama remains owned by Issue #8 and depends on Tama #123; it
 must not be reported as complete when only the Issue #5 fixture gate has passed.
 
@@ -182,11 +184,9 @@ from JSON-RPC transport identity.
 
 ### Delivery state
 
-The feature branch currently points at the same commit as `develop`
-(`54e4f0a`). All Issue #5 implementation and tests are uncommitted, many are
-untracked, the branch has no upstream, and no pull request exists. Even after
-the two fixture gaps are corrected, it must be committed, pushed, reviewed,
-and pass CI at the exact proposed head before merge.
+Historical as of the fourth revalidation: the branch then matched `develop`
+at `54e4f0a` and had no pull request. Current delivery is pull request #11.
+Merge still requires review and CI at the exact proposed head.
 
 ## Revalidation status
 
@@ -200,10 +200,10 @@ and pass CI at the exact proposed head before merge.
 
 ### Local acceptance implementation status
 
-Implemented on 2026-09-24, subject to Findings 6 and 7 above:
+Implemented on 2026-09-24. Findings 6 and 7 are resolved.
 
 - Terminal failure and cancellation documents are stored in `terminal_evidence_enc` with AEAD purpose `terminal-evidence`, written in the same lease-checked transaction as the terminal status. `await` returns only the stable error. Close/reopen and plaintext-SQLite checks are in `internal/application/task_evidence_test.go`. A lost lease commits neither status nor evidence (`internal/store/terminal_evidence_test.go`).
-- Restart crosses a process boundary: process A persists the task ID and exits while working; process B opens the same database and a new connection, authenticates, and completes through `tasks/get` without a second `tools/call`. The parent then reads the terminal result from the reopened store (`internal/application/task_accept_test.go`).
+- Restart crosses a process boundary: process A persists the task ID and exits while working; process B opens the same database and a new connection, authenticates, and completes through `tasks/get` without a second `tools/call`. The parent then returns the terminal result through `Service.Await` (`internal/application/task_accept_test.go`).
 - Ambiguous acceptance drops the first `tools/call` after the fixture counts graph work. Proven bindings replay that identifier and do not create a second graph execution. The unproven mirror becomes `outcome_unknown` with no replay (`TestAmbiguousAcceptanceDoesNotDuplicateGraphWork`).
 
 The authorized-empty-subset, established-stream credential-expiry, and
@@ -320,8 +320,8 @@ items have since gained coverage and which remain open.
 
 The current tests cover the ordinary happy path, sequential idempotency,
 state mapping, polling fallback, local wait cancellation, result storage
-overflow, and same-store service restart. They do not yet prove several Issue
-#5 criteria:
+overflow, and same-store service restart. They do not yet prove several
+Issue #5 criteria:
 
 - `TestTaskRestartResumesSameTask` reuses the same open `Store` and memoized
   connection; it does not close/reopen SQLite or create a newly authenticated

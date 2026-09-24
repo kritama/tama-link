@@ -72,9 +72,10 @@ func (r *taskRunner) prepare(ctx context.Context, id, leaseName, leaseOwner stri
 	if sub.Strategy != string(catalog.StrategyUpstreamTask) || submission.Terminal(sub.Status) {
 		return nil, false, nil
 	}
-	// accepted means this invocation has not called upstream yet. Any later
-	// recovery of a running row with no task ID is an ambiguous replay.
-	first := sub.Status == contract.StatusAccepted
+	// accepted and queued have not called upstream yet. OpenTask runs only
+	// after the row reaches running, so recovering either status is a first
+	// call. A running row with no task ID is the ambiguous replay.
+	first := sub.Status == contract.StatusAccepted || sub.Status == contract.StatusQueued
 	if sub.Status == contract.StatusAccepted {
 		sub, err = r.store.TransitionLeased(ctx, id, leaseName, leaseOwner, contract.StatusQueued, store.TransitionDetail{})
 		if err != nil {

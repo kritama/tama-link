@@ -44,6 +44,8 @@ type taskUpstream struct {
 	// onSubscribe handles subscriptions/listen. Nil means method-not-found,
 	// which forces the polling path.
 	onSubscribe func(w http.ResponseWriter, r *http.Request, id string)
+	// pollIntervalMs overrides the tools/call task handle. Zero uses 20.
+	pollIntervalMs int64
 }
 
 func newTaskUpstream(t *testing.T) *taskUpstream {
@@ -125,7 +127,7 @@ func (u *taskUpstream) serve(w http.ResponseWriter, r *http.Request) {
 		if hold != nil {
 			<-hold
 		}
-		writeFake(w, quoted, taskHandle())
+		writeFake(w, quoted, u.taskHandle())
 	case "tasks/get":
 		u.mu.Lock()
 		u.gets++
@@ -367,8 +369,15 @@ func (u *taskUpstream) updateBody() string {
 	return u.lastUpdate
 }
 
-func taskHandle() string {
-	return `{"resultType":"task","taskId":"task-1","status":"working","createdAt":"2026-09-11T10:00:00Z","lastUpdatedAt":"2026-09-11T10:00:01Z","ttlMs":60000,"pollIntervalMs":20}`
+func (u *taskUpstream) taskHandle() string {
+	return fmt.Sprintf(`{"resultType":"task","taskId":"task-1","status":"working","createdAt":"2026-09-11T10:00:00Z","lastUpdatedAt":"2026-09-11T10:00:01Z","ttlMs":60000,"pollIntervalMs":%d}`, u.pollMS())
+}
+
+func (u *taskUpstream) pollMS() int64 {
+	if u.pollIntervalMs > 0 {
+		return u.pollIntervalMs
+	}
+	return 20
 }
 
 func taskState(status, updated, extra string) string {

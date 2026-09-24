@@ -13,6 +13,43 @@ import (
 	"github.com/kritama/tama-link/internal/submission"
 )
 
+func TestDeliveredInputPersistsAfterCallerCancel(t *testing.T) {
+	t.Parallel()
+
+	up := newTaskUpstream(t)
+	up.onGet = func(int) (int, string) {
+		return http.StatusOK, taskState("input_required", "2026-09-11T10:00:04Z", taskInputRequests())
+	}
+	svc, st := taskApp(t, up)
+	out, appErr := svc.Submit(context.Background(), messageInput("cancel-persist"))
+	if appErr != nil {
+		t.Fatal(appErr.Message)
+	}
+	waitStatus(t, st, out.SubmissionID, contract.StatusInputRequired)
+	svc.tasks.Stop()
+	if err := st.SetInputResponse(context.Background(), out.SubmissionID, "approval", json.RawMessage(`{"action":"accept"}`)); err != nil {
+		t.Fatal(err)
+	}
+	owner := "persist-after-cancel"
+	name := inputDeliveryLease(out.SubmissionID)
+	if ok, err := st.ClaimLease(context.Background(), name, owner, time.Minute); err != nil || !ok {
+		t.Fatalf("claim: %v %v", ok, err)
+	}
+	generation, owned, err := st.LeaseGeneration(context.Background(), name, owner)
+	if err != nil || !owned {
+		t.Fatalf("generation: owned=%v err=%v", owned, err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if appErr = svc.recordDeliveredInput(ctx, out.SubmissionID, name, owner, generation, []string{"approval"}); appErr != nil {
+		t.Fatal(appErr.Message)
+	}
+	pending, err := st.InputResponsePending(context.Background(), out.SubmissionID, "approval")
+	if err != nil || pending {
+		t.Fatalf("pending after cancelled caller = %v %v", pending, err)
+	}
+}
+
 func TestTaskDeliveryLeaseOutlivesSlowUpdate(t *testing.T) {
 	t.Parallel()
 

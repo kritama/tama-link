@@ -120,7 +120,9 @@ func newerObservation(prev, next string) bool {
 	pt, perr := time.Parse(time.RFC3339, prev)
 	nt, nerr := time.Parse(time.RFC3339, next)
 	if perr != nil || nerr != nil {
-		return next > prev
+		return next >= prev
 	}
-	return nt.After(pt)
+	// Equal timestamps stay eligible. A status change can share the previous
+	// second-precision stamp, and reapplying an unchanged snapshot is a no-op.
+	return !nt.Before(pt)
 }

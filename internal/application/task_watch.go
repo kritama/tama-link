@@ -12,7 +12,7 @@ import (
 func (r *taskRunner) watch(
 	ctx context.Context,
 	cn *tama2026.Connection,
-	taskID string,
+	submissionID, taskID string,
 	apply func(*tama2026.TaskSnapshot) (bool, error),
 	reconcile func() (bool, error),
 	terminal chan<- struct{},
@@ -28,8 +28,10 @@ func (r *taskRunner) watch(
 			}
 		}
 		streamCtx, stop := r.boundStream(ctx)
+		received := false
 		finished := false
 		err := cn.WatchTask(streamCtx, taskID, func(snap tama2026.TaskSnapshot) error {
+			received = true
 			done, applyErr := apply(&snap)
 			if applyErr != nil {
 				return applyErr
@@ -60,6 +62,7 @@ func (r *taskRunner) watch(
 				return
 			}
 		}
+		delay = nextWatchDelay(delay, received, r.subscriptionBackoffCap(ctx, submissionID))
 		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
@@ -68,6 +71,31 @@ func (r *taskRunner) watch(
 		case <-timer.C:
 		}
 	}
+}
+
+// nextWatchDelay backs off after a stream that delivered no snapshot and
+// resets after one that did. The cap is the stored poll interval so a
+// dropped subscription does not outrun tasks/get.
+func nextWatchDelay(current time.Duration, received bool, capDelay time.Duration) time.Duration {
+	if received {
+		return taskPollFloor
+	}
+	if capDelay < taskPollFloor {
+		capDelay = taskPollFloor
+	}
+	next := current * 2
+	if next < current || next > capDelay {
+		return capDelay
+	}
+	return next
+}
+
+func (r *taskRunner) subscriptionBackoffCap(ctx context.Context, id string) time.Duration {
+	sub, err := r.store.GetSubmission(ctx, id)
+	if err != nil || sub.TaskPollIntervalMs <= 0 {
+		return taskPollFloor
+	}
+	return timerWait(sub.TaskPollIntervalMs)
 }
 
 func (r *taskRunner) credentialCurrent() bool {

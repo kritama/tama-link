@@ -52,7 +52,7 @@ func (s *Store) CaptureTerminalLeased(
 	if len(evidence) > 0 {
 		if int64(len(evidence)) > int64(sub.AcceptedLimits.ResultBytes) {
 			failure = contract.NewError(contract.CodeResultTooLarge,
-				"The upstream operation completed, but its result exceeded the configured storage limit.")
+				"The upstream task ended, but its terminal evidence exceeded the configured storage limit.")
 			to = contract.StatusFailed
 		} else {
 			sealed, err = s.cipher.seal(evidence, id, "terminal-evidence")
