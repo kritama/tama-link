@@ -159,6 +159,12 @@ const defaultFinalReadTimeout = 2 * time.Second
 func (s *Service) finalState(sub *store.Submission) (*store.Submission, *contract.Error) {
 	ctx, cancel := context.WithTimeout(context.Background(), s.readDeadline())
 	defer cancel()
+	if s.finalReadHold != nil {
+		s.finalReadHold(ctx)
+	}
+	if err := ctx.Err(); err != nil {
+		return sub, nil
+	}
 	reloaded, cerr := s.reload(ctx, sub.ID)
 	if cerr != nil {
 		if ctx.Err() != nil {

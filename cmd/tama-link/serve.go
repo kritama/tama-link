@@ -129,6 +129,9 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, hooks s
 	if err != nil {
 		return nil, nil, err
 	}
+	if hooks.open == nil {
+		hooks.open = credential.New
+	}
 	kr, err := hooks.open(namespace)
 	if err != nil {
 		return nil, nil, fmt.Errorf("open credential backend: %w", err)

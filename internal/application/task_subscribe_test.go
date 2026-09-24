@@ -40,6 +40,12 @@ func TestTaskSubscriptionSnapshotsAndFallback(t *testing.T) {
 	t.Run("polling fallback", func(t *testing.T) {
 		t.Parallel()
 		up := newTaskUpstream(t)
+		up.onGet = func(int) (int, string) {
+			if up.subscribeCount() == 0 {
+				return http.StatusOK, taskState("working", "2026-09-11T10:00:02Z", "")
+			}
+			return http.StatusOK, taskState("completed", "2026-09-11T10:00:08Z", taskSuccessResult(false))
+		}
 		svc, st := taskApp(t, up)
 		out := submitMessage(t, svc, "poll")
 		waitStatus(t, st, out, contract.StatusCompleted)

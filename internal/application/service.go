@@ -63,6 +63,9 @@ type Service struct {
 	// on this service only. Zero uses the default. A package-level
 	// override would change every parallel test.
 	finalReadTimeout time.Duration
+	// finalReadHold runs after that deadline context is created and before
+	// the read. Tests use it to outlive the deadline. Nil in production.
+	finalReadHold func(context.Context)
 }
 
 // New validates cfg and builds a Service.
