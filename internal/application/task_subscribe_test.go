@@ -100,6 +100,12 @@ func TestTaskSubscriptionSnapshotsAndFallback(t *testing.T) {
 	t.Run("authorized subset", func(t *testing.T) {
 		t.Parallel()
 		up := newTaskUpstream(t)
+		up.onGet = func(int) (int, string) {
+			if up.subscribeCount() == 0 {
+				return http.StatusOK, taskState("working", "2026-09-11T10:00:02Z", "")
+			}
+			return http.StatusOK, taskState("completed", "2026-09-11T10:00:08Z", taskSuccessResult(false))
+		}
 		up.onSubscribe = func(w http.ResponseWriter, _ *http.Request, id string) {
 			// An empty authorized set is a valid subset: this task was not authorized.
 			writeSSE(w, ackSSE(id))
