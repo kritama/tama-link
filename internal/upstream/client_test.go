@@ -30,6 +30,7 @@ type recordedRequest struct {
 	BodyID                   string
 	Meta                     map[string]json.RawMessage
 	Params                   map[string]json.RawMessage
+	Headers                  http.Header
 	AuthorizationHeaderCount int
 }
 
@@ -77,6 +78,7 @@ func newTestServer(t *testing.T, respond func(rec *recordedRequest) (status int,
 			BodyID:                   idStr,
 			Meta:                     meta,
 			Params:                   paramsMap,
+			Headers:                  r.Header.Clone(),
 			AuthorizationHeaderCount: len(r.Header.Values("Authorization")),
 		}
 		ts.requests = append(ts.requests, *rec)
@@ -462,14 +464,27 @@ func TestProtocolErrorClassification(t *testing.T) {
 
 // TestHTTPFailureClassification covers statuses without a JSON-RPC body.
 func TestHTTPFailureClassification(t *testing.T) {
-	ts := newTestServer(t, func(_ *recordedRequest) (int, string, string) {
-		return 503, "text/plain", "unavailable"
-	})
-	client := newTestClient(t, ts)
-	_, err := client.Discover(context.Background(), 0)
-	var uerr *Error
-	if !errors.As(err, &uerr) || uerr.Kind != KindHTTP || uerr.Code != 503 {
-		t.Fatalf("err = %+v, want http 503", err)
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+	}{
+		{name: "plain body", contentType: "text/plain", body: "unavailable"},
+		{name: "non jsonrpc error object", contentType: "application/json", body: `{"error":{"message":"upstream unavailable"}}`},
+		{name: "zero jsonrpc code", contentType: "application/json", body: `{"jsonrpc":"2.0","error":{"code":0,"message":"invalid"}}`},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ts := newTestServer(t, func(_ *recordedRequest) (int, string, string) {
+				return 503, tt.contentType, tt.body
+			})
+			client := newTestClient(t, ts)
+			_, err := client.Discover(context.Background(), 0)
+			var uerr *Error
+			if !errors.As(err, &uerr) || uerr.Kind != KindHTTP || uerr.Code != 503 {
+				t.Fatalf("err = %+v, want http 503", err)
+			}
+		})
 	}
 }
 

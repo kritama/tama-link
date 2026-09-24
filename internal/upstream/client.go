@@ -133,7 +133,17 @@ func (c *Client) Endpoint() string { return c.endpoint.String() }
 // maxResponseBytes bounds the response: zero uses the client's configured
 // bound.
 func (c *Client) call(ctx context.Context, method, name string, params json.RawMessage, maxResponseBytes int64) (json.RawMessage, error) {
-	return c.callWithMeta(ctx, method, name, params, nil, maxResponseBytes)
+	return c.callWithMeta(ctx, method, name, params, nil, nil, maxResponseBytes)
+}
+
+// callTask is call for a task method. It declares the Tasks extension on
+// this request even when the client's default capabilities do not.
+func (c *Client) callTask(ctx context.Context, method, name string, params json.RawMessage, maxResponseBytes int64) (json.RawMessage, error) {
+	meta, err := c.tasksMeta()
+	if err != nil {
+		return nil, err
+	}
+	return c.callWithMeta(ctx, method, name, params, meta, nil, maxResponseBytes)
 }
 
 // callWithMeta performs one stateless finite request. metaOverride, when
@@ -142,10 +152,10 @@ func (c *Client) call(ctx context.Context, method, name string, params json.RawM
 // positive, replaces the client's configured response bound for this one
 // request. The per-request deadline bounds this one round trip only;
 // subscription streams never take this path.
-func (c *Client) callWithMeta(ctx context.Context, method, name string, params, metaOverride json.RawMessage, maxResponseBytes int64) (json.RawMessage, error) {
+func (c *Client) callWithMeta(ctx context.Context, method, name string, params, metaOverride json.RawMessage, paramHeaders http.Header, maxResponseBytes int64) (json.RawMessage, error) {
 	ctx, cancel := context.WithTimeout(ctx, c.requestTimeout)
 	defer cancel()
-	id, resp, err := c.doRequest(ctx, method, name, params, metaOverride)
+	id, resp, err := c.doRequest(ctx, method, name, params, metaOverride, paramHeaders)
 	if err != nil {
 		return nil, err
 	}
@@ -157,7 +167,7 @@ func (c *Client) callWithMeta(ctx context.Context, method, name string, params, 
 // non-nil, replaces the client's default _meta triple for this request.
 // The caller owns the response body. The returned id correlates the reply
 // for stream reads.
-func (c *Client) doRequest(ctx context.Context, method, name string, params, metaOverride json.RawMessage) (string, *http.Response, error) {
+func (c *Client) doRequest(ctx context.Context, method, name string, params, metaOverride json.RawMessage, paramHeaders http.Header) (string, *http.Response, error) {
 	if !IsJSONObject(params) {
 		return "", nil, fmt.Errorf("params for %s must be a JSON object", method)
 	}
@@ -202,6 +212,12 @@ func (c *Client) doRequest(ctx context.Context, method, name string, params, met
 	req.Header.Set("Authorization", "Bearer "+token)
 	if err := setStandardHeaders(req.Header, method, name); err != nil {
 		return "", nil, err
+	}
+	for key, values := range paramHeaders {
+		if len(values) != 1 {
+			return "", nil, fmt.Errorf("parameter header %s must be a single value", key)
+		}
+		req.Header[key] = []string{values[0]}
 	}
 
 	resp, err := c.httpClient.Do(req)

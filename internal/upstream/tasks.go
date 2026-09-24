@@ -86,7 +86,7 @@ func (c *Client) TaskGetWithin(ctx context.Context, taskID string, maxResponseBy
 	if taskID == "" {
 		return nil, fmt.Errorf("task id is required")
 	}
-	raw, err := c.call(ctx, MethodTaskGet, taskID, json.RawMessage(`{"taskId":`+jsonString(taskID)+`}`), maxResponseBytes)
+	raw, err := c.callTask(ctx, MethodTaskGet, taskID, json.RawMessage(`{"taskId":`+jsonString(taskID)+`}`), maxResponseBytes)
 	if err != nil {
 		return nil, err
 	}
@@ -104,7 +104,7 @@ func (c *Client) TaskUpdate(ctx context.Context, taskID string, inputResponses j
 		return nil, fmt.Errorf("input responses must be a JSON object")
 	}
 	params := `{"taskId":` + jsonString(taskID) + `,"inputResponses":` + string(inputResponses) + `}`
-	raw, err := c.call(ctx, MethodTaskUpdate, taskID, json.RawMessage(params), 0)
+	raw, err := c.callTask(ctx, MethodTaskUpdate, taskID, json.RawMessage(params), 0)
 	if err != nil {
 		return nil, err
 	}
@@ -121,7 +121,7 @@ func (c *Client) TaskCancel(ctx context.Context, taskID string) (json.RawMessage
 	if taskID == "" {
 		return nil, fmt.Errorf("task id is required")
 	}
-	raw, err := c.call(ctx, MethodTaskCancel, taskID, json.RawMessage(`{"taskId":`+jsonString(taskID)+`}`), 0)
+	raw, err := c.callTask(ctx, MethodTaskCancel, taskID, json.RawMessage(`{"taskId":`+jsonString(taskID)+`}`), 0)
 	if err != nil {
 		return nil, err
 	}

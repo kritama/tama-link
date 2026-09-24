@@ -2,7 +2,6 @@ package upstream
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -98,12 +97,8 @@ func (c *Client) readHTTPError(resp *http.Response, perRequest int64) error {
 	if err != nil {
 		return err
 	}
-	if len(bytes.TrimSpace(data)) > 0 {
-		if msg, err := jsonrpc.DecodeMessage(data); err == nil {
-			if werr, ok := asWireError(msg); ok {
-				return protocolError(werr)
-			}
-		}
+	if code, ok := jsonRPCErrorCode(data); ok {
+		return newError(KindProtocol, code, fmt.Errorf("jsonrpc code %d", code))
 	}
 	return newError(KindHTTP, resp.StatusCode, nil)
 }

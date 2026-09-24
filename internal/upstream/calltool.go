@@ -24,6 +24,10 @@ type CallToolParams struct {
 	// bound, so a recovered submission runs under the limits it was
 	// accepted with rather than the profile's current values.
 	MaxResponseBytes int64
+	// ParamHeaders are the reviewed argument-header mappings for this
+	// tool. The client renders only these mappings; it does not infer
+	// headers from an unreviewed schema.
+	ParamHeaders []ParamHeader
 }
 
 // CallToolResponse is a tools/call result in either result shape.
@@ -69,7 +73,11 @@ func (c *Client) CallTool(ctx context.Context, p *CallToolParams) (*CallToolResp
 			return nil, err
 		}
 	}
-	raw, err := c.callWithMeta(ctx, MethodCallTool, p.Name, wire, meta, p.MaxResponseBytes)
+	headers, err := renderParamHeaders(p.Arguments, p.ParamHeaders)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := c.callWithMeta(ctx, MethodCallTool, p.Name, wire, meta, headers, p.MaxResponseBytes)
 	if err != nil {
 		return nil, err
 	}
