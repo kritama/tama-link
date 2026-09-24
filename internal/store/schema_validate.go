@@ -63,9 +63,11 @@ func validateCurrentSchema(ctx context.Context, conn *sql.Conn) error {
 			adapter_version, response_bytes, result_bytes, event_bytes, max_events,
 			events_bytes, payload_retention_ms, tombstone_retention_ms,
 			created_at, updated_at, completed_at,
-			payload_expires_at, tombstone_expires_at, lease_owner, lease_expires_at
+			payload_expires_at, tombstone_expires_at, lease_owner, lease_expires_at,
+			task_ttl_ms, task_poll_interval_ms, task_capabilities, task_updated_at,
+			input_requests_enc, terminal_evidence_enc
 		 FROM submissions LIMIT 0`,
-		`SELECT submission_id, request_id, response_enc, answered_at FROM input_responses LIMIT 0`,
+		`SELECT submission_id, request_id, response_enc, answered_at, sent_at FROM input_responses LIMIT 0`,
 		`SELECT client_request_id, args_hash, submission_id, created_at FROM idempotency LIMIT 0`,
 		`SELECT name, owner, expires_at, generation FROM leases LIMIT 0`,
 		`SELECT name, generation, slot FROM credential_fence LIMIT 0`,

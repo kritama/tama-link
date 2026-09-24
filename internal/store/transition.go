@@ -268,5 +268,7 @@ const submissionQuery = `
 		       error_code, error_message, error_retryable, protocol_version, adapter_version,
 		       response_bytes, result_bytes, event_bytes, max_events, events_bytes,
 		       payload_retention_ms, tombstone_retention_ms,
-		       created_at, updated_at, completed_at, payload_expires_at
+		       created_at, updated_at, completed_at, payload_expires_at,
+		       task_ttl_ms, task_poll_interval_ms, task_capabilities, task_updated_at,
+		       input_requests_enc, terminal_evidence_enc
 		FROM submissions WHERE submission_id = ?`

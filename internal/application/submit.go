@@ -157,7 +157,11 @@ func (s *Service) Submit(ctx context.Context, in contract.SubmitInput) (contract
 		// stream and dispatch: appending an accepted event after the row
 		// advanced would corrupt the progress sequence, and re-offering an
 		// already running work is at best noise.
-		s.worker.Dispatch(sub.ID)
+		if d.Strategy == catalog.StrategyUpstreamTask {
+			s.tasks.Dispatch(sub.ID)
+		} else {
+			s.worker.Dispatch(sub.ID)
+		}
 	}
 	return submitOutput(sub), nil
 }
@@ -262,9 +266,6 @@ func mapsThreadID(d *catalog.Descriptor) bool {
 // clean retry.
 func (s *Service) strategyGate(d catalog.Descriptor) *contract.Error {
 	switch d.Strategy {
-	case catalog.StrategyUpstreamTask:
-		return failed(contract.CodeNotImplemented,
-			"Task-backed operations are not enabled in this build.")
 	case catalog.StrategyLocalGuarded:
 		return failed(contract.CodeOperationNotAllowed,
 			"Operation %q requires a separately reviewed reconciliation contract and is not enabled.", d.Name)

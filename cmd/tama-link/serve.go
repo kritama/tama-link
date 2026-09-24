@@ -183,6 +183,7 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 	connect := func(ctx context.Context) (*tama2026.Connection, error) {
 		return adapter.Connect(ctx)
 	}
+	connect = application.MemoConnect(connect)
 	executor := application.NewExecutor(connect)
 	workerService, err := worker.NewService(st, executor, worker.Config{
 		Owner:    fmt.Sprintf("tama-link/%d", os.Getpid()),
@@ -192,18 +193,30 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 		_ = st.Close()
 		return nil, nil, fmt.Errorf("configure worker: %w", err)
 	}
+	taskService, err := application.NewTaskService(st, connect, application.TaskConfig{
+		Owner:       fmt.Sprintf("tama-link/%d", os.Getpid()),
+		LeaseTTL:    workerLeaseTTL,
+		Credentials: oauthClient,
+	})
+	if err != nil {
+		workerService.Stop()
+		_ = st.Close()
+		return nil, nil, fmt.Errorf("configure task runner: %w", err)
+	}
 
 	app, err := application.New(application.Config{
 		Profile:        p,
 		Store:          st,
 		Connect:        connect,
 		Worker:         workerService,
+		Tasks:          taskService,
 		AdapterVersion: version.Version,
 		CredentialsReady: func(ctx context.Context) (bool, error) {
 			return oauthClient.HasCredentials(ctx)
 		},
 	})
 	if err != nil {
+		taskService.Stop()
 		workerService.Stop()
 		_ = st.Close()
 		return nil, nil, fmt.Errorf("configure application: %w", err)
@@ -213,6 +226,7 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 	// bounded worker pool and returns immediately: a large backlog runs in
 	// the background and must not delay the MCP server accepting clients.
 	_ = workerService.Start(ctx)
+	_ = taskService.Start(ctx)
 
 	// Retention sweeps run for the process lifetime under an owned,
 	// cancellable context: cleanup cancels before the store closes and
@@ -226,6 +240,7 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, open cr
 	}()
 
 	cleanup := func() {
+		taskService.Stop()
 		workerService.Stop()
 		stopGC()
 		gcWg.Wait()

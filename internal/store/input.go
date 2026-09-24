@@ -87,6 +87,48 @@ func (s *Store) SetInputResponse(ctx context.Context, submissionID, requestID st
 	return ErrInputResponseConflict
 }
 
+// InputResponsePending reports whether a recorded response has not yet been
+// delivered upstream. An absent row is not pending.
+func (s *Store) InputResponsePending(ctx context.Context, submissionID, requestID string) (bool, error) {
+	if submissionID == "" || requestID == "" {
+		return false, errors.New("submission id and request id are required")
+	}
+	var sent sql.NullInt64
+	err := s.db.QueryRowContext(ctx,
+		"SELECT sent_at FROM input_responses WHERE submission_id = ? AND request_id = ?",
+		submissionID, requestID,
+	).Scan(&sent)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("read input response delivery: %w", err)
+	}
+	return !sent.Valid, nil
+}
+
+// MarkInputResponsesSent records that the listed responses were included in
+// an upstream tasks/update acknowledgement. Unknown IDs are ignored so a
+// concurrent delete cannot fail the delivery mark.
+func (s *Store) MarkInputResponsesSent(ctx context.Context, submissionID string, requestIDs []string) error {
+	if submissionID == "" || len(requestIDs) == 0 {
+		return errors.New("submission id and request ids are required")
+	}
+	now := s.now().UnixMilli()
+	for _, requestID := range requestIDs {
+		if requestID == "" {
+			return errors.New("request id is required")
+		}
+		if _, err := s.exec(ctx, `
+			UPDATE input_responses SET sent_at = ?
+			WHERE submission_id = ? AND request_id = ? AND sent_at IS NULL`,
+			now, submissionID, requestID); err != nil {
+			return fmt.Errorf("mark input response sent: %w", err)
+		}
+	}
+	return nil
+}
+
 // ErrTaskIDConflict reports that the submission already carries a different
 // upstream task ID: the first attachment wins and the caller must reconcile
 // against the durable owner.

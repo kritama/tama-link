@@ -28,6 +28,8 @@ type Config struct {
 	// Worker executes local_replayable submissions under the durable lease.
 	// Required.
 	Worker *worker.Service
+	// Tasks drives owner-bound App submissions. Required.
+	Tasks *TaskService
 	// AdapterVersion identifies the adapter build recorded on accepted
 	// submissions. Required.
 	AdapterVersion string
@@ -49,9 +51,12 @@ type Service struct {
 	store            *store.Store
 	connect          func(ctx context.Context) (*tama2026.Connection, error)
 	worker           *worker.Service
+	tasks            *TaskService
 	adapterVersion   string
 	credentialsReady func(ctx context.Context) (bool, error)
 	now              func() time.Time
+	// inputDeliveryTTL is renewed across tasks/update. Tests shorten it.
+	inputDeliveryTTL time.Duration
 }
 
 // New validates cfg and builds a Service.
@@ -68,6 +73,9 @@ func New(cfg Config) (*Service, error) {
 	if cfg.Worker == nil {
 		return nil, errors.New("worker is required")
 	}
+	if cfg.Tasks == nil {
+		return nil, errors.New("task service is required")
+	}
 	if cfg.AdapterVersion == "" {
 		return nil, errors.New("adapter version is required")
 	}
@@ -80,9 +88,11 @@ func New(cfg Config) (*Service, error) {
 		store:            cfg.Store,
 		connect:          cfg.Connect,
 		worker:           cfg.Worker,
+		tasks:            cfg.Tasks,
 		adapterVersion:   cfg.AdapterVersion,
 		credentialsReady: cfg.CredentialsReady,
 		now:              now,
+		inputDeliveryTTL: inputDeliveryTTL,
 	}, nil
 }
 

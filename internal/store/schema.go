@@ -9,10 +9,9 @@ import (
 )
 
 // schemaVersion is the database schema this build reads and writes. Version
-// 2 adds the input_responses table for request-correlated input replay;
-// version 3 adds the lease generation counter used to gate credential
-// writes behind one lease holder.
-const schemaVersion = 4
+// 6 adds the encrypted terminal-task evidence blob. There is no upgrade
+// path: an older database fails closed.
+const schemaVersion = 6
 
 // Metadata keys.
 const (
@@ -60,7 +59,13 @@ CREATE TABLE IF NOT EXISTS submissions (
     payload_expires_at INTEGER,
     tombstone_expires_at INTEGER,
     lease_owner TEXT,
-    lease_expires_at INTEGER
+    lease_expires_at INTEGER,
+    task_ttl_ms INTEGER NOT NULL DEFAULT 0,
+    task_poll_interval_ms INTEGER NOT NULL DEFAULT 0,
+    task_capabilities TEXT NOT NULL DEFAULT '',
+    task_updated_at TEXT NOT NULL DEFAULT '',
+    input_requests_enc BLOB,
+    terminal_evidence_enc BLOB
 );
 
 CREATE TABLE IF NOT EXISTS input_responses (
@@ -68,6 +73,7 @@ CREATE TABLE IF NOT EXISTS input_responses (
     request_id TEXT NOT NULL,
     response_enc BLOB NOT NULL,
     answered_at INTEGER NOT NULL,
+    sent_at INTEGER,
     PRIMARY KEY (submission_id, request_id)
 );
 

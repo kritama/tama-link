@@ -19,14 +19,22 @@ import (
 // Submission is one durable local submission with its decrypted sensitive
 // fields.
 type Submission struct {
-	ID               string
-	ClientRequestID  string
-	Tool             string
-	Strategy         string
-	DescriptorDigest string
-	Arguments        json.RawMessage
-	ArgsHash         string
-	TaskID           string
+	ID                 string
+	ClientRequestID    string
+	Tool               string
+	Strategy           string
+	DescriptorDigest   string
+	Arguments          json.RawMessage
+	ArgsHash           string
+	TaskID             string
+	TaskTTLMs          int64
+	TaskPollIntervalMs int64
+	TaskCapabilities   string
+	TaskUpdatedAt      string
+	InputRequests      json.RawMessage
+	// TerminalEvidence is the validated upstream failure or cancellation
+	// document. Await never returns it.
+	TerminalEvidence json.RawMessage
 	Status           submission.State
 	Sequence         int64
 	Events           []contract.Event
@@ -44,9 +52,11 @@ type Submission struct {
 	// after completion. Reads past this deadline return submission_expired.
 	PayloadExpiresAt *time.Time
 
-	encArgs   []byte
-	encEvents []byte
-	encResult []byte
+	encArgs             []byte
+	encEvents           []byte
+	encResult           []byte
+	encInputRequests    []byte
+	encTerminalEvidence []byte
 }
 
 // NewSubmission is the input for creating one accepted submission.

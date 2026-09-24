@@ -35,6 +35,10 @@ func runScenario(name string) int {
 		return workerSingleWinnerScenario()
 	case "restart-replay-crash":
 		return restartReplayCrashScenario()
+	case "input-delivery":
+		return inputDeliveryScenario()
+	case "task-process":
+		return taskProcessScenario()
 	default:
 		fmt.Fprintf(os.Stderr, "unknown scenario %q\n", name)
 		return 2

@@ -71,20 +71,9 @@ func newFakeTama(t *testing.T) *fakeTama {
 
 		switch envelope.Method {
 		case "server/discover":
-			writeFake(w, id, `{
-				"resultType": "complete",
-				"supportedVersions": ["2026-07-28"],
-				"capabilities": {"tools":{},"extensions":{"io.modelcontextprotocol/tasks":{}}},
-				"instructions": `+jsonQuote(fixtureInstructions)+`,
-				"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "tama", "version": "1.0.0"}}
-			}`)
+			writeFake(w, id, fixtureDiscoverDoc())
 		case "tools/list":
-			writeFake(w, id, `{"resultType":"complete","tools":[
-				{"name":"status","description":"Read status","inputSchema":`+statusToolSchema+`,"outputSchema":`+statusOutSchema+`},
-				{"name":"message","description":"Send a message","inputSchema":{"type":"object","properties":{"message":{"type":"string","minLength":1}},"required":["message"]},"outputSchema":{"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}},
-				{"name":"guarded","description":"Guarded mutation","inputSchema":`+noteToolSchema+`,"outputSchema":`+noteOutSchema+`},
-				{"name":"unstable","description":"Unsupported placeholder","inputSchema":`+noteToolSchema+`,"outputSchema":`+noteOutSchema+`}
-			]}`)
+			writeFake(w, id, fixtureToolsListDoc())
 		case "tools/call":
 			f.calls.Add(1)
 			f.mu.Lock()
@@ -123,6 +112,25 @@ func newFakeTama(t *testing.T) *fakeTama {
 	}))
 	t.Cleanup(f.ts.Close)
 	return f
+}
+
+func fixtureDiscoverDoc() string {
+	return `{
+		"resultType": "complete",
+		"supportedVersions": ["2026-07-28"],
+		"capabilities": {"tools":{},"extensions":{"io.modelcontextprotocol/tasks":{}}},
+		"instructions": ` + jsonQuote(fixtureInstructions) + `,
+		"_meta": {"io.modelcontextprotocol/serverInfo": {"name": "tama", "version": "1.0.0"}}
+	}`
+}
+
+func fixtureToolsListDoc() string {
+	return `{"resultType":"complete","tools":[
+		{"name":"status","description":"Read status","inputSchema":` + statusToolSchema + `,"outputSchema":` + statusOutSchema + `},
+		{"name":"message","description":"Send a message","inputSchema":{"type":"object","properties":{"message":{"type":"string","minLength":1}},"required":["message"]},"outputSchema":{"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}},
+		{"name":"guarded","description":"Guarded mutation","inputSchema":` + noteToolSchema + `,"outputSchema":` + noteOutSchema + `},
+		{"name":"unstable","description":"Unsupported placeholder","inputSchema":` + noteToolSchema + `,"outputSchema":` + noteOutSchema + `}
+	]}`
 }
 
 func writeFake(w http.ResponseWriter, id, doc string) {
@@ -166,6 +174,14 @@ func (m *memKeys) CreateStateKey() (string, []byte, error) {
 // status (synchronous, locally replayable) and message (task-backed).
 func fixtureProfile(t *testing.T, endpoint string) *profile.Profile {
 	t.Helper()
+	p, err := newFixtureProfile(endpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+func newFixtureProfile(endpoint string) (*profile.Profile, error) {
 	status := catalog.Descriptor{
 		Name:         "status",
 		Description:  "Read status",
@@ -184,7 +200,10 @@ func fixtureProfile(t *testing.T, endpoint string) *profile.Profile {
 		InputSchema:  json.RawMessage(`{"type":"object","properties":{"message":{"type":"string","minLength":1}},"required":["message"]}`),
 		OutputSchema: json.RawMessage(`{"type":"object","properties":{"status":{"type":"string"}},"required":["status"]}`),
 		TaskSupport:  catalog.TaskSupportRequired,
-		Strategy:     catalog.StrategyUpstreamTask,
+		Bindings: []catalog.Binding{
+			{Source: catalog.SourceClientRequestID, Target: "/identifier", Required: true},
+		},
+		Strategy: catalog.StrategyUpstreamTask,
 	}
 	guarded := catalog.Descriptor{
 		Name:         "guarded",
@@ -205,7 +224,7 @@ func fixtureProfile(t *testing.T, endpoint string) *profile.Profile {
 	for _, d := range []*catalog.Descriptor{&status, &message, &guarded, &unstable} {
 		digest, err := d.ComputeDigest()
 		if err != nil {
-			t.Fatalf("digest: %v", err)
+			return nil, err
 		}
 		d.Digest = digest
 	}
@@ -220,7 +239,7 @@ func fixtureProfile(t *testing.T, endpoint string) *profile.Profile {
 		State:        profile.StateRefs{Database: "fixture", Credentials: "fixture"},
 		Operations:   []catalog.Descriptor{status, message, guarded, unstable},
 	}
-	return p
+	return p, nil
 }
 
 // fixtureApp wires the full application stack against the fixture server.
@@ -241,10 +260,47 @@ func fixtureAppLimits(t *testing.T, f *fakeTama, limitsCfg limits.Limits) (*Serv
 // before building the Service. The store closes with the test.
 func fixtureConfigFor(t *testing.T, f *fakeTama, limitsCfg limits.Limits) Config {
 	t.Helper()
+	return fixtureConfigWith(t, f, limitsCfg, nil)
+}
+
+func fixtureConfigWith(t *testing.T, f *fakeTama, limitsCfg limits.Limits, mutate func(*profile.Profile)) Config {
+	t.Helper()
+	return fixtureConfigTuned(t, f, limitsCfg, mutate, nil)
+}
+
+func fixtureConfigTuned(
+	t *testing.T,
+	f *fakeTama,
+	limitsCfg limits.Limits,
+	mutate func(*profile.Profile),
+	tune func(*TaskConfig),
+) Config {
+	t.Helper()
 	endpoint := f.ts.URL + "/mcp/app"
 	p := fixtureProfile(t, endpoint)
+	if mutate != nil {
+		mutate(p)
+	}
 
-	st, err := store.Open(context.Background(), t.TempDir()+"/state.db", newMemKeys(), store.Config{Limits: limitsCfg})
+	return fixtureConfigAt(t, f, limitsCfg, mutate, tune, t.TempDir()+"/state.db", newMemKeys())
+}
+
+func fixtureConfigAt(
+	t *testing.T,
+	f *fakeTama,
+	limitsCfg limits.Limits,
+	mutate func(*profile.Profile),
+	tune func(*TaskConfig),
+	dbPath string,
+	keys store.KeyProvider,
+) Config {
+	t.Helper()
+	endpoint := f.ts.URL + "/mcp/app"
+	p := fixtureProfile(t, endpoint)
+	if mutate != nil {
+		mutate(p)
+	}
+	st, err := store.Open(context.Background(), dbPath, keys, store.Config{Limits: limitsCfg})
 	if err != nil {
 		t.Fatalf("store.Open: %v", err)
 	}
@@ -268,7 +324,7 @@ func fixtureConfigFor(t *testing.T, f *fakeTama, limitsCfg limits.Limits) Config
 	if err != nil {
 		t.Fatalf("adapter.New: %v", err)
 	}
-	connect := func(ctx context.Context) (*tama2026.Connection, error) { return adapter.Connect(ctx) }
+	connect := MemoConnect(func(ctx context.Context) (*tama2026.Connection, error) { return adapter.Connect(ctx) })
 
 	workerService, err := worker.NewService(st, NewExecutor(connect), worker.Config{
 		Owner:    "fixture-worker",
@@ -278,12 +334,26 @@ func fixtureConfigFor(t *testing.T, f *fakeTama, limitsCfg limits.Limits) Config
 		t.Fatalf("worker.NewService: %v", err)
 	}
 	t.Cleanup(workerService.Stop)
+	taskCfg := TaskConfig{
+		Owner:         "fixture-tasks",
+		LeaseTTL:      30 * time.Second,
+		SweepInterval: 50 * time.Millisecond,
+	}
+	if tune != nil {
+		tune(&taskCfg)
+	}
+	taskService, err := NewTaskService(st, connect, taskCfg)
+	if err != nil {
+		t.Fatalf("task service: %v", err)
+	}
+	t.Cleanup(taskService.Stop)
 
 	return Config{
 		Profile:        p,
 		Store:          st,
 		Connect:        connect,
 		Worker:         workerService,
+		Tasks:          taskService,
 		AdapterVersion: "test-adapter",
 	}
 }
@@ -298,7 +368,9 @@ func appFromConfig(t *testing.T, cfg Config) (*Service, *store.Store, *worker.Se
 	}
 	t.Cleanup(func() { _ = cfg.Store.Close() })
 	t.Cleanup(cfg.Worker.Stop)
+	t.Cleanup(cfg.Tasks.Stop)
 	_ = cfg.Worker.Start(context.Background())
+	_ = cfg.Tasks.Start(context.Background())
 	return svc, cfg.Store, cfg.Worker
 }
 

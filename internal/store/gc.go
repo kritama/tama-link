@@ -50,14 +50,16 @@ func (s *Store) expirePayloads(ctx context.Context, tx *writeTx, nowMs int64) (G
 			UPDATE submissions
 			SET status = ?, args_enc = NULL, task_id = NULL, events_enc = NULL,
 			    result_enc = NULL, error_code = NULL, error_message = NULL,
-			    error_retryable = 0,
+			    error_retryable = 0, terminal_evidence_enc = NULL,
+			    input_requests_enc = NULL,
 			    updated_at = ?
 		WHERE completed_at IS NOT NULL
 		  AND payload_expires_at IS NOT NULL
 		  AND payload_expires_at <= ?
 		  AND (args_enc IS NOT NULL OR task_id IS NOT NULL OR events_enc IS NOT NULL
 		       OR result_enc IS NOT NULL OR error_code IS NOT NULL OR error_message IS NOT NULL
-		       OR error_retryable != 0)`
+		       OR error_retryable != 0 OR terminal_evidence_enc IS NOT NULL
+		       OR input_requests_enc IS NOT NULL)`
 	res, err := tx.ExecContext(ctx, query,
 		"expired", nowMs, nowMs)
 	if err != nil {
