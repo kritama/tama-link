@@ -57,6 +57,11 @@ type Service struct {
 	now              func() time.Time
 	// inputDeliveryTTL is renewed across tasks/update. Tests shorten it.
 	inputDeliveryTTL time.Duration
+	// finalReadTimeout bounds the independent read after a wait ends and
+	// the mark written after a successful tasks/update. Tests shorten it
+	// on this service only. Zero uses the default. A package-level
+	// override would change every parallel test.
+	finalReadTimeout time.Duration
 }
 
 // New validates cfg and builds a Service.

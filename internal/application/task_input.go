@@ -140,7 +140,7 @@ func (s *Service) deliverInput(ctx context.Context, id, owner string, canonical 
 // caller's context can be cancelled after that acceptance; the mark must
 // still be attempted so the next replay does not send the same input again.
 func (s *Service) recordDeliveredInput(ctx context.Context, id, name, owner string, generation int64, pending []string) *contract.Error {
-	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), finalReadTimeout())
+	persistCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.readDeadline())
 	defer cancel()
 	still, err := s.store.CommitLease(persistCtx, name, owner, generation)
 	if err != nil {

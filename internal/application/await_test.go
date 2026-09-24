@@ -304,11 +304,9 @@ func queuedSubmission(t *testing.T, f *fakeTama) (*Service, *store.Store, string
 func TestAwaitFinalReadDeadlineFallsBackToSnapshot(t *testing.T) {
 	t.Parallel()
 
-	setFinalReadTimeout(time.Nanosecond)
-	t.Cleanup(func() { setFinalReadTimeout(0) })
-
 	f := newFakeTama(t)
 	svc, st, id := queuedSubmission(t, f)
+	svc.finalReadTimeout = time.Nanosecond
 	sub, err := st.GetSubmission(context.Background(), id)
 	if err != nil {
 		t.Fatalf("GetSubmission: %v", err)
