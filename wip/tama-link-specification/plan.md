@@ -17,8 +17,11 @@ surrounding repositories this proxy actually integrates with:
 - `upmaru/tama#123` and the endpoint migration — completed Tama-owned Ecto,
   durable runner, Phoenix PubSub, OAuth composition, and application routing
   that expose the TamaMCP contract;
-- `memovee-cli` — owns binary pinning and profile creation; issue
-  `kritama/memovee-cli#3` tracks profile version 2 and explicit OAuth scopes.
+- `memovee-cli` — owns binary pinning and reconciliation of profiles it
+  manages. It is no longer the only way to create a profile: Tama Link may
+  create a previously absent profile through interactive login. Issue
+  `kritama/memovee-cli#3` still tracks managed profile version 2 and explicit
+  OAuth scopes.
 
 The authoritative contract is `../tama-link-specification.md`. Where this plan
 resolves an open question from that spec, it says so explicitly.
@@ -246,11 +249,14 @@ profiles or add a profile selector to `submit`.
 
 ### D8. Profiles pin an approved operation descriptor catalog
 
-The Memovee CLI or client installer writes a deterministic snapshot containing
-the selected upstream instructions and an allowlisted descriptor for every
-operation: name/title, description, upstream and client-visible input schemas,
-output schema, annotations, expected task/execution strategy, declarative
-bindings, and digest.
+A managed installer, or Tama Link's reviewed bootstrap templates, writes a
+deterministic snapshot containing the selected upstream instructions and an
+allowlisted descriptor for every operation: name/title, description, upstream
+and client-visible input schemas, output schema, annotations, expected
+task/execution strategy, declarative bindings, and digest. Bootstrap copies
+those reviewed descriptors; it does not adopt an arbitrary live tool as
+policy. Output schemas may use a bounded `anyOf` of object schemas so a
+reviewed Tama variant schema can be pinned and enforced.
 
 At runtime Tama Link authenticates, calls `server/discover`, reads the complete
 `tools/list` result, and verifies the pinned descriptors against the live
@@ -616,6 +622,9 @@ issue #15's interactive login and profile-v2 scope contract are implemented.
   interactive login under
   [#15](https://github.com/kritama/tama-link/issues/15) and `plans/login.md`
   — implemented, pending live acceptance;
+- Self-service interactive profile bootstrap under
+  `plans/profile-bootstrap.md` — implemented for the automated contract;
+  live fresh-machine acceptance remains open;
 - Downstream MCP progress-token support: read `_meta.progressToken` on `await`,
   emit rate-limited `notifications/progress` correlated to that request
   (Go SDK `GetProgressToken` + `ServerSession.NotifyProgress`).

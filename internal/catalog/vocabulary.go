@@ -16,6 +16,7 @@ var enforcedKeywords = map[string]bool{
 	"required":             true,
 	"additionalProperties": true,
 	"items":                true,
+	"anyOf":                true,
 	"enum":                 true,
 	"const":                true,
 	"minimum":              true,
@@ -128,6 +129,36 @@ func checkNode(members map[string]json.RawMessage, path string) error {
 			}
 		default:
 			return fmt.Errorf("%s.additionalProperties must be a boolean or a schema object, not %s", path, string(trimmed))
+		}
+	}
+	if anyOf, ok := members["anyOf"]; ok {
+		if err := checkAnyOf(anyOf, path); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// maxAnyOfBranches bounds one anyOf so a pinned schema cannot encode an
+// unbounded alternative set. TamaMCP output variants are at most 16.
+const maxAnyOfBranches = 16
+
+func checkAnyOf(raw json.RawMessage, path string) error {
+	branches, err := requireArray(raw, path, "anyOf")
+	if err != nil {
+		return err
+	}
+	if len(branches) == 0 || len(branches) > maxAnyOfBranches {
+		return fmt.Errorf("%s.anyOf must contain 1-%d schemas", path, maxAnyOfBranches)
+	}
+	for i, branch := range branches {
+		child := fmt.Sprintf("%s.anyOf[%d]", path, i)
+		members, err := schemaObject(branch, child)
+		if err != nil {
+			return err
+		}
+		if err := checkNode(members, child); err != nil {
+			return err
 		}
 	}
 	return nil

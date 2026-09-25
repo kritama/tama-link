@@ -14,17 +14,18 @@ import (
 
 const usage = `Usage:
   tama-link serve --profile <name> [--config-dir <dir>]
-  tama-link login --profile <name> [--config-dir <dir>] [--no-browser]
+  tama-link login [--address <https-origin>] [--type <app|system>] [--profile <name>] [--issuer <https-url>] [--config-dir <dir>] [--no-browser] [--yes]
   tama-link logout --profile <name>
   tama-link version [--json]
 
 The serve command starts the Tama Link MCP server over stdin/stdout for the
 selected profile. Standard output is reserved for MCP JSON-RPC frames.
 
-The login command performs explicit interactive browser authorization for an
-existing profile. With --no-browser, or when the browser cannot be opened,
-it prints the authorization URL and waits for the callback; standard output
-is reserved for that URL.
+The login command authorizes an existing profile or, on an interactive
+terminal, creates a new app or system profile from a reviewed template.
+With --no-browser, or when the browser cannot be opened, it prints the
+authorization URL and waits for the callback; standard output is reserved
+for that URL. A non-interactive new profile requires --address.
 `
 
 func main() {
