@@ -31,6 +31,10 @@ type ClientRecord struct {
 	// second after which the secret is invalid, or zero when the secret
 	// does not expire.
 	SecretExpiresAt int64 `json:"client_secret_expires_at,omitempty"`
+	// Scopes is the canonical scope set the client was registered with.
+	// A record that was registered for a different set, or before scope
+	// binding, does not bind a scoped profile and must be replaced.
+	Scopes []string `json:"scopes,omitempty"`
 }
 
 // secretExpired reports whether the record's client secret has passed its
@@ -60,7 +64,7 @@ func (c *Client) RegisteredClient(ctx context.Context) (*ClientRecord, bool, err
 	if rec.ClientID == "" || rec.Issuer == "" || rec.AuthMethod == "" {
 		return nil, false, fmt.Errorf("stored client record is incomplete")
 	}
-	if recordMissingSecret(&rec) || c.secretExpired(&rec) {
+	if recordMissingSecret(&rec) || c.secretExpired(&rec) || !recordScopesBound(&rec, c.scopes) {
 		return nil, false, nil
 	}
 	return &rec, true, nil
@@ -96,6 +100,18 @@ func (c *Client) loadStoredClient(ctx context.Context) ([]byte, bool, error) {
 func recordMissingSecret(rec *ClientRecord) bool {
 	return (rec.AuthMethod == "client_secret_basic" || rec.AuthMethod == "client_secret_post") &&
 		rec.ClientSecret == ""
+}
+
+// recordScopesBound reports whether the record's registered scope set is
+// the active client's. A client without a requested set (a version 1
+// profile) retains its legacy behavior. A scoped client requires the exact
+// canonical set, so a reconciled profile that changed scopes never reuses
+// registration metadata created for another allowance.
+func recordScopesBound(rec *ClientRecord, active []string) bool {
+	if len(active) == 0 {
+		return true
+	}
+	return scopeSetEqual(active, rec.Scopes)
 }
 
 // currentRecord re-reads the stored client registration and requires it to
@@ -188,6 +204,9 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 		"response_types":             []string{"code"},
 		"token_endpoint_auth_method": md.AS.TokenEndpointAuthMethod(),
 	}
+	if c.scope != "" {
+		body["scope"] = c.scope
+	}
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("encode registration: %w", err)
@@ -214,13 +233,19 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 		ClientID     string `json:"client_id"`
 		ClientSecret string `json:"client_secret"`
 		// Zero means the secret does not expire (RFC 7591).
-		SecretExpiresAt int64 `json:"client_secret_expires_at"`
+		SecretExpiresAt int64         `json:"client_secret_expires_at"`
+		Scope           declaredScope `json:"scope"`
 	}
 	if err := json.Unmarshal(payload, &created); err != nil {
 		return nil, fmt.Errorf("decode registration: json")
 	}
 	if created.ClientID == "" {
 		return nil, fmt.Errorf("registration returned no client id")
+	}
+	// A registration that declares scopes must support every requested
+	// scope; otherwise the browser consent could not grant them.
+	if err := registrationScopeOK(c.scopes, created.Scope); err != nil {
+		return nil, err
 	}
 	rec := &ClientRecord{
 		ClientID:        created.ClientID,
@@ -229,6 +254,7 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 		Issuer:          md.AS.Issuer,
 		RegisteredAt:    c.clock().UTC(),
 		SecretExpiresAt: created.SecretExpiresAt,
+		Scopes:          c.scopes,
 	}
 	// A client-secret auth method without a secret would be persisted as a
 	// permanently unusable registration: readiness would accept submits
@@ -402,13 +428,38 @@ func (rec *ClientRecord) applyHeaderAuth(req *http.Request) error {
 
 // tokenResponse is the RFC 6749 token endpoint response.
 type tokenResponse struct {
-	AccessToken  string `json:"access_token"`
-	TokenType    string `json:"token_type"`
-	ExpiresIn    int64  `json:"expires_in"`
-	RefreshToken string `json:"refresh_token"`
-	Scope        string `json:"scope"`
-	Error        string `json:"error"`
-	ErrorDesc    string `json:"error_description"`
+	AccessToken  string        `json:"access_token"`
+	TokenType    string        `json:"token_type"`
+	ExpiresIn    int64         `json:"expires_in"`
+	RefreshToken string        `json:"refresh_token"`
+	Scope        declaredScope `json:"scope"`
+	Error        string        `json:"error"`
+	ErrorDesc    string        `json:"error_description"`
+}
+
+// declaredScope is a scope declaration in a JSON response where presence is
+// a contract: an omitted member, an explicit null, and an empty string must
+// stay distinguishable, because only an omitted member may inherit the
+// requested set. A plain string collapses all three into "".
+type declaredScope struct {
+	present bool
+	value   string
+}
+
+// UnmarshalJSON records that the member was present, including an explicit
+// null or empty value.
+func (d *declaredScope) UnmarshalJSON(data []byte) error {
+	d.present = true
+	if string(data) == "null" {
+		d.value = ""
+		return nil
+	}
+	var s string
+	if err := json.Unmarshal(data, &s); err != nil {
+		return err
+	}
+	d.value = s
+	return nil
 }
 
 // postToken performs one token endpoint exchange and decodes the response.

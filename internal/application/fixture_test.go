@@ -234,6 +234,7 @@ func newFixtureProfile(endpoint string, kind profile.Kind) (*profile.Profile, er
 		Bounds:       profile.Bounds{ProtocolMin: "2026-07-28", ProtocolMax: "2026-07-28"},
 		State:        profile.StateRefs{Database: "fixture", Credentials: "fixture"},
 		Operations:   operations,
+		Scopes:       []string{"mcp.message"},
 	}
 	return p, nil
 }

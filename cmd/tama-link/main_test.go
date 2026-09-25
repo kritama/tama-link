@@ -221,17 +221,53 @@ func TestRunServeFailsWhenProfilePathIsADirectory(t *testing.T) {
 	}
 }
 
-func TestRunLoginStub(t *testing.T) {
+func TestRunLoginMissingProfile(t *testing.T) {
 	t.Parallel()
 
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"login", "--profile", "demo"}, &stdout, &stderr)
+	code := run(context.Background(), []string{"login", "--profile", "demo", "--config-dir", t.TempDir()}, &stdout, &stderr)
 
-	if code != 1 {
-		t.Fatalf("exit code = %d, want 1", code)
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
 	}
-	if !strings.Contains(stderr.String(), "login is not implemented in this phase") {
+	if !strings.Contains(stderr.String(), `profile "demo" not found at`) {
 		t.Fatalf("stderr = %q", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
+// TestRunLoginVersion1ProfileFailsClosed proves the migration contract:
+// a version 1 profile loads for the non-interactive runtime but login
+// rejects it with an actionable error instead of an implicit scope set.
+func TestRunLoginVersion1ProfileFailsClosed(t *testing.T) {
+	t.Parallel()
+
+	configDir := t.TempDir()
+	p := demoProfileForWrite()
+	p.Version = profile.LegacySchemaVersion
+	p.Scopes = nil
+	if err := p.Validate("demo"); err != nil {
+		t.Fatalf("legacy profile: %v", err)
+	}
+	if err := writeDemoProfileFile(configDir, "demo", p); err != nil {
+		t.Fatalf("write profile: %v", err)
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run(context.Background(), []string{
+		"login", "--profile", "demo", "--config-dir", configDir,
+	}, &stdout, &stderr)
+
+	if code != 2 {
+		t.Fatalf("exit code = %d, want 2", code)
+	}
+	if !strings.Contains(stderr.String(), "regenerate it as version 2") {
+		t.Fatalf("stderr = %q, want the migration error", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
 	}
 }
 

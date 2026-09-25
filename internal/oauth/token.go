@@ -21,10 +21,14 @@ const maxTokenExpirySeconds = int64(math.MaxInt64) / int64(time.Second)
 // rediscovery, and so a profile that points at a different authorization
 // server fails closed instead of replaying a foreign credential.
 type refreshCredential struct {
-	RefreshToken  string    `json:"refresh_token"`
-	TokenEndpoint string    `json:"token_endpoint"`
-	Issuer        string    `json:"issuer"`
-	Updated       time.Time `json:"updated"`
+	RefreshToken  string `json:"refresh_token"`
+	TokenEndpoint string `json:"token_endpoint"`
+	Issuer        string `json:"issuer"`
+	// Scopes is the granted scope set bound to this credential; refresh
+	// revalidates the token endpoint's returned scope against it. Absent in
+	// credentials persisted before scope binding.
+	Scopes  []string  `json:"scopes,omitempty"`
+	Updated time.Time `json:"updated"`
 }
 
 // loadRefresh returns the stored refresh credential, or found=false.
@@ -56,11 +60,12 @@ func (c *Client) loadRefresh() (*refreshCredential, bool, error) {
 // does not by itself count: another process may have logged the profile
 // out, and a cached token would keep accepting work that the worker can
 // only terminate as authentication_required. The probe applies the same
-// issuer and endpoint bindings refreshLocked enforces: a credential
-// refresh could not use — a missing client record, or a record or
-// credential no longer bound to the active profile issuer or its token
-// endpoint — is not ready, so submit keeps the idempotency key free for
-// the reauthorized retry instead of accepting a doomed row.
+// issuer, endpoint, and scope bindings refreshLocked enforces: a
+// credential refresh could not use — a missing client record, or a record
+// or credential no longer bound to the active profile issuer, its token
+// endpoint, or its canonical scope set — is not ready, so submit keeps
+// the idempotency key free for the reauthorized retry instead of
+// accepting a doomed row.
 func (c *Client) HasCredentials(ctx context.Context) (bool, error) {
 	rec, found, err := c.RegisteredClient(ctx)
 	if err != nil {
@@ -77,6 +82,13 @@ func (c *Client) HasCredentials(ctx context.Context) (bool, error) {
 		return false, nil
 	}
 	if err := checkIssuerBoundEndpoint(fenced.credential.TokenEndpoint, fenced.credential.Issuer); err != nil {
+		return false, nil
+	}
+	// A credential written before scope binding, or by a profile with a
+	// different scope set, does not bind this client: the profile is not
+	// ready until a scoped login replaces it. A client without a requested
+	// set (a version 1 profile) retains its legacy behavior.
+	if !credentialScopesBound(fenced.credential.Scopes, c.scopes) {
 		return false, nil
 	}
 	return true, nil

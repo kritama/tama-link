@@ -20,7 +20,7 @@ must be reconciled before implementation or acceptance continues.
 | --- | --- | --- | --- |
 | [`tama-link-specification.md`](tama-link-specification.md) | Authoritative product and protocol contract | Implementation handoff | Repository scope |
 | [`tama-link-specification/plan.md`](tama-link-specification/plan.md) | Phase roadmap and dependency ledger | Active | [#9](https://github.com/kritama/tama-link/issues/9) |
-| [`tama-link-specification/plans/login.md`](tama-link-specification/plans/login.md) | Interactive OAuth login implementation plan | Active | [#15](https://github.com/kritama/tama-link/issues/15) |
+| [`tama-link-specification/plans/login.md`](tama-link-specification/plans/login.md) | Interactive OAuth login implementation plan | Implemented; live acceptance pending | [#15](https://github.com/kritama/tama-link/issues/15) |
 | [`tama-link-specification/acceptance/phase-2.md`](tama-link-specification/acceptance/phase-2.md) | Phase 2 gate definitions and required live evidence | Active | [#8](https://github.com/kritama/tama-link/issues/8) |
 
 ## Layout convention

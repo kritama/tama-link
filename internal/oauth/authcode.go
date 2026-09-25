@@ -61,6 +61,9 @@ func (c *Client) NewAuthorizationRequest(md *Metadata, rec *ClientRecord, redire
 	q.Set("code_challenge", challenge)
 	q.Set("code_challenge_method", "S256")
 	q.Set("resource", c.endpoint)
+	if c.scope != "" {
+		q.Set("scope", c.scope)
+	}
 	endpoint.RawQuery = q.Encode()
 	return &AuthorizationRequest{URL: endpoint, State: state, Verifier: verifier, RedirectURI: redirectURI}, nil
 }
@@ -97,6 +100,9 @@ func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *C
 	form.Set("redirect_uri", req.RedirectURI)
 	form.Set("code_verifier", req.Verifier)
 	form.Set("resource", c.endpoint)
+	if c.scope != "" {
+		form.Set("scope", c.scope)
+	}
 
 	// Serialize against this process's own refresh and logout: with the
 	// shared lease owner, only the local lock orders in-process credential
@@ -143,11 +149,18 @@ func (c *Client) CompleteAuthorization(ctx context.Context, md *Metadata, rec *C
 			if err := c.currentRecord(pctx, rec); err != nil {
 				return err
 			}
+			granted, err := c.checkReturnedScope(tok.Scope)
+			if err != nil {
+				return err
+			}
 			cred := &refreshCredential{
 				RefreshToken:  tok.RefreshToken,
 				TokenEndpoint: md.AS.TokenEndpoint,
 				Issuer:        md.AS.Issuer,
-				Updated:       c.clock().UTC(),
+				// Scopes binds the granted set to the durable credential;
+				// refresh revalidates against it.
+				Scopes:  granted,
+				Updated: c.clock().UTC(),
 			}
 			fenced, err := c.loadFenced(pctx)
 			if err != nil {

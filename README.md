@@ -66,6 +66,12 @@ pinned TamaMCP fixture gate runs in CI. Live migrated-Tama acceptance has not
 passed. Fixture, mocked, and Compose pin results are not that gate. See
 [`wip/tama-link-specification/acceptance/phase-2.md`](wip/tama-link-specification/acceptance/phase-2.md).
 
+Phase 3 adds the explicit interactive login and profile schema version 2:
+profiles now declare a non-empty, canonical `scopes` array that binds every
+authorization request, token response, and refresh. Version 1 profiles stay
+loadable for the non-interactive runtime but fail `login` with a migration
+error.
+
 No client or installer should treat this revision as production ready.
 
 ## Development
@@ -99,8 +105,20 @@ tama-app    -> tama-link serve --profile tama-app
 tama-system -> tama-link serve --profile tama-system
 ```
 
-`login --profile <name>` and `logout --profile <name>` are reserved and return
-a not-implemented error in this foundation.
+Authorize an existing profile interactively:
+
+```sh
+go run ./cmd/tama-link login --profile tama-app
+```
+
+The default path opens the authorization URL in the platform browser and
+waits on a bounded loopback callback. With `--no-browser`, or when the browser
+cannot be opened, the authorization URL is printed to standard output for a
+manual handoff; all other output goes to standard error. Exit status is 0 for
+a committed and verified login, 1 for runtime and authorization failures, and
+2 for usage or profile-contract errors, including a version 1 profile that
+has not been regenerated with scopes. `logout --profile <name>` remains a
+reserved command in this phase.
 
 ## Branching
 

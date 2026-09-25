@@ -125,33 +125,12 @@ func stateLayout(p *profile.Profile, configDir string) (dbPath string, namespace
 // verified adapter, leased worker, and the application service. The cleanup
 // callback shuts down the worker and closes the store.
 func buildApp(ctx context.Context, p *profile.Profile, configDir string, hooks serveHooks) (server.App, func(), error) {
-	dbPath, namespace, err := stateLayout(p, configDir)
+	rt, err := openProfileRuntime(ctx, p, configDir, hooks)
 	if err != nil {
 		return nil, nil, err
 	}
-	if hooks.open == nil {
-		hooks.open = credential.New
-	}
-	kr, err := hooks.open(namespace)
-	if err != nil {
-		return nil, nil, fmt.Errorf("open credential backend: %w", err)
-	}
-
-	st, err := store.Open(ctx, dbPath, kr, store.Config{Limits: p.EffectiveLimits()})
-	if err != nil {
-		return nil, nil, fmt.Errorf("open state store: %w", err)
-	}
-
-	oauthClient, err := oauth.New(oauth.Config{
-		Endpoint: p.Endpoint,
-		Issuer:   p.Issuer,
-		Secrets:  kr,
-		Lease:    st,
-	})
-	if err != nil {
-		_ = st.Close()
-		return nil, nil, fmt.Errorf("configure oauth: %w", err)
-	}
+	st, oauthClient := rt.Store, rt.OAuth
+	closeStore := func() { _ = st.Close() }
 
 	limits := p.EffectiveLimits()
 	up, err := upstream.New(upstream.Config{
@@ -166,7 +145,7 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, hooks s
 		HTTPClient:         hooks.client(),
 	})
 	if err != nil {
-		_ = st.Close()
+		closeStore()
 		return nil, nil, fmt.Errorf("configure upstream client: %w", err)
 	}
 
@@ -176,7 +155,7 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, hooks s
 		AdapterVersion: version.Version,
 	})
 	if err != nil {
-		_ = st.Close()
+		closeStore()
 		return nil, nil, fmt.Errorf("configure adapter: %w", err)
 	}
 
@@ -186,7 +165,7 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, hooks s
 	connect = application.MemoConnect(connect)
 	kind, err := p.Kind()
 	if err != nil {
-		_ = st.Close()
+		closeStore()
 		return nil, nil, fmt.Errorf("resolve profile kind: %w", err)
 	}
 	var workerService *worker.Service
@@ -199,7 +178,7 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, hooks s
 			Credentials: oauthClient,
 		})
 		if err != nil {
-			_ = st.Close()
+			closeStore()
 			return nil, nil, fmt.Errorf("configure task runner: %w", err)
 		}
 	case profile.KindSystem:
@@ -208,11 +187,11 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, hooks s
 			LeaseTTL: workerLeaseTTL,
 		})
 		if err != nil {
-			_ = st.Close()
+			closeStore()
 			return nil, nil, fmt.Errorf("configure worker: %w", err)
 		}
 	default:
-		_ = st.Close()
+		closeStore()
 		return nil, nil, fmt.Errorf("unknown profile kind %q", kind)
 	}
 
@@ -232,7 +211,7 @@ func buildApp(ctx context.Context, p *profile.Profile, configDir string, hooks s
 		if workerService != nil {
 			workerService.Stop()
 		}
-		_ = st.Close()
+		closeStore()
 		return nil, nil, fmt.Errorf("configure application: %w", err)
 	}
 

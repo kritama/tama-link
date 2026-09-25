@@ -76,11 +76,24 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 	if err := checkIssuerBoundEndpoint(cred.TokenEndpoint, cred.Issuer); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrNoCredentials, err)
 	}
+	// The stored grant must bind the active profile scopes: a credential
+	// written before scope binding, or by a profile with a different scope
+	// set, is not ready — the profile needs a scoped login. A client
+	// without a requested set (a version 1 profile) retains its legacy
+	// behavior.
+	if !credentialScopesBound(cred.Scopes, c.scopes) {
+		return "", fmt.Errorf("%w: stored refresh credential does not bind the active profile scopes", ErrNoCredentials)
+	}
 
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", cred.RefreshToken)
 	form.Set("resource", c.endpoint)
+	// The active canonical scope string is part of the refresh request so
+	// the exchange validates against the live profile, not a stale binding.
+	if c.scope != "" {
+		form.Set("scope", c.scope)
+	}
 
 	// The exchange is a network call and the credential write follows it,
 	// so the lease is renewed on a third of its TTL across the whole
@@ -91,6 +104,13 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 			return c.postToken(ectx, cred.TokenEndpoint, rec, form)
 		},
 		func(pctx context.Context, tok *tokenResponse) error {
+			// The grant's scope binding is revalidated against the set the
+			// durable credential bound: a reduced, expanded, or malformed
+			// returned set fails closed before any credential write. A
+			// credential without a bound set predates scope binding.
+			if err := checkBoundScope(cred.Scopes, tok.Scope); err != nil {
+				return err
+			}
 			// The fenced store is the persistence fence: the slot write
 			// plus the atomic fence commit decide the outcome. The commit
 			// is bound to the lease epoch captured at claim time, so a
@@ -100,13 +120,18 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 			return c.applyTokens(pctx, fenced, tok, leaseGeneration)
 		})
 	if err != nil {
-		if errors.Is(err, ErrGrantInvalid) {
+		// Both outcomes consume the grant on the server side: an explicit
+		// invalid_grant, or a successful exchange whose scope declaration
+		// contradicted the binding after the server had already processed
+		// (and possibly rotated) the refresh token. Retaining a rotated
+		// token would replay it and some servers treat replay as reuse and
+		// revoke the whole grant family, so either way the durable
+		// credential is invalidated: readiness then rejects new work as
+		// authentication_required instead of accepting submissions that
+		// can only fail on the same grant. The caller holds the lease
+		// epoch, so the fence clear is gated on it.
+		if errors.Is(err, ErrGrantInvalid) || errors.Is(err, ErrScopeMismatch) {
 			c.clearToken()
-			// The grant is known-invalid: invalidate the durable refresh
-			// credential too, so readiness rejects new work as
-			// authentication_required instead of accepting submissions
-			// that can only fail on the same grant. The caller holds the
-			// lease epoch, so the fence clear is gated on it.
 			if invalidateErr := c.invalidateCredential(ctx, leaseGeneration); invalidateErr != nil {
 				return "", errors.Join(err, invalidateErr)
 			}

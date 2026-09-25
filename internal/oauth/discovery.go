@@ -15,6 +15,10 @@ type ProtectedResource struct {
 	Issuer               string   `json:"issuer"`
 	AuthorizationServers []string `json:"authorization_servers"`
 	Resource             string   `json:"resource"`
+	// ScopesSupported is the resource's advertised scope set. A nil value
+	// means the document does not advertise scopes and is not authoritative
+	// for them; a present list, including an empty one, must be satisfied.
+	ScopesSupported *[]string `json:"scopes_supported"`
 }
 
 // AuthorizationServer is the RFC 8414 authorization-server metadata document.
@@ -27,6 +31,18 @@ type AuthorizationServer struct {
 	GrantTypes               []string `json:"grant_types_supported"`
 	ResponseTypeBindings     []string `json:"response_types_supported"`
 	TokenEndpointAuthMethods []string `json:"token_endpoint_auth_methods_supported"`
+	// ScopesSupported is the server's advertised scope set. See
+	// ProtectedResource.ScopesSupported for the presence semantics.
+	ScopesSupported *[]string `json:"scopes_supported"`
+	// AuthorizationResponseIssParameterSupported is the RFC 9207 metadata
+	// member: when true the authorization response must carry the issuer
+	// and the callback must require and validate it against the validated
+	// authorization-server issuer.
+	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported"`
+	// AuthorizationServerIssuersSupported is the nonstandard Tama list form
+	// of the same advertisement. When present and non-empty it must include
+	// the validated issuer and the callback must require iss as well.
+	AuthorizationServerIssuersSupported []string `json:"authorization_server_issuers_supported"`
 }
 
 // Metadata is the validated discovery result for one profile endpoint.
@@ -80,10 +96,27 @@ func (c *Client) Discover(ctx context.Context) (*Metadata, error) {
 	return &Metadata{PRM: prm, AS: as, ASURL: asURL}, nil
 }
 
+// IssuerResponseRequired reports whether discovery says the server supports
+// the RFC 9207 authorization response issuer parameter: the standard
+// boolean member set to true, or the nonstandard Tama issuer list form
+// present and non-empty (its list must include the validated issuer, which
+// validateAS enforces). A required response parameter must be present and
+// equal to the validated issuer on every authorization callback.
+func (m *Metadata) IssuerResponseRequired() bool {
+	if m.AS.AuthorizationResponseIssParameterSupported {
+		return true
+	}
+	return len(m.AS.AuthorizationServerIssuersSupported) > 0 &&
+		contains(m.AS.AuthorizationServerIssuersSupported, m.AS.Issuer)
+}
+
 // validatePRM enforces the RFC 9728 invariants this client depends on.
 func validatePRM(prm *ProtectedResource, endpoint string) error {
 	if len(prm.AuthorizationServers) == 0 {
 		return fmt.Errorf("metadata lists no authorization servers")
+	}
+	if err := validateAdvertisedScopes("protected-resource metadata", prm.ScopesSupported); err != nil {
+		return err
 	}
 	if prm.Resource != endpoint {
 		return fmt.Errorf("protected-resource metadata does not bind this endpoint")
@@ -148,6 +181,12 @@ func validateAS(as *AuthorizationServer, issuer string) error {
 	method := tokenEndpointAuthMethod(as.TokenEndpointAuthMethods)
 	if !supportedAuthMethods[method] {
 		return fmt.Errorf("authorization server advertises no supported token endpoint auth method (first: %q)", method)
+	}
+	if err := validateAdvertisedScopes("authorization-server metadata", as.ScopesSupported); err != nil {
+		return err
+	}
+	if len(as.AuthorizationServerIssuersSupported) > 0 && !contains(as.AuthorizationServerIssuersSupported, issuer) {
+		return fmt.Errorf("authorization-server issuer advertisement does not include the validated issuer")
 	}
 	return nil
 }

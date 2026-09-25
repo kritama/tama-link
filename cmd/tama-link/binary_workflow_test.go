@@ -264,6 +264,7 @@ func writeBinaryProfile(t *testing.T, configDir, name, base, path string, op cat
 		Bounds:       profile.Bounds{ProtocolMin: "2026-07-28", ProtocolMax: "2026-07-28"},
 		State:        profile.StateRefs{Database: "default", Credentials: "default"},
 		Operations:   []catalog.Descriptor{op},
+		Scopes:       []string{"mcp.message"},
 	}
 	if err := p.Validate(profile.Name(name)); err != nil {
 		t.Fatal(err)

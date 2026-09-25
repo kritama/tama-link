@@ -595,8 +595,8 @@ func newStaticClient(t *testing.T, secrets *fakeSecrets, lease *fakeLease, clock
 	return client
 }
 
-// metadataServer serves protected-resource and authorization-server metadata
-// plus a token endpoint for one fixture pair.
+// metadataServer serves protected-resource and authorization-server
+// metadata plus a token and registration endpoint for one fixture pair.
 type metadataServer struct {
 	t         *testing.T
 	ts        *httptest.Server
@@ -612,6 +612,13 @@ type metadataServer struct {
 	tokenConcur    int
 	tokenMaxConcur int
 	tokenReqMu     sync.Mutex
+	// registerBody is the dynamic client registration response; the
+	// default registers cid-fixture with a static secret.
+	registerBody  string
+	registerCalls int
+	registerReq   *http.Request
+	registerRaw   []byte
+	registerMu    sync.Mutex
 }
 
 func (s *metadataServer) start(t *testing.T) *metadataServer {
@@ -663,6 +670,23 @@ func (s *metadataServer) start(t *testing.T) *metadataServer {
 			}
 			w.WriteHeader(status)
 			_, _ = fmt.Fprint(w, s.tokenBody)
+		case "/oauth/register":
+			body, err := io.ReadAll(r.Body)
+			if err != nil {
+				t.Fatalf("read registration body: %v", err)
+			}
+			s.registerMu.Lock()
+			s.registerReq = r.Clone(context.Background())
+			s.registerRaw = body
+			s.registerCalls++
+			resp := s.registerBody
+			s.registerMu.Unlock()
+			if resp == "" {
+				resp = `{"client_id":"cid-fixture","client_secret":"shh-fixture","client_secret_expires_at":0}`
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusCreated)
+			_, _ = fmt.Fprint(w, resp)
 		default:
 			http.NotFound(w, r)
 		}
@@ -739,7 +763,9 @@ func serverPRM(serverURL string) string {
 	return fmt.Sprintf(`{"issuer":%q,"authorization_servers":[%q],"resource":%q}`, serverURL, serverURL+"/oauth", endpoint)
 }
 
-// serverAS is a valid authorization-server document for one server.
+// serverAS is a valid authorization-server document for one server, in the
+// shape the real Tama provider publishes: the RFC 9207 issuer-response
+// support flag is advertised, and the resource's scopes are listed.
 func serverAS(serverURL string) string {
 	issuer := serverURL + "/oauth"
 	return fmt.Sprintf(`{
@@ -750,7 +776,8 @@ func serverAS(serverURL string) string {
 		"code_challenge_methods_supported": ["S256"],
 		"grant_types_supported": ["authorization_code", "refresh_token"],
 		"response_types_supported": ["code"],
-		"token_endpoint_auth_methods_supported": ["client_secret_basic"]
+		"token_endpoint_auth_methods_supported": ["client_secret_basic"],
+		"authorization_response_iss_parameter_supported": true
 	}`, issuer, serverURL+"/oauth/authorize", serverURL+"/oauth/token", serverURL+"/oauth/register")
 }
 

@@ -1027,9 +1027,19 @@ discovery. Tama Link decodes `scopes_supported` from both metadata documents and
 requires the profile's requested scopes to be a subset of each authoritative
 list that is present. It sends the canonical scope string in the authorization
 request. If a token response declares `scope`, the returned set must equal the
-requested set; omission inherits the requested set. Reduced, expanded,
-malformed, or otherwise different returned scopes fail closed. Granted scopes
-are bound to the durable refresh credential and revalidated during refresh.
+requested set; only an omitted member inherits the requested set, and an
+explicit null or empty declaration is present and fails closed. Reduced,
+expanded, malformed, or otherwise different returned scopes fail closed.
+Granted scopes are bound to the durable refresh credential and revalidated
+during refresh.
+
+The stored registration and refresh credential must bind the active
+profile's canonical scope set: a scoped profile whose stored credential is
+unbound or mismatched is not ready and requires a login, the refresh request
+carries the active canonical scope string, and a dynamic client registration
+persists the scope set it was registered with so a registration created for a
+different set is unusable and replaced through the fenced path. Version 1
+profiles that request no scopes retain the legacy behavior.
 
 Browser authorization and consent remain user-visible. Tokens must be stored
 only through the configured secure credential backend, redacted from errors,
@@ -1053,16 +1063,19 @@ return an actionable terminal or retryable error when user interaction is
 required.
 
 The authorization-code exchange binds one exact IPv4 loopback redirect URI.
-Dynamic registration uses the native-loopback base `http://127.0.0.1`. Each
-attempt binds `127.0.0.1:0` before the authorization URL is built and uses the
-fixed callback path `/oauth/callback`. The exact selected URI appears in the
+Dynamic registration uses the native-loopback base `http://127.0.0.1` with
+the fixed callback path `/oauth/callback`; the per-attempt port is not
+registered because it varies. Each attempt binds `127.0.0.1:0` before the
+authorization URL is built and uses the fixed callback path
+`/oauth/callback`. The exact selected URI appears in the
 authorization request, is required on the observed callback, and is resent
 verbatim in the token request, as the authorization-code grant requires. A
 callback observed on any other URI is rejected before any token request is
 sent. The callback is single-use, bounded by a five-minute deadline, validates
-state and the authorization response issuer when advertised, returns only fixed
-non-reflective HTML with restrictive security headers, and closes on every
-terminal path.
+state and the authorization response issuer when the server advertises
+`authorization_response_iss_parameter_supported` (or the nonstandard Tama
+issuer list form), returns only fixed non-reflective HTML with restrictive
+security headers, and closes on every terminal path.
 
 Interactive attempts are serialized by a profile-scoped durable `oauth/login`
 lease that is renewed during the bounded browser wait and expires after a
@@ -1253,10 +1266,11 @@ profile's credentials after checking policy; it does not delete profile state.
 `doctor` is read-only. Memovee-owned profile setup is normally performed by the
 Memovee CLI.
 
-Current delivery status is explicit: `serve` and `version` are implemented;
-`login` and `logout` are reserved fail-closed stubs; and `doctor` is not yet
-wired into the binary. The Phase 3 command work must not be described as
-available until its behavioral tests and secure credential paths pass.
+Current delivery status is explicit: `serve`, `version`, and interactive
+`login` are implemented; `logout` remains a reserved fail-closed stub; and
+`doctor` is not yet wired into the binary. The remaining Phase 3 command work
+must not be described as available until its behavioral tests and secure
+credential paths pass.
 
 Human output may use progress and color when attached to a terminal. JSON and
 non-interactive output must be deterministic, ANSI-free, and free of secret
@@ -1404,10 +1418,11 @@ App and System routes, owner-bound durable task store and runner, PubSub-backed
 notifications, and migration away from the legacy session-scoped task table.
 
 Live Link acceptance has not passed. The remaining work is no longer waiting
-for issue #123: Tama Link must implement the version 2 scope contract and
-interactive login flow, replace the fail-closed `make live-accept` scaffold
-with the documented black-box runner, select an immutable runnable Tama and
-provider topology, and execute the App and System workflows. That live evidence
+for issue #123, and Tama Link has implemented the version 2 scope contract
+and interactive login flow; what remains is to replace the fail-closed
+`make live-accept` scaffold with the documented black-box runner, select an
+immutable runnable Tama and provider topology, and execute the App and System
+workflows. That live evidence
 must cover stateless discovery, standard headers, OAuth, owner isolation,
 owner-bound task lookup, input responses, notification and polling recovery,
 terminal capture through `tasks/get`, ambiguous replay, Link restart, Tama

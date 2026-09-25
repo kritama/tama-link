@@ -96,6 +96,7 @@ func wiringProfile(t *testing.T, name, origin, tool string) *profile.Profile {
 		Bounds:       profile.Bounds{ProtocolMin: "2026-07-28", ProtocolMax: "2026-07-28"},
 		State:        profile.StateRefs{Database: "default", Credentials: "default"},
 		Operations:   []catalog.Descriptor{d},
+		Scopes:       []string{"system.inspect"},
 	}
 	if err := p.Validate(profile.Name(name)); err != nil {
 		t.Fatalf("validate %s: %v", name, err)
