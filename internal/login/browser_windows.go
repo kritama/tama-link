@@ -5,9 +5,10 @@ package login
 import "os/exec"
 
 // browserCommand is the fixed Windows opener through the native URL
-// handler: the URL is one argument, never a shell invocation.
+// protocol handler: rundll32 delegates the URL to the user's registered
+// browser with the URL as a single argument, never a shell invocation.
 func browserCommand(rawURL string) *exec.Cmd {
-	return exec.Command("rundll32", "shell32.dll,Control_RunDLL", rawURL)
+	return exec.Command("rundll32", "url.dll,FileProtocolHandler", rawURL)
 }
 
 // openBrowser opens the authorization URL through the native Windows URL
