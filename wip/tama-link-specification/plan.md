@@ -1,6 +1,7 @@
 # Tama Link Implementation Plan
 
 Status: implementation plan (supersedes nothing; refines `../tama-link-specification.md`)
+Updated: 2026-09-25
 
 This plan sequences the work required to satisfy the Tama Link specification and
 records the concrete decisions the spec leaves open. It is grounded in the
@@ -13,11 +14,11 @@ surrounding repositories this proxy actually integrates with:
   `private_key_jwt`, RFC 7662 introspection, refresh-token lifecycle);
 - `memovee` — the authorization server (issuer `https://app.localhost`) and the
   host of the local Tama topology;
-- `upmaru/tama#123` and the later endpoint migration — the Tama-owned Ecto,
+- `upmaru/tama#123` and the endpoint migration — completed Tama-owned Ecto,
   durable runner, Phoenix PubSub, OAuth composition, and application routing
-  needed to expose the TamaMCP contract;
-- `memovee-cli` — will own binary pinning and profile creation (not yet
-  implemented).
+  that expose the TamaMCP contract;
+- `memovee-cli` — owns binary pinning and profile creation; issue
+  `kritama/memovee-cli#3` tracks profile version 2 and explicit OAuth scopes.
 
 The authoritative contract is `../tama-link-specification.md`. Where this plan
 resolves an open question from that spec, it says so explicitly.
@@ -25,9 +26,10 @@ resolves an open question from that spec, it says so explicitly.
 ## Current state
 
 Phase 0 is complete: `serve --profile <name>`, reserved `login`/`logout`
-stubs, `version [--json]`, the two-tool STDIO server with placeholder
-`not_implemented` handlers, and an end-to-end test that builds the real
-binary and completes an initialize/`tools/list` handshake.
+stubs, `version [--json]`, the two-tool STDIO server, and an end-to-end test
+that builds the real binary and completes an initialize/`tools/list`
+handshake. The original `not_implemented` tool handlers were replaced by the
+Phase 2 application handlers.
 
 Phase 1 is complete. The durable-domain implementation now includes:
 
@@ -64,9 +66,11 @@ Phase 1 is complete. The durable-domain implementation now includes:
 
 Issues #2–#7 have landed the transport, OAuth, catalog boundary, App tasks,
 System replay, and downstream `submit`/`await` handlers. Issue #8's package
-fixture gate runs in CI against the pinned TamaMCP documents. Phase 2 is not
-complete: live migrated-Tama acceptance has not passed, and fixture or mocked
-results must not be reported as that gate.
+fixture, mocked integration, and Compose pin gates pass. Phase 2 is not
+complete: live App/System acceptance has not passed, and those earlier results
+must not be reported as the live gate. The Tama-owned prerequisite in
+`upmaru/tama#123` is complete; the remaining blockers are Link's interactive
+login/profile-v2 work and the black-box live runner.
 
 ## Key architectural decisions (resolving spec open questions)
 
@@ -80,14 +84,13 @@ protocol sessions, `Mcp-Session-Id`, client-requested task augmentation,
 Phase 2 uses a reviewed stable release of the official Go MCP SDK for the core
 `2026-07-28` transport, `server/discover`, `tools/list`, `tools/call`, and
 `subscriptions/listen` behavior it exposes. The pinned `go-sdk v1.7.0` is the
-current implementation baseline. Its public client API has no Tasks extension
-types, and its core subscription type cannot request task IDs. Before coding,
-issue #2 must re-audit the selected stable SDK. If those gaps remain, add one
-focused `internal/upstream/tasks` extension layer for `tasks/get`,
-`tasks/update`, `tasks/cancel`, task-ID subscriptions, and
-`notifications/tasks`. That layer must reuse the SDK's core wire conventions
-and must be checked against TamaMCP's pinned fixtures; it must not recreate a
-legacy session client or fork general MCP behavior.
+current implementation baseline. Issue #2 confirmed that its public client API
+has no Tasks extension types and its core subscription type cannot request task
+IDs, so Tama Link implements one focused Tasks/subscription extension layer for
+`tasks/get`, `tasks/update`, `tasks/cancel`, task-ID subscriptions, and
+`notifications/tasks`. That layer reuses the SDK's core wire conventions and is
+checked against TamaMCP's pinned fixtures; it does not recreate a legacy
+session client or fork general MCP behavior.
 
 Every upstream request carries `MCP-Protocol-Version`, `Mcp-Method`, conditional
 `Mcp-Name`, and the required per-request `_meta` protocol version, Link client
@@ -479,7 +482,7 @@ internal/adapter/tama2026/ MCP 2026-07-28 submit/await/normalize adapter
 internal/limits/          size, rate, timeout, retry, retention bounds
 ```
 
-## Phase 0 — finish the repository foundation
+## Phase 0 — repository foundation — complete
 
 - Wire `serve --profile <name>` (profile flag required for `serve`);
 - reserve `login --profile <name>` and `logout --profile <name>` CLI wiring;
@@ -490,7 +493,7 @@ internal/limits/          size, rate, timeout, retry, retention bounds
 Exit: `tama-link serve --profile x` starts the two-tool STDIO server and fails
 cleanly if the profile is missing; `version --json` emits deterministic JSON.
 
-## Phase 1 — normalized domain, profile, and durable state
+## Phase 1 — normalized domain, profile, and durable state — complete
 
 - `internal/submission`: state machine
   (`accepted -> queued -> running -> {completed, failed, cancelled, expired,
@@ -524,7 +527,7 @@ Exit: a submission can be created, made idempotent, transitioned, persisted,
 and recovered after an in-process store reopen, with no upstream involved. The
 storage subset of the separate-process suite passes before Phase 1 is complete.
 
-## Phase 2 — TamaMCP 2026 upstream adapter
+## Phase 2 — TamaMCP 2026 upstream adapter — implementation complete, live gate open
 
 - `internal/upstream`: use the official Go SDK for the stateless MCP
   `2026-07-28` core and add only the focused Tasks/subscription extension seam
@@ -601,12 +604,16 @@ phase and its dependency order:
 
 Phase 2 is gated by the package and application layers it consumes. TamaMCP
 Phase 2 is complete. Package task subscriptions landed in
-`kritama/tama-mcp#9` and are pinned for the fixture gate at `v0.2.0`. Live
-Link acceptance additionally waits for the Tama-owned adapters and endpoint
-migration beginning with `upmaru/tama#123`.
+`kritama/tama-mcp#9` and are pinned for the fixture gate at `v0.2.0`. The
+Tama-owned adapters and endpoint migration, including `upmaru/tama#123`, are
+complete. Live Link acceptance now waits for issue #15's interactive login and
+profile-v2 scope contract plus issue #8's black-box runner and evidence.
 
-## Phase 3 — client progress and acceptance
+## Phase 3 — interactive authorization, client progress, and acceptance — open
 
+- Profile version 2 with explicit least-privileged OAuth scopes, implemented
+  with interactive login under [#15](https://github.com/kritama/tama-link/issues/15)
+  and `plans/login.md`;
 - Downstream MCP progress-token support: read `_meta.progressToken` on `await`,
   emit rate-limited `notifications/progress` correlated to that request
   (Go SDK `GetProgressToken` + `ServerSession.NotifyProgress`).
@@ -623,23 +630,22 @@ migration beginning with `upmaru/tama#123`.
   one stable `client_context.thread_id` per conversation and never falls back to
   a profile-global value.
 
-Exit: acceptance criteria #1–#23 of the spec are demonstrated by automated and
+Exit: acceptance criteria #1–#24 of the spec are demonstrated by automated and
 live tests.
 
-## Phase 4 — production release and migration closure
+## Phase 4 — production release and migration closure — open
 
 - Complete the platform credential-backend and crash-recovery matrix for every
   operating system claimed by the release.
 - Publish the compatibility matrix covering the exact TamaMCP, Tama, Tama Link,
   OAuth/profile, protocol, OS/architecture, and verified client versions.
-- Coordinate final acceptance evidence with Tama before its Anubis endpoint and
-  compatibility projections are removed; old and new runtimes must never
-  mutate the same task.
+- Certify against an immutable Tama release that uses the TamaMCP endpoints and
+  excludes the legacy Anubis task runtime.
 - Cut the independent Tama Link release through the configured Git Flow and
   provide the immutable version/checksum consumed by Memovee CLI.
 
-Exit: the supported binary set and compatibility matrix are published, Tama's
-legacy runtime can be removed without losing a required Link path, and every
+Exit: the supported binary set and compatibility matrix are published, the
+selected Tama release is certified without the legacy runtime, and every
 production gate has current evidence.
 
 ## Resolved specification amendments
@@ -677,10 +683,11 @@ The current revision also resolves G8-G10 and G12-G15:
    TamaMCP `v0.2.0`. That does not close live acceptance. Polling remains
    the recovery source of truth when a stream is absent, dropped, or closed.
 
-2. **Tama application migration:** `upmaru/tama#123` and the subsequent System,
-   App, OAuth composition, and Phoenix PubSub endpoint migration must expose the
-   new runtime. Link fixture work may proceed against package conformance data,
-   but live acceptance waits for that application surface.
+2. **Tama application migration:** complete. `upmaru/tama#123` is closed, and
+   current Tama source contains the owner-bound store/runner, System and App
+   TamaMCP routes, OAuth composition, and PubSub notification adapter. Live
+   evidence still requires an immutable runnable Tama pin; a source review is
+   not runtime acceptance.
 
 3. **TamaMCP adapter live acceptance:** against the named local `memovee/tama`
    Compose environment and an immutable migrated Tama build, verify
@@ -699,21 +706,18 @@ The current revision also resolves G8-G10 and G12-G15:
    matrix on every supported operating system before the first production
    release.
 
-None of these gates blocks Phase 0. The storage subset blocks completion of
-Phase 1; TamaMCP/Tama migration and live acceptance block completion of Phase 2;
-client identity acceptance blocks Phase 3; production certification blocks
-Phase 4.
+Phase 0 and Phase 1 are complete. Live acceptance blocks completion of Phase 2;
+interactive login, client identity acceptance, and client progress block Phase
+3; production certification blocks Phase 4.
 
 ## Suggested order of attack
 
-1. Finish Phase 0 and land the versioned profile/catalog schema.
-2. Implement Phase 1, including encryption and multi-process lease tests.
-3. Implement the official-SDK core plus the smallest conformance-tested Tasks
-   extension seam while TamaMCP Phase 3 and the Tama migration proceed.
-4. Implement the System synchronous adapter first; it proves the new stateless
-   transport without depending on durable Tasks.
-5. Implement App task polling, `input_required`, subscriptions, and restart
-   recovery; then complete the migrated-Tama live gate.
-6. Complete dual-registration and conversation-identity client acceptance.
-7. Begin production release closure only after TamaMCP Phase 3, the Tama
-   System/App migration, and client acceptance land.
+1. Implement issue #15's profile-v2 scope contract and interactive login flow.
+2. Land `kritama/memovee-cli#3` against the finalized profile-v2 schema so
+   managed App and System profiles can be generated deterministically.
+3. Replace issue #8's fail-closed live scaffold with the black-box runner and
+   complete the exact pinned App/System acceptance evidence.
+4. Close #8 and the Phase 2 tracker #9 only after that live evidence passes.
+5. Implement logout, doctor, downstream progress, and dual-registration client
+   acceptance as separately scoped Phase 3 work.
+6. Begin production release closure only after Phase 3 acceptance lands.

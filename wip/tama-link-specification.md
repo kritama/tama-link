@@ -1,11 +1,26 @@
 # Tama Link Compatibility Proxy Specification
 
 Status: implementation handoff
+Updated: 2026-09-25
 
 This document defines why Tama Link exists and the contract the first complete
 implementation must satisfy. It is authoritative for the proxy boundary,
 client-facing tools, upstream adaptation, durable state, progress, security,
 configuration, testing, and release compatibility.
+
+This file is the authoritative product and protocol contract. Supporting WIP
+documents have narrower roles:
+
+- `wip/tama-link-specification/plan.md` is the delivery roadmap and dependency
+  ledger;
+- `wip/tama-link-specification/plans/login.md` is the active implementation
+  plan for the Phase 3 interactive login slice; and
+- acceptance and review documents record evidence or findings and must not
+  redefine this contract.
+
+If a supporting document conflicts with this specification, this specification
+governs and the supporting document must be reconciled before it is used for
+implementation or acceptance.
 
 ## Context and decision
 
@@ -964,7 +979,7 @@ until client acceptance demonstrates a concrete missing capability.
 A profile selects trusted upstream configuration. Tool arguments must never
 select or override the upstream origin.
 
-The planned non-secret profile contains:
+The non-secret profile contract contains:
 
 ```text
 profile version
@@ -972,6 +987,7 @@ canonical profile digest
 Tama protected-resource origin
 MCP endpoint
 expected authorization-server issuer
+requested OAuth scopes
 allowed upstream operations
 client-visible and upstream operation schemas
 declarative argument bindings and execution strategies
@@ -989,21 +1005,44 @@ opaque names but may not contain path separators or traversal components.
 The Memovee CLI owns creation and reconciliation of its profile. Tama Link
 validates profiles but does not start containers or create root users.
 
+Profile version 1 is implemented for the non-interactive OAuth and upstream
+runtime delivered through Phase 2. Phase 3 login introduces profile version 2,
+which requires a non-empty `scopes` array. Scope values are bounded OAuth scope
+tokens, unique, and canonically sorted. The profile owner selects the
+least-privileged set; Tama Link never infers or silently requests every scope
+advertised by a server. Version 1 profiles fail login with an actionable
+migration error rather than receiving an implicit scope set.
+
 The profile digest is `sha256:` followed by the lowercase SHA-256 digest of the
 canonical JSON encoding of the complete non-secret profile, excluding the
 `digest` field itself. Canonicalization ignores insignificant whitespace and
 object-key order while preserving JSON number literals. If a digest is present,
 Tama Link always verifies it. A profile that raises any version 1 default limit
 must include a matching digest; omission or mismatch fails closed until the
-profile owner reconciles and rewrites the profile.
+profile owner reconciles and rewrites the profile. In version 2, the canonical
+scope set participates in the digest.
 
 OAuth behavior must follow protected-resource metadata and authorization-server
-discovery. Browser authorization and consent remain user-visible. Tokens must
-be stored only through the configured secure credential backend, redacted from
-errors, and excluded from logs and local submission state.
+discovery. Tama Link decodes `scopes_supported` from both metadata documents and
+requires the profile's requested scopes to be a subset of each authoritative
+list that is present. It sends the canonical scope string in the authorization
+request. If a token response declares `scope`, the returned set must equal the
+requested set; omission inherits the requested set. Reduced, expanded,
+malformed, or otherwise different returned scopes fail closed. Granted scopes
+are bound to the durable refresh credential and revalidated during refresh.
 
-`tama-link login --profile <name>` is the explicit interactive entry point for
-browser authorization. An MCP tool call that lacks usable credentials returns
+Browser authorization and consent remain user-visible. Tokens must be stored
+only through the configured secure credential backend, redacted from errors,
+and excluded from logs and local submission state.
+
+`tama-link login --profile <name> [--config-dir <dir>] [--no-browser]` is the
+explicit interactive entry point for browser authorization. The default path
+uses a fixed platform browser opener without shell evaluation. `--no-browser`,
+or an automatic browser-launch failure, presents the authorization URL for a
+manual user handoff while the bounded callback attempt remains active. Tama
+Link never collects or automates entry of the user's credentials.
+
+An MCP tool call that lacks usable credentials returns
 `authentication_required`; it must not unexpectedly open a browser from the
 STDIO server. Logout and revocation behavior must be explicit and must not
 delete durable non-terminal submissions.
@@ -1013,12 +1052,24 @@ operation may refresh authorization when standards and policy permit, but must
 return an actionable terminal or retryable error when user interaction is
 required.
 
-The authorization-code exchange binds one exact loopback redirect URI. The
-ephemeral listener port is selected before the authorization URL is built, and
-that exact URI appears in the authorization request, is required on the
-observed callback, and is resent verbatim in the token request, as the
-authorization-code grant requires. A callback observed on any other URI is
-rejected before any token request is sent.
+The authorization-code exchange binds one exact IPv4 loopback redirect URI.
+Dynamic registration uses the native-loopback base `http://127.0.0.1`. Each
+attempt binds `127.0.0.1:0` before the authorization URL is built and uses the
+fixed callback path `/oauth/callback`. The exact selected URI appears in the
+authorization request, is required on the observed callback, and is resent
+verbatim in the token request, as the authorization-code grant requires. A
+callback observed on any other URI is rejected before any token request is
+sent. The callback is single-use, bounded by a five-minute deadline, validates
+state and the authorization response issuer when advertised, returns only fixed
+non-reflective HTML with restrictive security headers, and closes on every
+terminal path.
+
+Interactive attempts are serialized by a profile-scoped durable `oauth/login`
+lease that is renewed during the bounded browser wait and expires after a
+crash. The refresh lease is not held across browser interaction. Existing
+credential fences still guard the final commit, so a stale or superseded login
+cannot overwrite newer credentials. A failed re-login preserves any still
+usable registration and refresh credential.
 
 Tama Link coordinates refresh through a profile-scoped cross-process lease,
 re-reads the credential after acquiring it, and safely stores a replacement
@@ -1186,13 +1237,13 @@ long-poll timeout is not an error.
 
 ## Command surface
 
-The planned administrative command surface is:
+The administrative command surface is:
 
 ```text
-tama-link serve --profile <name>
-tama-link login --profile <name>
-tama-link logout --profile <name>
-tama-link doctor --profile <name> [--json]
+tama-link serve --profile <name> [--config-dir <dir>]
+tama-link login --profile <name> [--config-dir <dir>] [--no-browser]
+tama-link logout --profile <name> [--config-dir <dir>]
+tama-link doctor --profile <name> [--config-dir <dir>] [--json]
 tama-link version [--json]
 ```
 
@@ -1201,6 +1252,11 @@ interactive authorization. `logout` removes or revokes only the selected
 profile's credentials after checking policy; it does not delete profile state.
 `doctor` is read-only. Memovee-owned profile setup is normally performed by the
 Memovee CLI.
+
+Current delivery status is explicit: `serve` and `version` are implemented;
+`login` and `logout` are reserved fail-closed stubs; and `doctor` is not yet
+wired into the binary. The Phase 3 command work must not be described as
+available until its behavioral tests and secure credential paths pass.
 
 Human output may use progress and color when attached to a terminal. JSON and
 non-interactive output must be deterministic, ANSI-free, and free of secret
@@ -1226,7 +1282,8 @@ acceptance tests exist.
 
 ## Acceptance criteria
 
-The first complete implementation is not done until automated tests prove:
+The first complete implementation is not done until automated tests and
+recorded live acceptance prove:
 
 1. MCP initialization succeeds over STDIO.
 2. `tools/list` exposes exactly `submit` and `await` with the documented schemas.
@@ -1270,22 +1327,26 @@ The first complete implementation is not done until automated tests prove:
     credential-expiry recovery preserve correctness through `tasks/get`.
 21. Multiple processes sharing one profile cannot duplicate claimed work, lose
     a replacement refresh token, or corrupt credential coordination.
-22. Codex, OpenCode, and at least one plain MCP inspector complete the
+22. `login` validates profile-declared scopes, completes a user-visible
+    PKCE-protected loopback flow, serializes concurrent attempts, and leaves
+    only fenced keyring-backed durable credentials.
+23. Codex, OpenCode, and at least one plain MCP inspector complete the
     `submit`/repeated-`await` workflow for both profile types.
-23. Race tests, static analysis, lint, cross-builds, TamaMCP conformance
+24. Race tests, static analysis, lint, cross-builds, TamaMCP conformance
     fixtures, and live migrated-Tama acceptance pass.
 
 ## Implementation phases
 
-### Phase 0: repository foundation
+### Phase 0: repository foundation — complete
 
 - Go module, STDIO MCP server, and exact two-tool catalog;
-- placeholder handlers that fail explicitly with `not_implemented`;
+- reserved fail-closed placeholder handlers, subsequently replaced by the
+  Phase 2 application handlers;
 - unit test for the public tool surface;
 - formatting, unit, race, vet, lint, and build automation; and
 - documentation, Git Flow, and CI.
 
-### Phase 1: normalized domain and state
+### Phase 1: normalized domain and state — complete
 
 - submission state machine and error types;
 - profile loading and validation;
@@ -1295,7 +1356,7 @@ The first complete implementation is not done until automated tests prove:
 - idempotency and recovery tests; and
 - progress snapshot/event model.
 
-### Phase 2: TamaMCP 2026 upstream adapter
+### Phase 2: TamaMCP 2026 upstream adapter — implementation complete, live gate open
 
 - official-SDK MCP `2026-07-28` core transport plus the smallest required
   Tasks/subscription extension layer;
@@ -1311,33 +1372,51 @@ The first complete implementation is not done until automated tests prove:
 - package conformance fixtures plus live integration against the migrated Tama
   server.
 
-### Phase 3: client progress and acceptance
+### Phase 3: interactive authorization, client progress, and acceptance — open
 
+- profile version 2 with explicit least-privileged OAuth scopes;
+- user-visible `login`, selected-profile `logout`, and read-only `doctor`
+  commands;
+- fixed browser handoff, bounded loopback callback, and durable login
+  concurrency control as specified in
+  `wip/tama-link-specification/plans/login.md`;
 - MCP progress-token support;
 - Codex and OpenCode package integration;
 - client-specific progress presentation; and
 - disconnect, restart, timeout, and live OAuth acceptance tests.
 
-### Phase 4: production release and migration closure
+### Phase 4: production release and migration closure — open
 
 - certify every supported credential backend and crash-recovery path;
 - publish the exact TamaMCP, Tama, Tama Link, protocol, profile, OS, and client
   compatibility matrix;
-- coordinate acceptance evidence before Tama removes its Anubis runtime; and
+- certify against an immutable Tama release that uses the TamaMCP endpoints and
+  excludes the legacy Anubis task runtime; and
 - publish the independent Tama Link binary and checksums through Git Flow.
 
 ## Remaining acceptance gates
 
-TamaMCP Phase 2 is complete. Package task subscriptions landed in
-`kritama/tama-mcp#9` and are exercised by the pinned fixture gate. Live Link
-acceptance has not passed. It still waits for the Tama-owned persistence,
-runner, PubSub, System, App, OAuth-composition, and endpoint migration beginning
-with `upmaru/tama#123`. The migrated endpoint must be verified for stateless
-discovery, standard headers, owner-bound task lookup, input responses,
-subscription recovery, terminal capture through `tasks/get`, and production
-ingress availability. Compatibility evidence identifies TamaMCP, Tama, and the
-provider with Git SHA prefixes or SemVer release identifiers; moving names and
-arbitrary dotted strings are not immutable evidence.
+TamaMCP Phase 2 and package subscriptions are complete, and the pinned package
+fixtures, mocked integration, and Compose revision-pin validation pass in Tama
+Link. The Tama-owned persistence and runner prerequisite in
+`upmaru/tama#123` is also complete. Current Tama source contains the TamaMCP
+App and System routes, owner-bound durable task store and runner, PubSub-backed
+notifications, and migration away from the legacy session-scoped task table.
+
+Live Link acceptance has not passed. The remaining work is no longer waiting
+for issue #123: Tama Link must implement the version 2 scope contract and
+interactive login flow, replace the fail-closed `make live-accept` scaffold
+with the documented black-box runner, select an immutable runnable Tama and
+provider topology, and execute the App and System workflows. That live evidence
+must cover stateless discovery, standard headers, OAuth, owner isolation,
+owner-bound task lookup, input responses, notification and polling recovery,
+terminal capture through `tasks/get`, ambiguous replay, Link restart, Tama
+restart, credential expiry, and ingress reachability.
+
+Compatibility evidence identifies TamaMCP, Tama, Tama Link, and the provider
+with Git SHA prefixes or SemVer release identifiers; moving names, local dirty
+trees, and arbitrary dotted strings are not immutable evidence. Fixture,
+mocked, and Compose-pin success must remain distinct from live runtime proof.
 
 Codex, OpenCode, and plain MCP fixtures must prove stable caller-owned
 `client_context.thread_id` behavior. The SQLite, lease, GC, encryption-key, and

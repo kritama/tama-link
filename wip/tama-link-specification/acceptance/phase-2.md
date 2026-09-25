@@ -69,9 +69,10 @@ evidence and is not live evidence.
 `make live-accept` is an unimplemented scaffold. It does not start Tama Link,
 call either endpoint, perform OAuth, restart Link or Tama, observe
 notifications or polling, or write evidence. It always fails closed. Do not
-describe a pass of this command as proof that both profiles were exercised;
-a pass is not possible until the migrated topology exists and the scaffold is
-replaced by that runner.
+describe a pass of this command as proof that both profiles were exercised.
+The migrated Tama source now exists, but a pass is not possible until issue
+#15 provides interactive login/profile-v2 support and this scaffold is replaced
+by issue #8's black-box runner.
 
 ```sh
 make live-accept
@@ -91,8 +92,10 @@ make live-accept
 ```
 
 The scaffold does not write `wip/phase-2-live-evidence.json` and does not
-update readiness. `upmaru/tama#123` and the System/App/PubSub migration
-remain unrecorded.
+update readiness. `upmaru/tama#123` is complete, and current Tama source
+contains the System/App/PubSub migration, but no immutable live topology or
+runtime observations have been recorded. Source availability is not live
+acceptance.
 
 ## Live evidence
 

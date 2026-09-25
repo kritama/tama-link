@@ -64,7 +64,7 @@ in the Tama Link configuration directory before `serve` starts.
 Phase 2's downstream handlers and upstream adapter are implemented, and the
 pinned TamaMCP fixture gate runs in CI. Live migrated-Tama acceptance has not
 passed. Fixture, mocked, and Compose pin results are not that gate. See
-[`wip/phase-2-acceptance.md`](wip/phase-2-acceptance.md).
+[`wip/tama-link-specification/acceptance/phase-2.md`](wip/tama-link-specification/acceptance/phase-2.md).
 
 No client or installer should treat this revision as production ready.
 

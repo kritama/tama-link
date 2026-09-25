@@ -17,7 +17,7 @@ The complete local validation includes formatting, unit tests, the race
 detector, `go vet`, golangci-lint, and a trimmed binary build. `make check`
 includes the TamaMCP fixture gate. It does not run Compose startup or live
 runtime acceptance. Those commands, and the rule that they are separate
-gates, are in `wip/phase-2-acceptance.md`.
+gates, are in `wip/tama-link-specification/acceptance/phase-2.md`.
 
 ## Branching
 

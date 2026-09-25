@@ -37,7 +37,7 @@ check: fmt-check test race vet lint build
 # resolves the Compose model and checks every selectable image or build
 # source. It does not start containers.
 # live-accept is an unimplemented scaffold: it fails closed and does not
-# exercise profiles. See wip/phase-2-acceptance.md.
+# exercise profiles. See wip/tama-link-specification/acceptance/phase-2.md.
 compose-accept:
 	go test -tags=compose -count=1 -timeout=5m ./internal/acceptance/compose
 
