@@ -143,12 +143,19 @@ var beforePublish func()
 
 func (s *Service) afterAuthorizeFailure(ctx context.Context, session Session, name profile.Name, err error) error {
 	ready, readyErr := session.Ready(ctx)
-	if readyErr == nil && !ready {
-		_ = removeDatabasePath(session.DatabasePath())
-		_ = removeJournal(s.opts.ConfigDir, name)
-		return failErr(err)
+	if readyErr != nil || ready {
+		return incomplete(err)
 	}
-	return incomplete(err)
+	if logoutErr := session.Logout(ctx); logoutErr != nil {
+		return incomplete(logoutErr)
+	}
+	if dbErr := removeDatabasePath(session.DatabasePath()); dbErr != nil {
+		return incomplete(dbErr)
+	}
+	if journalErr := removeJournal(s.opts.ConfigDir, name); journalErr != nil {
+		return incomplete(journalErr)
+	}
+	return failErr(err)
 }
 
 func (s *Service) renew(ctx context.Context, session Session, owner string, lost func()) func() {

@@ -220,14 +220,30 @@ func (s *Service) discardLocked(ctx context.Context, record journal) error {
 }
 
 func contradict(req Request, record journal) error {
-	if req.AddressSet && req.Address != record.Origin {
-		return fmt.Errorf("address does not match the unfinished bootstrap")
+	if req.AddressSet {
+		origin, err := profile.ParseOrigin(req.Address)
+		if err != nil || origin != record.Origin {
+			return fmt.Errorf("address does not match the unfinished bootstrap")
+		}
 	}
-	if req.IssuerSet && req.Issuer != record.Issuer {
+	if req.IssuerSet && !sameIssuer(req.Issuer, record.Issuer) {
 		return fmt.Errorf("issuer does not match the unfinished bootstrap")
 	}
 	if req.ProfileSet && req.Profile != record.Name {
 		return fmt.Errorf("profile name does not match the unfinished bootstrap")
+	}
+	if req.TypeSet {
+		kind, err := profile.ParseKind(req.Type)
+		if err != nil {
+			return fmt.Errorf("type does not match the unfinished bootstrap")
+		}
+		want := profile.KindApp
+		if record.Template == "system-read" {
+			want = profile.KindSystem
+		}
+		if kind != want {
+			return fmt.Errorf("type does not match the unfinished bootstrap")
+		}
 	}
 	return nil
 }

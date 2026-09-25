@@ -130,6 +130,20 @@ func TestServeCommandPreservesPathSeparators(t *testing.T) {
 	}
 }
 
+func TestContradictNormalizesResumeInputs(t *testing.T) {
+	t.Parallel()
+	record := journal{
+		Name: "tama-app", Origin: "https://tama.example", Endpoint: "https://tama.example/mcp/app",
+		Issuer: "https://auth.example", Template: "app",
+	}
+	if err := contradict(Request{Address: "https://tama.example/", AddressSet: true, Issuer: "https://auth.example/", IssuerSet: true, Type: "app", TypeSet: true}, record); err != nil {
+		t.Fatalf("normalized resume inputs: %v", err)
+	}
+	if err := contradict(Request{Type: "system", TypeSet: true}, record); err == nil {
+		t.Fatal("accepted a conflicting type")
+	}
+}
+
 func TestNonInteractiveMissingAddressDoesNotPrompt(t *testing.T) {
 	t.Parallel()
 	svc := testService(t, privateConfig(t), nil, &fakeSession{}, nil)
