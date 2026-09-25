@@ -114,6 +114,22 @@ func TestNonInteractiveCreatePublishesTemplateProfile(t *testing.T) {
 	}
 }
 
+func TestServeCommandPreservesPathSeparators(t *testing.T) {
+	t.Parallel()
+	path := "C:\\Users\\me\\my cfg"
+	got := serveCommand("tama-app", path, true)
+	if strings.Contains(got, "\\\\") {
+		t.Fatalf("doubled backslashes: %s", got)
+	}
+	if !strings.Contains(got, path) {
+		t.Fatalf("path not preserved: %s", got)
+	}
+	quoted := quoteWindowsArg("C:\\Users\\me\\cfg\"x")
+	if !strings.Contains(quoted, "C:\\Users\\me\\cfg") || !strings.Contains(quoted, "\\\"") {
+		t.Fatalf("windows quote = %s", quoted)
+	}
+}
+
 func TestNonInteractiveMissingAddressDoesNotPrompt(t *testing.T) {
 	t.Parallel()
 	svc := testService(t, privateConfig(t), nil, &fakeSession{}, nil)

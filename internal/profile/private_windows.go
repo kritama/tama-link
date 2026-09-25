@@ -91,7 +91,21 @@ func ntCreateAt(parent *os.File, name string, access, disposition, attributes, o
 		0,
 		0,
 	)
-	return handle, err
+	return handle, ntErrno(err)
+}
+
+// ntErrno converts a native NTSTATUS to a Win32 errno. NtCreateFile and
+// NtSetInformationFile return NTStatus, which does not match errors.Is
+// checks for Win32 codes such as ERROR_FILE_NOT_FOUND.
+func ntErrno(err error) error {
+	if err == nil {
+		return nil
+	}
+	var status windows.NTStatus
+	if errors.As(err, &status) {
+		return status.Errno()
+	}
+	return err
 }
 
 func ensurePrivateChild(parentPath, name string) error {
@@ -146,9 +160,17 @@ func WritePrivateFile(dir, name string, data []byte, replace bool) error {
 	}
 	file, err := checkedPrivateFile(handle, tmp, false)
 	if err != nil {
+		deleteWindowsName(parent, tmp)
 		return err
 	}
 	defer func() { _ = file.Close() }()
+	published := false
+	defer func() {
+		if published {
+			return
+		}
+		markWindowsDelete(file)
+	}()
 	if _, err := file.Write(data); err != nil {
 		return fmt.Errorf("write staging file: %w", err)
 	}
@@ -158,8 +180,38 @@ func WritePrivateFile(dir, name string, data []byte, replace bool) error {
 	if err := renameWindowsNoFollow(file, parent, name, replace); err != nil {
 		return err
 	}
+	published = true
 	_ = parent.Sync()
 	return nil
+}
+
+func markWindowsDelete(file *os.File) {
+	del := byte(1)
+	var status windows.IO_STATUS_BLOCK
+	_ = windows.NtSetInformationFile(
+		windows.Handle(file.Fd()),
+		&status,
+		&del,
+		1,
+		windows.FileDispositionInformation,
+	)
+}
+
+func deleteWindowsName(parent *os.File, name string) {
+	handle, err := ntCreateAt(
+		parent,
+		name,
+		windows.DELETE,
+		windows.FILE_OPEN,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT,
+	)
+	if err != nil {
+		return
+	}
+	file := os.NewFile(uintptr(handle), name)
+	defer func() { _ = file.Close() }()
+	markWindowsDelete(file)
 }
 
 func renameWindowsNoFollow(file, parent *os.File, name string, replace bool) error {
@@ -179,13 +231,13 @@ func renameWindowsNoFollow(file, parent *os.File, name string, replace bool) err
 	info.FileNameLength = uint32(fileNameLen)
 	copy((*[windows.MAX_LONG_PATH]uint16)(unsafe.Pointer(&info.FileName[0]))[:fileNameLen/2:fileNameLen/2], encoded)
 	var status windows.IO_STATUS_BLOCK
-	err = windows.NtSetInformationFile(
+	err = ntErrno(windows.NtSetInformationFile(
 		windows.Handle(file.Fd()),
 		&status,
 		&buffer[0],
 		uint32(bufferSize),
 		windows.FileRenameInformation,
-	)
+	))
 	if err == nil {
 		return nil
 	}
@@ -211,7 +263,7 @@ func RemovePrivateFile(dir, name string) error {
 	handle, err := ntCreateAt(
 		parent,
 		name,
-		windows.DELETE,
+		windows.DELETE|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL,
 		windows.FILE_OPEN,
 		windows.FILE_ATTRIBUTE_NORMAL,
 		windows.FILE_NON_DIRECTORY_FILE|windows.FILE_OPEN_REPARSE_POINT,
@@ -229,13 +281,13 @@ func RemovePrivateFile(dir, name string) error {
 	defer func() { _ = file.Close() }()
 	deleteFile := byte(1)
 	var status windows.IO_STATUS_BLOCK
-	err = windows.NtSetInformationFile(
+	err = ntErrno(windows.NtSetInformationFile(
 		windows.Handle(file.Fd()),
 		&status,
 		&deleteFile,
 		1,
 		windows.FileDispositionInformation,
-	)
+	))
 	if err != nil && !errors.Is(err, windows.ERROR_FILE_NOT_FOUND) {
 		return fmt.Errorf("remove %s: %w", name, err)
 	}

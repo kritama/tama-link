@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
+	"runtime"
 	"strings"
 
 	"github.com/kritama/tama-link/internal/adapter/tama2026"
@@ -271,7 +271,52 @@ func sameIssuer(left, right string) bool {
 func serveCommand(name profile.Name, configDir string, set bool) string {
 	cmd := "tama-link serve --profile " + name.String()
 	if set && configDir != "" {
-		cmd += " --config-dir " + strconv.Quote(configDir)
+		cmd += " --config-dir " + quoteCommandArg(configDir)
 	}
 	return cmd
+}
+
+// quoteCommandArg quotes one command argument for copy-paste. It preserves
+// backslashes: Go's strconv.Quote would double them, and Windows shells would
+// then keep both.
+func quoteCommandArg(value string) string {
+	if runtime.GOOS == "windows" {
+		return quoteWindowsArg(value)
+	}
+	return "'" + strings.ReplaceAll(value, "'", `'\''`) + "'"
+}
+
+func quoteWindowsArg(value string) string {
+	if value == "" {
+		return `""`
+	}
+	if !strings.ContainsAny(value, " \t\"") {
+		return value
+	}
+	var b strings.Builder
+	b.WriteByte('"')
+	slashes := 0
+	for i := 0; i < len(value); i++ {
+		switch value[i] {
+		case '\\':
+			slashes++
+		case '"':
+			for range slashes*2 + 1 {
+				b.WriteByte('\\')
+			}
+			b.WriteByte('"')
+			slashes = 0
+		default:
+			for range slashes {
+				b.WriteByte('\\')
+			}
+			slashes = 0
+			b.WriteByte(value[i])
+		}
+	}
+	for range slashes * 2 {
+		b.WriteByte('\\')
+	}
+	b.WriteByte('"')
+	return b.String()
 }
