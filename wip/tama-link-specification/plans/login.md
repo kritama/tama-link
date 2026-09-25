@@ -152,11 +152,15 @@ privilege changes cannot occur silently.
 
 ### 4. Redirect registration and callback URI
 
-Dynamic registration uses the native-loopback redirect base:
+Dynamic registration uses the native-loopback redirect base plus the fixed
+callback path:
 
 ```text
-http://127.0.0.1
+http://127.0.0.1/oauth/callback
 ```
+
+The per-attempt port is not registered because it varies; providers that
+compare redirect paths must see the fixed path every authorization uses.
 
 Each login attempt binds an IPv4 listener to `127.0.0.1:0` before constructing
 the authorization request. The exact selected callback URI is:

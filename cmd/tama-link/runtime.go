@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/kritama/tama-link/internal/credential"
+	"github.com/kritama/tama-link/internal/login"
 	"github.com/kritama/tama-link/internal/oauth"
 	"github.com/kritama/tama-link/internal/profile"
 	"github.com/kritama/tama-link/internal/store"
@@ -42,9 +43,12 @@ func openProfileRuntime(ctx context.Context, p *profile.Profile, configDir strin
 		return nil, fmt.Errorf("open state store: %w", err)
 	}
 	client, err := oauth.New(oauth.Config{
-		Endpoint:    p.Endpoint,
-		Issuer:      p.Issuer,
-		RedirectURI: "http://127.0.0.1",
+		Endpoint: p.Endpoint,
+		Issuer:   p.Issuer,
+		// The registration carries the native-loopback base plus the fixed
+		// callback path: the port varies per attempt, but a provider that
+		// compares paths must see the one every authorization uses.
+		RedirectURI: "http://127.0.0.1" + login.CallbackPath,
 		Scopes:      p.Scopes,
 		Secrets:     kr,
 		Lease:       st,

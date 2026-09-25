@@ -17,5 +17,5 @@ func browserCommand(rawURL string) *exec.Cmd {
 // that exits unsuccessfully reports an error so the caller can fall back
 // to the manual handoff.
 func openBrowser(rawURL string) error {
-	return runBrowserCommand(browserCommand(rawURL))
+	return runBrowserCommand(browserCommand(rawURL), browserLaunchBudget)
 }

@@ -5,23 +5,26 @@ import (
 	"time"
 )
 
-// browserLaunchBudget bounds the time the opener process may run before the
-// handoff is treated as failed. Openers hand the URL to the platform session
-// and exit quickly; a process still alive after the budget either lost its
-// session or is wedged, and the manual handoff applies either way. The
-// variable exists so tests can shrink the budget.
-var browserLaunchBudget = 5 * time.Second
+// browserLaunchBudget bounds how long the handoff waits for the opener's
+// exit result. Openers hand the URL to the platform session and exit
+// quickly, and a failure exits non-zero well inside the budget; an opener
+// still running past it has dispatched the URL and stays attached to the
+// launched application, which the handoff treats as success.
+const browserLaunchBudget = 5 * time.Second
 
 // DefaultOpenBrowser opens the authorization URL in the user's browser
 // with the fixed platform opener and its bounded launch wait.
 var DefaultOpenBrowser = openBrowser
 
-// runBrowserCommand launches the opener, observes its exit with a bounded
-// wait, and reaps it. Start only proves the executable spawned; the exit
-// result decides whether the user actually sees the authorization page, so
-// an unsuccessful exit is a launch failure and a wedged opener is killed at
-// the budget instead of outliving the callback deadline.
-func runBrowserCommand(cmd *exec.Cmd) error {
+// runBrowserCommand launches the opener and observes its exit. Start only
+// proves the executable spawned, so the exit result decides the outcome:
+// a non-zero exit is a launch failure that must fall back to the manual
+// handoff. The wait for the exit is bounded by budget: an opener still
+// running past it is not killed — desktop openers legitimately remain
+// attached to the launched application — and the handoff counts as
+// successful while the background wait keeps reaping the child until it
+// exits.
+func runBrowserCommand(cmd *exec.Cmd, budget time.Duration) error {
 	if err := cmd.Start(); err != nil {
 		return err
 	}
@@ -30,9 +33,8 @@ func runBrowserCommand(cmd *exec.Cmd) error {
 	select {
 	case err := <-done:
 		return err
-	case <-time.After(browserLaunchBudget):
-		_ = cmd.Process.Kill()
-		return <-done
+	case <-time.After(budget):
+		return nil
 	}
 }
 

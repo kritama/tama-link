@@ -32,6 +32,15 @@ const (
 
 	// maxOAuthErrorBytes bounds a sanitized OAuth error code.
 	maxOAuthErrorBytes = 64
+
+	// callbackIOTimeout bounds one callback connection's read and write
+	// phases so a slow or silent client cannot hold a connection — and the
+	// server goroutine — open past the attempt.
+	callbackIOTimeout = 10 * time.Second
+
+	// callbackShutdownTimeout bounds the drain of in-flight responses when
+	// the attempt ends.
+	callbackShutdownTimeout = 2 * time.Second
 )
 
 // Outcome is the single terminal callback one wait selects: either the
@@ -102,14 +111,18 @@ func (c *Callback) Wait(ctx context.Context, deadline time.Duration) (Outcome, e
 	defer cancel()
 
 	srv := &http.Server{
-		Handler:        c,
-		ErrorLog:       log.New(io.Discard, "", 0),
-		MaxHeaderBytes: maxCallbackHeaderBytes,
+		Handler:           c,
+		ErrorLog:          log.New(io.Discard, "", 0),
+		MaxHeaderBytes:    maxCallbackHeaderBytes,
+		ReadHeaderTimeout: callbackIOTimeout,
+		ReadTimeout:       callbackIOTimeout,
+		WriteTimeout:      callbackIOTimeout,
+		IdleTimeout:       callbackIOTimeout,
 	}
 	srv.SetKeepAlivesEnabled(false)
 
-	// The server goroutine is owned by this call: it ends when Wait closes
-	// the listener, and Wait joins it before returning.
+	// The server goroutine is owned by this call: Wait shuts the server
+	// down, joins it, and returns only after every connection is gone.
 	served := make(chan error, 1)
 	go func() { served <- srv.Serve(c.listener) }()
 
@@ -120,7 +133,16 @@ func (c *Callback) Wait(ctx context.Context, deadline time.Duration) (Outcome, e
 		got = true
 	case <-waitCtx.Done():
 	}
-	_ = c.listener.Close()
+	// Shutdown lets the accepted request finish writing its page, then
+	// Close force-closes any connection the deadline or cancellation left
+	// open, so the server goroutine's shutdown path is bounded on every
+	// exit. The shutdown outlives the caller's cancellation: an already
+	// cancelled context would expire its deadline before the in-flight
+	// response could drain.
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.WithoutCancel(ctx), callbackShutdownTimeout)
+	_ = srv.Shutdown(shutdownCtx)
+	cancelShutdown()
+	_ = srv.Close()
 	<-served
 	if got {
 		return outcome, nil

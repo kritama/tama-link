@@ -1063,9 +1063,11 @@ return an actionable terminal or retryable error when user interaction is
 required.
 
 The authorization-code exchange binds one exact IPv4 loopback redirect URI.
-Dynamic registration uses the native-loopback base `http://127.0.0.1`. Each
-attempt binds `127.0.0.1:0` before the authorization URL is built and uses the
-fixed callback path `/oauth/callback`. The exact selected URI appears in the
+Dynamic registration uses the native-loopback base `http://127.0.0.1` with
+the fixed callback path `/oauth/callback`; the per-attempt port is not
+registered because it varies. Each attempt binds `127.0.0.1:0` before the
+authorization URL is built and uses the fixed callback path
+`/oauth/callback`. The exact selected URI appears in the
 authorization request, is required on the observed callback, and is resent
 verbatim in the token request, as the authorization-code grant requires. A
 callback observed on any other URI is rejected before any token request is

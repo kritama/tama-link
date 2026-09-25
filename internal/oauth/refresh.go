@@ -120,13 +120,18 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 			return c.applyTokens(pctx, fenced, tok, leaseGeneration)
 		})
 	if err != nil {
-		if errors.Is(err, ErrGrantInvalid) {
+		// Both outcomes consume the grant on the server side: an explicit
+		// invalid_grant, or a successful exchange whose scope declaration
+		// contradicted the binding after the server had already processed
+		// (and possibly rotated) the refresh token. Retaining a rotated
+		// token would replay it and some servers treat replay as reuse and
+		// revoke the whole grant family, so either way the durable
+		// credential is invalidated: readiness then rejects new work as
+		// authentication_required instead of accepting submissions that
+		// can only fail on the same grant. The caller holds the lease
+		// epoch, so the fence clear is gated on it.
+		if errors.Is(err, ErrGrantInvalid) || errors.Is(err, ErrScopeMismatch) {
 			c.clearToken()
-			// The grant is known-invalid: invalidate the durable refresh
-			// credential too, so readiness rejects new work as
-			// authentication_required instead of accepting submissions
-			// that can only fail on the same grant. The caller holds the
-			// lease epoch, so the fence clear is gated on it.
 			if invalidateErr := c.invalidateCredential(ctx, leaseGeneration); invalidateErr != nil {
 				return "", errors.Join(err, invalidateErr)
 			}

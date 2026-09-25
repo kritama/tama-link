@@ -347,24 +347,25 @@ func TestCallbackConcurrentCodesSelectOne(t *testing.T) {
 			t.Fatalf("write %d: %v", i, err)
 		}
 	}
-	var got200, got410 int
+	var got200, lost int
 	for i, conn := range conns {
 		defer func() { _ = conn.Close() }()
 		buf := make([]byte, 24)
-		if _, err := conn.Read(buf); err != nil {
-			t.Fatalf("read %d: %v", i, err)
-		}
+		_, err := conn.Read(buf)
 		switch {
 		case strings.Contains(string(buf), " 200 "):
 			got200++
-		case strings.Contains(string(buf), " 410 "):
-			got410++
+		case strings.Contains(string(buf), " 410 "), err != nil:
+			// The loser gets the fixed 410 page, or the connection closed by
+			// the attempt's shutdown as soon as the winner was selected:
+			// either way a second terminal was never served.
+			lost++
 		default:
 			t.Fatalf("response %d = %q", i, buf)
 		}
 	}
-	if got200 != 1 || got410 != 1 {
-		t.Fatalf("statuses: 200=%d 410=%d, want exactly one of each", got200, got410)
+	if got200 != 1 || lost != 1 {
+		t.Fatalf("outcomes: 200=%d lost=%d, want exactly one winner and one loser", got200, lost)
 	}
 	if err := <-done; err != nil {
 		t.Fatalf("Wait: %v", err)
@@ -430,5 +431,56 @@ func TestNewCallbackValidation(t *testing.T) {
 	}
 	if _, err := NewCallback(listener, "state", redirectURI, ""); err != nil {
 		t.Fatalf("NewCallback rejected a valid fixture: %v", err)
+	}
+}
+
+// TestCallbackShutdownClosesIdleConnections proves the server goroutine's
+// shutdown path: a connection that sends nothing cannot keep Wait blocked
+// after a terminal arrives, and the attempt's shutdown closes it instead of
+// leaking the read until the 10-second header timeout.
+func TestCallbackShutdownClosesIdleConnections(t *testing.T) {
+	t.Parallel()
+
+	listener, redirectURI := bindLoopback(t)
+	cb, err := NewCallback(listener, "state-1", redirectURI, "")
+	if err != nil {
+		t.Fatalf("NewCallback: %v", err)
+	}
+	idle, err := net.Dial("tcp4", listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial idle connection: %v", err)
+	}
+	defer func() { _ = idle.Close() }()
+
+	waitDone := make(chan error, 1)
+	go func() {
+		_, waitErr := cb.Wait(context.Background(), 30*time.Second)
+		waitDone <- waitErr
+	}()
+
+	start := time.Now()
+	status, _ := doCallback(t, redirectURI, func(r *http.Request) {
+		q := r.URL.Query()
+		q.Set("code", "the-code")
+		q.Set("state", "state-1")
+		r.URL.RawQuery = q.Encode()
+	})
+	if status != http.StatusOK {
+		t.Fatalf("status = %d, want 200", status)
+	}
+	if err := <-waitDone; err != nil {
+		t.Fatalf("Wait: %v", err)
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("Wait took %s with an idle connection open, want the shutdown to bound it", elapsed)
+	}
+
+	// The shutdown must have closed the idle connection: a read returns
+	// EOF promptly instead of blocking on a header that never comes.
+	_ = idle.SetReadDeadline(time.Now().Add(2 * time.Second))
+	buf := make([]byte, 1)
+	n, readErr := idle.Read(buf)
+	if n != 0 || readErr == nil {
+		t.Fatalf("idle read = %d, %v; want a closed connection", n, readErr)
 	}
 }

@@ -103,27 +103,25 @@ func shellFor(t *testing.T, script string) *exec.Cmd {
 	return exec.Command("/bin/sh", "-c", script)
 }
 
-// TestRunBrowserCommandReportsOpenerExit proves the opener process is
-// reaped and its exit result decides the launch outcome: a nonzero exit is
-// a launch failure the handoff must turn into the manual authorization
-// URL, a clean exit succeeds, and a wedged opener is cut off at the
-// bounded wait instead of hanging the callback deadline.
+// TestRunBrowserCommandReportsOpenerExit proves the opener's exit result
+// decides the launch outcome under a bounded wait: a nonzero exit is a
+// launch failure the handoff must turn into the manual authorization URL,
+// a clean exit succeeds, and an opener still attached to the launched
+// application past the budget counts as a successful handoff without
+// blocking the attempt or killing the child.
 func TestRunBrowserCommandReportsOpenerExit(t *testing.T) {
 	t.Parallel()
 
-	if err := runBrowserCommand(shellFor(t, "exit 3")); err == nil {
+	if err := runBrowserCommand(shellFor(t, "exit 3"), browserLaunchBudget); err == nil {
 		t.Fatal("a nonzero opener exit must be a launch failure")
 	}
-	if err := runBrowserCommand(shellFor(t, "exit 0")); err != nil {
+	if err := runBrowserCommand(shellFor(t, "exit 0"), browserLaunchBudget); err != nil {
 		t.Fatalf("exit 0: %v", err)
 	}
 
-	budget := browserLaunchBudget
-	browserLaunchBudget = 100 * time.Millisecond
-	t.Cleanup(func() { browserLaunchBudget = budget })
 	start := time.Now()
-	if err := runBrowserCommand(shellFor(t, "sleep 30")); err == nil {
-		t.Fatal("a wedged opener must not report success")
+	if err := runBrowserCommand(shellFor(t, "sleep 30"), 100*time.Millisecond); err != nil {
+		t.Fatalf("an opener still attached to the launched app past the budget: %v", err)
 	}
 	if elapsed := time.Since(start); elapsed > 5*time.Second {
 		t.Fatalf("bounded wait took %s, want well under the callback deadline", elapsed)

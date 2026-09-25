@@ -313,9 +313,12 @@ func newTestRuntime(t *testing.T, fx *oauthFixture, opener func(string) error, d
 	client, err := oauth.New(oauth.Config{
 		Endpoint: p.Endpoint,
 		Issuer:   p.Issuer,
-		Secrets:  kr,
-		Lease:    st,
-		Scopes:   p.Scopes,
+		// Mirror the production runtime: the registration carries the
+		// loopback base with the fixed callback path.
+		RedirectURI: "http://127.0.0.1" + CallbackPath,
+		Secrets:     kr,
+		Lease:       st,
+		Scopes:      p.Scopes,
 	})
 	if err != nil {
 		_ = st.Close()
@@ -374,11 +377,12 @@ func (r *testRuntime) run(t *testing.T) error {
 func (r *testRuntime) freshClient(t *testing.T) *oauth.Client {
 	t.Helper()
 	c, err := oauth.New(oauth.Config{
-		Endpoint: r.profile.Endpoint,
-		Issuer:   r.profile.Issuer,
-		Secrets:  r.kr,
-		Lease:    r.st,
-		Scopes:   r.profile.Scopes,
+		Endpoint:    r.profile.Endpoint,
+		Issuer:      r.profile.Issuer,
+		RedirectURI: "http://127.0.0.1" + CallbackPath,
+		Secrets:     r.kr,
+		Lease:       r.st,
+		Scopes:      r.profile.Scopes,
 	})
 	if err != nil {
 		t.Fatalf("fresh client: %v", err)
@@ -403,6 +407,12 @@ func TestLoginSuccessWithBrowser(t *testing.T) {
 	// The registration and the token exchange both carry the canonical scope.
 	if !strings.Contains(fx.regBody, `"scope":"mcp.message"`) {
 		t.Fatalf("registration body = %s, want the requested scope", fx.regBody)
+	}
+	// The registration carries the loopback base with the fixed callback
+	// path: the port varies per attempt, but a provider comparing paths
+	// must see the one every authorization uses.
+	if !strings.Contains(fx.regBody, `"redirect_uris":["http://127.0.0.1/oauth/callback"]`) {
+		t.Fatalf("registration body = %s, want the loopback callback redirect", fx.regBody)
 	}
 	if got := fx.tokenForm.Get("scope"); got != "mcp.message" {
 		t.Fatalf("token scope = %q", got)
