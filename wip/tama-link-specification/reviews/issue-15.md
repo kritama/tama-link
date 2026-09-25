@@ -1,6 +1,6 @@
 # Issue #15 Re-review
 
-Status: Open — 1 actionable finding
+Status: Resolved
 Updated: 2026-09-25
 Tracking: [kritama/tama-link#15](https://github.com/kritama/tama-link/issues/15)
 Branch: `feature/phase-3-login`
@@ -10,8 +10,10 @@ Base: `c1c374a` (`develop`)
 ## Outcome
 
 The six findings from the previous review are resolved. The remediation commit
-introduced one new Windows browser-handoff regression, so the branch is not yet
-clear of actionable review findings.
+introduced one new Windows browser-handoff regression (F1 below), which
+commit `8057f3d` resolved by restoring `rundll32 url.dll,FileProtocolHandler`
+and adding a Windows-only command-construction test. The branch is clear of
+actionable review findings.
 
 ## Finding
 
@@ -47,7 +49,14 @@ Required resolution:
    Windows host should confirm that the default path opens the authorization
    URL and that opener failure still presents the manual handoff.
 
-Resolution status: Open.
+Resolution status: Resolved in `8057f3d` — the native URL protocol handler is
+restored, and `browser_platform_windows_test.go` pins the executable, handler,
+and exact single URL argument on Windows. `make check`, all five
+`CGO_ENABLED=0` cross-builds, and 20 race-enabled runs of `internal/login`
+pass at that head. Runtime validation on a Windows host remains outstanding:
+the development environment has no Windows host, so the default-path open and
+the opener-failure manual handoff are proven by the command-construction test
+and the cross-platform bounded-wait tests only.
 
 ## Validation Evidence
 
