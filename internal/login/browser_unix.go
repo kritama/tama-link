@@ -2,26 +2,19 @@
 
 package login
 
-import (
-	"fmt"
-	"os/exec"
-)
+import "os/exec"
 
-// browserCommand builds the fixed Linux browser-opening command. It runs a
-// known executable with the URL as a single argument and never evaluates a
-// shell.
+// browserCommand is the fixed Linux opener: the URL is one argument, never
+// a shell invocation.
 func browserCommand(rawURL string) *exec.Cmd {
 	return exec.Command("xdg-open", rawURL)
 }
 
-// DefaultOpenBrowser opens the authorization URL with the fixed platform
-// browser opener. It starts the opener and does not wait for it: the
-// opener exits as soon as the browser is launched, and the child is reaped
-// when the login process exits.
-func DefaultOpenBrowser(rawURL string) error {
-	cmd := browserCommand(rawURL)
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("launch browser: %w", err)
-	}
-	return nil
+// openBrowser opens the authorization URL in the platform's default
+// browser without a shell and without a user-controlled executable name.
+// It observes the opener process with a bounded wait: a present opener
+// that exits unsuccessfully — no display session, no default browser —
+// reports an error so the caller can fall back to the manual handoff.
+func openBrowser(rawURL string) error {
+	return runBrowserCommand(browserCommand(rawURL))
 }

@@ -1,6 +1,6 @@
 # Tama Link Login Plan
 
-Status: Active
+Status: Implemented; live acceptance pending
 Updated: 2026-09-25
 Target: Phase 3
 Tracking: [kritama/tama-link#15](https://github.com/kritama/tama-link/issues/15)
@@ -34,18 +34,26 @@ Tama Link already has the non-interactive OAuth foundation:
 - credential fencing, refresh leases, invalid-grant retirement, logout, and
   credential-presence checks.
 
-The remaining login work is the interactive orchestration around that
-foundation:
+The login work is implemented per this plan:
 
-- `cmd/tama-link/login.go` is still a Phase 3 stub;
-- browser launch and the loopback callback listener are intentionally absent;
-- profiles do not yet declare OAuth scopes;
-- discovery does not retain `scopes_supported`;
-- authorization requests do not send `scope`.
+- `cmd/tama-link/login.go` is a thin adapter over the `internal/login`
+  service with the documented flags, output channels, and exit statuses;
+- the durable `oauth/login` lease, bounded loopback callback, fixed platform
+  browser openers, and manual handoff are implemented;
+- profile schema version 2 declares the canonical scope set, which
+  participates in the profile digest and binds discovery, registration,
+  authorization, token, and refresh behavior.
 
-The scope gap must be closed before live login. The local Tama authorization
-servers require a non-empty supported scope. The App resource currently uses
-`mcp.message`; the System resource exposes distinct read and review scopes.
+The local Tama authorization servers require a non-empty supported scope and
+advertise the RFC 9207 issuer response parameter. The App resource currently
+uses `mcp.message`; the System resource exposes distinct read and review
+scopes.
+
+What remains is live acceptance: a distributable binary completing real
+user-visible App and System logins against the local authorization servers,
+followed by `submit` and `await` from a fresh `serve` process. That evidence
+belongs to issue #8 and is not implied by the fixture, mock, repository-gate,
+or cross-build results.
 
 The upstream durable-task prerequisite tracked by `upmaru/tama#123` is
 complete. Login remains Phase 3 work, while live App and System runtime

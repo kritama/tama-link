@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"testing"
 	"time"
 )
@@ -264,6 +265,16 @@ func TestIssuerResponseRequired(t *testing.T) {
 	if md.IssuerResponseRequired() {
 		t.Fatal("an absent advertisement must not require the issuer response parameter")
 	}
+	// The RFC 9207 boolean member is the standard advertisement: true
+	// requires the issuer response parameter on every callback.
+	md.AS.AuthorizationResponseIssParameterSupported = true
+	if !md.IssuerResponseRequired() {
+		t.Fatal("the RFC 9207 flag must require the issuer response parameter")
+	}
+	md.AS.AuthorizationResponseIssParameterSupported = false
+	if md.IssuerResponseRequired() {
+		t.Fatal("an explicit false flag must not require the issuer response parameter")
+	}
 	empty := []string{}
 	md.AS.AuthorizationServerIssuersSupported = empty
 	if md.IssuerResponseRequired() {
@@ -274,11 +285,24 @@ func TestIssuerResponseRequired(t *testing.T) {
 		t.Fatal("a matching advertisement must require the issuer response parameter")
 	}
 
-	// A non-empty advertisement that does not include the validated issuer
-	// is self-contradictory and fails discovery validation.
+	// Discovery decodes the RFC 9207 flag from the real metadata shape.
 	server := (&metadataServer{}).start(t)
 	server.prm = serverPRM(server.ts.URL)
-	server.as = fmt.Sprintf(`{
+	server.as = serverAS(server.ts.URL)
+	client := clientForServer(t, server, newFakeSecrets(), newFakeLease(), newTestClock(time.Now()))
+	scanned, err := client.Discover(context.Background())
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if !scanned.IssuerResponseRequired() {
+		t.Fatal("discovery dropped the RFC 9207 issuer support flag")
+	}
+
+	// A non-empty advertisement that does not include the validated issuer
+	// is self-contradictory and fails discovery validation.
+	contra := (&metadataServer{}).start(t)
+	contra.prm = serverPRM(contra.ts.URL)
+	contra.as = fmt.Sprintf(`{
 		"issuer": %q,
 		"authorization_endpoint": %q,
 		"token_endpoint": %q,
@@ -288,10 +312,10 @@ func TestIssuerResponseRequired(t *testing.T) {
 		"response_types_supported": ["code"],
 		"token_endpoint_auth_methods_supported": ["client_secret_basic"],
 		"authorization_server_issuers_supported": ["https://other.example"]
-	}`, server.ts.URL+"/oauth", server.ts.URL+"/oauth/authorize",
-		server.ts.URL+"/oauth/token", server.ts.URL+"/oauth/register")
-	client := clientForServer(t, server, newFakeSecrets(), newFakeLease(), newTestClock(time.Now()))
-	if _, err := client.Discover(context.Background()); err == nil {
+	}`, contra.ts.URL+"/oauth", contra.ts.URL+"/oauth/authorize",
+		contra.ts.URL+"/oauth/token", contra.ts.URL+"/oauth/register")
+	contradictory := clientForServer(t, contra, newFakeSecrets(), newFakeLease(), newTestClock(time.Now()))
+	if _, err := contradictory.Discover(context.Background()); err == nil {
 		t.Fatal("discovery accepted an issuer advertisement without the validated issuer")
 	}
 }
@@ -303,19 +327,21 @@ func TestIssuerResponseRequired(t *testing.T) {
 func TestCompleteAuthorizationReturnedScope(t *testing.T) {
 	t.Parallel()
 
-	run := func(name, tokenScope string, wantErr error) {
+	// scopeJSON is the raw JSON of the token response's scope member; the
+	// empty string omits the member entirely.
+	run := func(name, scopeJSON string, wantErr error) {
 		t.Run(name, func(t *testing.T) {
 			server := (&metadataServer{}).start(t)
-			if tokenScope == "" {
-				server.tokenBody = `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
+			base := `{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1"}`
+			if scopeJSON == "" {
+				server.tokenBody = base
 			} else {
-				server.tokenBody = fmt.Sprintf(
-					`{"access_token":"at-1","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-1","scope":%q}`, tokenScope)
+				server.tokenBody = base[:len(base)-1] + `,"scope":` + scopeJSON + `}`
 			}
 			secrets := newFakeSecrets()
 			lease := newFakeLease()
 			client := clientForServerScopes(t, server, secrets, lease, []string{"mcp.message"}, newTestClock(time.Unix(1_700_000_000, 0)))
-			rec := &ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer}
+			rec := &ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer, Scopes: []string{"mcp.message"}}
 			storeTestClient(t, client, rec)
 			md := serverMetadata(server.ts.URL)
 
@@ -342,8 +368,8 @@ func TestCompleteAuthorizationReturnedScope(t *testing.T) {
 				t.Fatalf("decode credential: %v", err)
 			}
 			want := []string{"mcp.message"}
-			if tokenScope != "" {
-				want = canonicalMust(t, tokenScope)
+			if scopeJSON != "" {
+				want = canonicalMust(t, stripQuotes(scopeJSON))
 			}
 			if !scopeSetEqual(cred.Scopes, want) {
 				t.Fatalf("bound scopes = %v, want %v", cred.Scopes, want)
@@ -351,11 +377,19 @@ func TestCompleteAuthorizationReturnedScope(t *testing.T) {
 		})
 	}
 	run("omitted scope inherits the request", "", nil)
-	run("exact scope in server order", "mcp.message", nil)
-	run("reduced scope fails closed", "narrower.scope", ErrScopeMismatch)
-	run("expanded scope fails closed", "mcp.message extra.scope", ErrScopeMismatch)
-	run("different single scope fails closed", "other.scope", ErrScopeMismatch)
-	run("malformed empty token fails closed", "mcp.message  extra", ErrScopeMismatch)
+	run("exact scope in server order", `"mcp.message"`, nil)
+	run("explicit null fails closed", "null", ErrScopeMismatch)
+	run("explicit empty string fails closed", `""`, ErrScopeMismatch)
+	run("reduced scope fails closed", `"narrower.scope"`, ErrScopeMismatch)
+	run("expanded scope fails closed", `"mcp.message extra.scope"`, ErrScopeMismatch)
+	run("different single scope fails closed", `"other.scope"`, ErrScopeMismatch)
+	run("malformed empty token fails closed", `"mcp.message  extra"`, ErrScopeMismatch)
+}
+
+// stripQuotes drops the JSON string quotes from one raw scope member so
+// tests can reuse canonicalReturnedScopes on the success cases.
+func stripQuotes(scopeJSON string) string {
+	return scopeJSON[1 : len(scopeJSON)-1]
 }
 
 func TestCompleteAuthorizationLegacyClientIgnoresScope(t *testing.T) {
@@ -392,14 +426,16 @@ func TestCompleteAuthorizationLegacyClientIgnoresScope(t *testing.T) {
 func TestRefreshScopeBinding(t *testing.T) {
 	t.Parallel()
 
-	run := func(name string, credScopes []string, tokenScope string, wantErr error) {
+	// scopeJSON is the raw JSON of the token response's scope member; the
+	// empty string omits the member entirely.
+	run := func(name string, credScopes []string, scopeJSON string, wantErr error) {
 		t.Run(name, func(t *testing.T) {
 			server := (&metadataServer{}).start(t)
-			if tokenScope == "" {
-				server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+			base := `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+			if scopeJSON == "" {
+				server.tokenBody = base
 			} else {
-				server.tokenBody = fmt.Sprintf(
-					`{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2","scope":%q}`, tokenScope)
+				server.tokenBody = base[:len(base)-1] + `,"scope":` + scopeJSON + `}`
 			}
 			secrets := newFakeSecrets()
 			client := clientForServer(t, server, secrets, newFakeLease(), newTestClock(time.Unix(1_700_000_000, 0)))
@@ -438,11 +474,13 @@ func TestRefreshScopeBinding(t *testing.T) {
 			}
 		})
 	}
-	run("bound set exact", []string{"mcp.message"}, "mcp.message", nil)
+	run("bound set exact", []string{"mcp.message"}, `"mcp.message"`, nil)
 	run("bound set omitted by server", []string{"mcp.message"}, "", nil)
-	run("bound set reduced by server", []string{"mcp.message"}, "narrower.scope", ErrScopeMismatch)
-	run("bound set expanded by server", []string{"mcp.message"}, "mcp.message extra.scope", ErrScopeMismatch)
-	run("unbound legacy credential accepts anything", nil, "anything.scope", nil)
+	run("bound set explicit null fails closed", []string{"mcp.message"}, "null", ErrScopeMismatch)
+	run("bound set explicit empty fails closed", []string{"mcp.message"}, `""`, ErrScopeMismatch)
+	run("bound set reduced by server", []string{"mcp.message"}, `"narrower.scope"`, ErrScopeMismatch)
+	run("bound set expanded by server", []string{"mcp.message"}, `"mcp.message extra.scope"`, ErrScopeMismatch)
+	run("unbound legacy credential accepts anything", nil, `"anything.scope"`, nil)
 }
 
 func TestRegisterScopeValidation(t *testing.T) {
@@ -450,14 +488,15 @@ func TestRegisterScopeValidation(t *testing.T) {
 
 	cases := []struct {
 		name     string
-		declared string
+		declared declaredScope
 		wantErr  bool
 	}{
-		{"omitted", "", false},
-		{"supports the request", "mcp.message other.scope", false},
-		{"exact", "mcp.message", false},
-		{"missing a requested scope", "other.scope", true},
-		{"malformed", "mcp.message  gap", true},
+		{"omitted", declaredScope{}, false},
+		{"explicit null fails closed", declaredScope{present: true}, true},
+		{"supports the request", declaredScope{present: true, value: "mcp.message other.scope"}, false},
+		{"exact", declaredScope{present: true, value: "mcp.message"}, false},
+		{"missing a requested scope", declaredScope{present: true, value: "other.scope"}, true},
+		{"malformed", declaredScope{present: true, value: "mcp.message  gap"}, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -479,4 +518,198 @@ func canonicalMust(t *testing.T, declared string) []string {
 		t.Fatalf("canonicalReturnedScopes(%q): %v", declared, err)
 	}
 	return out
+}
+
+// TestHasCredentialsScopeBinding proves readiness binds the stored
+// registration and refresh credential to the active profile's canonical
+// scope set: a scoped profile with an unbound, mismatched, or differently
+// registered credential is not ready, and a version 1 client retains its
+// legacy behavior.
+func TestHasCredentialsScopeBinding(t *testing.T) {
+	t.Parallel()
+
+	run := func(name string, clientScopes, recScopes, credScopes []string, wantReady bool) {
+		t.Run(name, func(t *testing.T) {
+			server := (&metadataServer{}).start(t)
+			secrets := newFakeSecrets()
+			lease := newFakeLease()
+			client := clientForServerScopes(t, server, secrets, lease, clientScopes, newTestClock(time.Unix(1_700_000_000, 0)))
+			rec := &ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer, Scopes: recScopes}
+			storeTestClient(t, client, rec)
+			cred := refreshCredential{
+				RefreshToken:  "rt-1",
+				TokenEndpoint: server.ts.URL + "/oauth/token",
+				Issuer:        server.ts.URL + "/oauth",
+				Scopes:        credScopes,
+				Updated:       time.Unix(1_700_000_000, 0).UTC(),
+			}
+			credData, err := json.Marshal(cred)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := secrets.SetSecret(labelRefresh, credData); err != nil {
+				t.Fatalf("store credential: %v", err)
+			}
+
+			ready, err := client.HasCredentials(context.Background())
+			if err != nil {
+				t.Fatalf("HasCredentials: %v", err)
+			}
+			if ready != wantReady {
+				t.Fatalf("ready = %v, want %v", ready, wantReady)
+			}
+		})
+	}
+	run("exact binding is ready", []string{"mcp.message"}, []string{"mcp.message"}, []string{"mcp.message"}, true)
+	run("unbound credential is not ready", []string{"mcp.message"}, []string{"mcp.message"}, nil, false)
+	run("mismatched credential is not ready", []string{"mcp.message"}, []string{"mcp.message"}, []string{"extra.scope"}, false)
+	run("broader credential is not ready", []string{"mcp.message"}, []string{"mcp.message"}, []string{"mcp.message", "extra.scope"}, false)
+	run("unbound record is not ready", []string{"mcp.message"}, nil, []string{"mcp.message"}, false)
+	run("mismatched record is not ready", []string{"mcp.message"}, []string{"extra.scope"}, []string{"extra.scope"}, false)
+	run("legacy client stays ready", nil, nil, nil, true)
+}
+
+// TestRefreshRequiresBoundScopes proves the refresh path applies the same
+// scope binding before any exchange: a scoped profile whose stored grant
+// does not bind the active set needs a login, and no token request goes
+// out for it.
+func TestRefreshRequiresBoundScopes(t *testing.T) {
+	t.Parallel()
+
+	run := func(name string, clientScopes, credScopes []string, wantErr error) {
+		t.Run(name, func(t *testing.T) {
+			server := (&metadataServer{}).start(t)
+			server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+			secrets := newFakeSecrets()
+			lease := newFakeLease()
+			client := clientForServerScopes(t, server, secrets, lease, clientScopes, newTestClock(time.Unix(1_700_000_000, 0)))
+			cred := refreshCredential{
+				RefreshToken:  "rt-1",
+				TokenEndpoint: server.ts.URL + "/oauth/token",
+				Issuer:        server.ts.URL + "/oauth",
+				Scopes:        credScopes,
+				Updated:       time.Unix(1_700_000_000, 0).UTC(),
+			}
+			credData, err := json.Marshal(cred)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := secrets.SetSecret(labelRefresh, credData); err != nil {
+				t.Fatalf("store credential: %v", err)
+			}
+			rec := ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: server.ts.URL + "/oauth", Scopes: client.scopes}
+			recData, err := json.Marshal(rec)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := secrets.SetSecret(labelClient, recData); err != nil {
+				t.Fatalf("store record: %v", err)
+			}
+
+			_, err = client.Refresh(context.Background())
+			if wantErr != nil {
+				if !errors.Is(err, wantErr) {
+					t.Fatalf("err = %v, want %v", err, wantErr)
+				}
+				if server.tokenCalls != 0 {
+					t.Fatalf("token requests = %d, want none for an unbound credential", server.tokenCalls)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Refresh: %v", err)
+			}
+		})
+	}
+	run("unbound credential requires login", []string{"mcp.message"}, nil, ErrNoCredentials)
+	run("mismatched credential requires login", []string{"mcp.message"}, []string{"extra.scope"}, ErrNoCredentials)
+	run("exact binding refreshes", []string{"mcp.message"}, []string{"mcp.message"}, nil)
+}
+
+// TestRefreshRequestCarriesScope proves the refresh token request carries
+// the active canonical scope string, and that a version 1 request carries
+// no scope parameter at all.
+func TestRefreshRequestCarriesScope(t *testing.T) {
+	t.Parallel()
+
+	run := func(name string, clientScopes []string, wantScope string) {
+		t.Run(name, func(t *testing.T) {
+			server := (&metadataServer{}).start(t)
+			server.tokenBody = `{"access_token":"at-2","token_type":"Bearer","expires_in":3600,"refresh_token":"rt-2"}`
+			secrets := newFakeSecrets()
+			lease := newFakeLease()
+			client := clientForServerScopes(t, server, secrets, lease, clientScopes, newTestClock(time.Unix(1_700_000_000, 0)))
+			cred := refreshCredential{
+				RefreshToken:  "rt-1",
+				TokenEndpoint: server.ts.URL + "/oauth/token",
+				Issuer:        server.ts.URL + "/oauth",
+				Scopes:        client.scopes,
+				Updated:       time.Unix(1_700_000_000, 0).UTC(),
+			}
+			credData, err := json.Marshal(cred)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := secrets.SetSecret(labelRefresh, credData); err != nil {
+				t.Fatalf("store credential: %v", err)
+			}
+			rec := ClientRecord{ClientID: "cid-1", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: server.ts.URL + "/oauth", Scopes: client.scopes}
+			recData, err := json.Marshal(rec)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if err := secrets.SetSecret(labelClient, recData); err != nil {
+				t.Fatalf("store record: %v", err)
+			}
+
+			if _, err := client.Refresh(context.Background()); err != nil {
+				t.Fatalf("Refresh: %v", err)
+			}
+			form, err := url.ParseQuery(string(server.tokenRaw))
+			if err != nil {
+				t.Fatalf("parse refresh request: %v", err)
+			}
+			if got := form.Get("scope"); got != wantScope {
+				t.Fatalf("scope = %q, want %q", got, wantScope)
+			}
+		})
+	}
+	run("scoped request carries the canonical set", []string{"zeta.scope", "alpha.scope"}, "alpha.scope zeta.scope")
+	run("legacy request carries no scope", nil, "")
+}
+
+// TestRegisterScopeRebinding proves dynamic registration reuses a stored
+// client only when its registered scope set equals the active client's:
+// a record registered for another set — or before scope binding — is
+// unusable and the fenced replacement path runs.
+func TestRegisterScopeRebinding(t *testing.T) {
+	t.Parallel()
+
+	run := func(name string, clientScopes, storedScopes []string, wantRegisterCalls int) {
+		t.Run(name, func(t *testing.T) {
+			server := (&metadataServer{}).start(t)
+			secrets := newFakeSecrets()
+			lease := newFakeLease()
+			client := clientForServerScopes(t, server, secrets, lease, clientScopes, newTestClock(time.Unix(1_700_000_000, 0)))
+			if storedScopes != nil || len(clientScopes) > 0 {
+				rec := &ClientRecord{ClientID: "cid-stored", ClientSecret: "shh", AuthMethod: "client_secret_basic", Issuer: client.issuer, Scopes: storedScopes}
+				storeTestClient(t, client, rec)
+			}
+			md := serverMetadata(server.ts.URL)
+
+			rec, err := client.Register(context.Background(), md)
+			if err != nil {
+				t.Fatalf("Register: %v", err)
+			}
+			if got := server.registerCalls; got != wantRegisterCalls {
+				t.Fatalf("registration calls = %d, want %d", got, wantRegisterCalls)
+			}
+			if len(client.scopes) > 0 && !scopeSetEqual(rec.Scopes, client.scopes) {
+				t.Fatalf("record scopes = %v, want the active set %v", rec.Scopes, client.scopes)
+			}
+		})
+	}
+	run("matching set is reused", []string{"mcp.message"}, []string{"mcp.message"}, 0)
+	run("different set re-registers", []string{"mcp.message"}, []string{"extra.scope"}, 1)
+	run("unbound record re-registers", []string{"mcp.message"}, nil, 1)
 }

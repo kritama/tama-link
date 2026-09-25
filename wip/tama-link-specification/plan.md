@@ -69,8 +69,9 @@ System replay, and downstream `submit`/`await` handlers. Issue #8's package
 fixture, mocked integration, and Compose pin gates pass. Phase 2 is not
 complete: live App/System acceptance has not passed, and those earlier results
 must not be reported as the live gate. The Tama-owned prerequisite in
-`upmaru/tama#123` is complete; the remaining blockers are Link's interactive
-login/profile-v2 work and the black-box live runner.
+`upmaru/tama#123` and Link's interactive login/profile-v2 work (issue #15)
+are complete; the remaining blocker is the black-box live runner and its
+evidence.
 
 ## Key architectural decisions (resolving spec open questions)
 
@@ -606,14 +607,15 @@ Phase 2 is gated by the package and application layers it consumes. TamaMCP
 Phase 2 is complete. Package task subscriptions landed in
 `kritama/tama-mcp#9` and are pinned for the fixture gate at `v0.2.0`. The
 Tama-owned adapters and endpoint migration, including `upmaru/tama#123`, are
-complete. Live Link acceptance now waits for issue #15's interactive login and
-profile-v2 scope contract plus issue #8's black-box runner and evidence.
+complete. Live Link acceptance now waits for issue #8's black-box runner and evidence;
+issue #15's interactive login and profile-v2 scope contract are implemented.
 
 ## Phase 3 — interactive authorization, client progress, and acceptance — open
 
-- Profile version 2 with explicit least-privileged OAuth scopes, implemented
-  with interactive login under [#15](https://github.com/kritama/tama-link/issues/15)
-  and `plans/login.md`;
+- Profile version 2 with explicit least-privileged OAuth scopes and
+  interactive login under
+  [#15](https://github.com/kritama/tama-link/issues/15) and `plans/login.md`
+  — implemented, pending live acceptance;
 - Downstream MCP progress-token support: read `_meta.progressToken` on `await`,
   emit rate-limited `notifications/progress` correlated to that request
   (Go SDK `GetProgressToken` + `ServerSession.NotifyProgress`).
@@ -706,13 +708,15 @@ The current revision also resolves G8-G10 and G12-G15:
    matrix on every supported operating system before the first production
    release.
 
-Phase 0 and Phase 1 are complete. Live acceptance blocks completion of Phase 2;
-interactive login, client identity acceptance, and client progress block Phase
-3; production certification blocks Phase 4.
+Phase 0 and Phase 1 are complete. Live acceptance blocks completion of Phase
+2; live acceptance, client identity acceptance, and client progress block
+Phase 3 (its interactive login and profile-v2 scope contract are implemented);
+production certification blocks Phase 4.
 
 ## Suggested order of attack
 
-1. Implement issue #15's profile-v2 scope contract and interactive login flow.
+1. ~~Implement issue #15's profile-v2 scope contract and interactive login
+   flow.~~ Implemented.
 2. Land `kritama/memovee-cli#3` against the finalized profile-v2 schema so
    managed App and System profiles can be generated deterministically.
 3. Replace issue #8's fail-closed live scaffold with the black-box runner and

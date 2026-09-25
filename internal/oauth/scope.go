@@ -97,6 +97,18 @@ func canonicalReturnedScopes(declared string) ([]string, error) {
 	return out, nil
 }
 
+// credentialScopesBound reports whether a stored refresh credential's bound
+// scope set is the active client's: a client without a requested set
+// (a version 1 profile) retains its legacy behavior, while a scoped client
+// requires the exact canonical set, so a grant with broader or stale
+// privileges never survives profile reconciliation.
+func credentialScopesBound(bound, active []string) bool {
+	if len(active) == 0 {
+		return true
+	}
+	return scopeSetEqual(active, bound)
+}
+
 // scopeSetEqual reports whether two canonical scope sets are identical.
 func scopeSetEqual(a, b []string) bool {
 	if len(a) != len(b) {
@@ -112,19 +124,20 @@ func scopeSetEqual(a, b []string) bool {
 
 // checkReturnedScope validates a token response's scope declaration against
 // the profile's requested set and returns the granted set to bind to the
-// refresh credential. An omitted declaration inherits the requested set. A
-// present declaration must equal the requested set exactly: a reduced,
+// refresh credential. Only an omitted declaration inherits the requested
+// set. A present declaration — including an explicit null or empty string —
+// must be well formed and equal the requested set exactly: a reduced,
 // expanded, or malformed set fails closed, so privilege changes can never
 // occur silently. When the profile requests no scopes (a version 1
 // profile), the declaration is not a binding and is ignored.
-func (c *Client) checkReturnedScope(declared string) ([]string, error) {
+func (c *Client) checkReturnedScope(declared declaredScope) ([]string, error) {
 	if len(c.scopes) == 0 {
 		return nil, nil
 	}
-	if declared == "" {
+	if !declared.present {
 		return c.scopes, nil
 	}
-	got, err := canonicalReturnedScopes(declared)
+	got, err := canonicalReturnedScopes(declared.value)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", ErrScopeMismatch, err)
 	}
@@ -135,17 +148,18 @@ func (c *Client) checkReturnedScope(declared string) ([]string, error) {
 }
 
 // checkBoundScope validates a refresh response's scope declaration against
-// the set already bound to the durable refresh credential. A credential
-// without a bound set predates scope binding, so its declaration is not a
-// binding and passes.
-func checkBoundScope(bound []string, declared string) error {
+// the set already bound to the durable refresh credential. An omitted
+// declaration keeps the bound set. A present declaration must be well
+// formed and equal the bound set exactly. A credential without a bound set
+// predates scope binding, so its declaration is not a binding and passes.
+func checkBoundScope(bound []string, declared declaredScope) error {
 	if len(bound) == 0 {
 		return nil
 	}
-	if declared == "" {
+	if !declared.present {
 		return nil
 	}
-	got, err := canonicalReturnedScopes(declared)
+	got, err := canonicalReturnedScopes(declared.value)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrScopeMismatch, err)
 	}
@@ -155,15 +169,15 @@ func checkBoundScope(bound []string, declared string) error {
 	return nil
 }
 
-// registrationScopeOK validates a dynamic-registration response's optional
-// scope declaration: when present it must support every scope the profile
-// requested, so a registration that cannot grant the request is rejected
-// before the browser opens. An omitted declaration passes.
-func registrationScopeOK(requested []string, declared string) error {
-	if len(requested) == 0 || declared == "" {
+// registrationScopeOK validates a dynamic-registration response's scope
+// declaration: when present it must be well formed and support every scope
+// the profile requested, so a registration that cannot grant the request is
+// rejected before the browser opens. An omitted declaration passes.
+func registrationScopeOK(requested []string, declared declaredScope) error {
+	if len(requested) == 0 || !declared.present {
 		return nil
 	}
-	got, err := canonicalReturnedScopes(declared)
+	got, err := canonicalReturnedScopes(declared.value)
 	if err != nil {
 		return fmt.Errorf("%w: %v", ErrScopeMismatch, err)
 	}

@@ -76,11 +76,24 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 	if err := checkIssuerBoundEndpoint(cred.TokenEndpoint, cred.Issuer); err != nil {
 		return "", fmt.Errorf("%w: %v", ErrNoCredentials, err)
 	}
+	// The stored grant must bind the active profile scopes: a credential
+	// written before scope binding, or by a profile with a different scope
+	// set, is not ready — the profile needs a scoped login. A client
+	// without a requested set (a version 1 profile) retains its legacy
+	// behavior.
+	if !credentialScopesBound(cred.Scopes, c.scopes) {
+		return "", fmt.Errorf("%w: stored refresh credential does not bind the active profile scopes", ErrNoCredentials)
+	}
 
 	form := url.Values{}
 	form.Set("grant_type", "refresh_token")
 	form.Set("refresh_token", cred.RefreshToken)
 	form.Set("resource", c.endpoint)
+	// The active canonical scope string is part of the refresh request so
+	// the exchange validates against the live profile, not a stale binding.
+	if c.scope != "" {
+		form.Set("scope", c.scope)
+	}
 
 	// The exchange is a network call and the credential write follows it,
 	// so the lease is renewed on a third of its TTL across the whole

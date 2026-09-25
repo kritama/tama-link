@@ -34,9 +34,14 @@ type AuthorizationServer struct {
 	// ScopesSupported is the server's advertised scope set. See
 	// ProtectedResource.ScopesSupported for the presence semantics.
 	ScopesSupported *[]string `json:"scopes_supported"`
-	// AuthorizationServerIssuersSupported is the RFC 9207 advertisement that
-	// the server supports the authorization response issuer parameter. When
-	// present and non-empty the callback must require and validate iss.
+	// AuthorizationResponseIssParameterSupported is the RFC 9207 metadata
+	// member: when true the authorization response must carry the issuer
+	// and the callback must require and validate it against the validated
+	// authorization-server issuer.
+	AuthorizationResponseIssParameterSupported bool `json:"authorization_response_iss_parameter_supported"`
+	// AuthorizationServerIssuersSupported is the nonstandard Tama list form
+	// of the same advertisement. When present and non-empty it must include
+	// the validated issuer and the callback must require iss as well.
 	AuthorizationServerIssuersSupported []string `json:"authorization_server_issuers_supported"`
 }
 
@@ -92,11 +97,15 @@ func (c *Client) Discover(ctx context.Context) (*Metadata, error) {
 }
 
 // IssuerResponseRequired reports whether discovery says the server supports
-// the RFC 9207 authorization response issuer parameter: a non-empty
-// advertisement that must include the validated issuer. A required response
-// parameter must be present and equal to the validated issuer on every
-// authorization callback.
+// the RFC 9207 authorization response issuer parameter: the standard
+// boolean member set to true, or the nonstandard Tama issuer list form
+// present and non-empty (its list must include the validated issuer, which
+// validateAS enforces). A required response parameter must be present and
+// equal to the validated issuer on every authorization callback.
 func (m *Metadata) IssuerResponseRequired() bool {
+	if m.AS.AuthorizationResponseIssParameterSupported {
+		return true
+	}
 	return len(m.AS.AuthorizationServerIssuersSupported) > 0 &&
 		contains(m.AS.AuthorizationServerIssuersSupported, m.AS.Issuer)
 }

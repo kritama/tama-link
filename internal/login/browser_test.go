@@ -2,8 +2,11 @@ package login
 
 import (
 	"errors"
+	"os/exec"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestHandoffBrowserPreferred proves the browser opener runs first: a
@@ -89,3 +92,40 @@ func (r recordingReporter) Note(format string, _ ...any) {
 }
 
 var errOpenFailed = errors.New("browser unavailable")
+
+// shellFor returns a one-shot shell invocation for tests; the platform
+// adapters themselves never use a shell.
+func shellFor(t *testing.T, script string) *exec.Cmd {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		return exec.Command("cmd", "/c", script)
+	}
+	return exec.Command("/bin/sh", "-c", script)
+}
+
+// TestRunBrowserCommandReportsOpenerExit proves the opener process is
+// reaped and its exit result decides the launch outcome: a nonzero exit is
+// a launch failure the handoff must turn into the manual authorization
+// URL, a clean exit succeeds, and a wedged opener is cut off at the
+// bounded wait instead of hanging the callback deadline.
+func TestRunBrowserCommandReportsOpenerExit(t *testing.T) {
+	t.Parallel()
+
+	if err := runBrowserCommand(shellFor(t, "exit 3")); err == nil {
+		t.Fatal("a nonzero opener exit must be a launch failure")
+	}
+	if err := runBrowserCommand(shellFor(t, "exit 0")); err != nil {
+		t.Fatalf("exit 0: %v", err)
+	}
+
+	budget := browserLaunchBudget
+	browserLaunchBudget = 100 * time.Millisecond
+	t.Cleanup(func() { browserLaunchBudget = budget })
+	start := time.Now()
+	if err := runBrowserCommand(shellFor(t, "sleep 30")); err == nil {
+		t.Fatal("a wedged opener must not report success")
+	}
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("bounded wait took %s, want well under the callback deadline", elapsed)
+	}
+}

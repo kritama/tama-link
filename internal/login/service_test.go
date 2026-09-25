@@ -83,8 +83,9 @@ type oauthFixture struct {
 	// empty when the document omits the field.
 	prmScopes string
 	asScopes  string
-	// advertiseIssuer makes the server declare RFC 9207 issuer support,
-	// which makes the callback require the iss parameter.
+	// advertiseIssuer makes the server declare RFC 9207 issuer support in
+	// the standard boolean metadata member, which makes the callback
+	// require the iss parameter.
 	advertiseIssuer bool
 	// regScope is the scope a registration declares; empty omits it.
 	regScope string
@@ -135,7 +136,7 @@ func (f *oauthFixture) handle(w http.ResponseWriter, r *http.Request) {
 			doc["scopes_supported"] = v
 		}
 		if f.advertiseIssuer {
-			doc["authorization_server_issuers_supported"] = []string{f.base() + "/oauth"}
+			doc["authorization_response_iss_parameter_supported"] = true
 		}
 		f.writeJSON(w, http.StatusOK, doc)
 	case "/oauth/register":
