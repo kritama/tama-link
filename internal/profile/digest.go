@@ -24,11 +24,22 @@ type digestForm struct {
 	State        StateRefs            `json:"state"`
 	Limits       *limits.Limits       `json:"limits,omitempty"`
 	Operations   []catalog.Descriptor `json:"operations"`
+	// Scopes participates in the digest from version 2: the canonical scope
+	// set is profile identity, so a scope change without reconciliation
+	// fails the pinned digest. Version 1 profiles carry an empty set and
+	// their digests are unchanged.
+	Scopes []string `json:"scopes,omitempty"`
 }
 
 // ComputeDigest computes the canonical digest for the complete profile
-// configuration, excluding Digest.
+// configuration, excluding Digest. The scope set is canonicalized before
+// encoding, so the digest never depends on the order a file happened to
+// store the set in.
 func (p Profile) ComputeDigest() (string, error) {
+	scopes, err := CanonicalScopes(p.Scopes)
+	if err != nil {
+		return "", fmt.Errorf("digest scopes: %w", err)
+	}
 	encoded, err := json.Marshal(digestForm{
 		Version:      p.Version,
 		Name:         p.Name,
@@ -40,6 +51,7 @@ func (p Profile) ComputeDigest() (string, error) {
 		State:        p.State,
 		Limits:       p.Limits,
 		Operations:   p.Operations,
+		Scopes:       scopes,
 	})
 	if err != nil {
 		return "", fmt.Errorf("encode profile for digest: %w", err)

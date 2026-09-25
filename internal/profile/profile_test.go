@@ -41,7 +41,17 @@ func validProfile() *Profile {
 		Bounds:       Bounds{ProtocolMin: "2025-03-26", ProtocolMax: "2025-11-25"},
 		State:        StateRefs{Database: "default", Credentials: "default"},
 		Operations:   []catalog.Descriptor{testDescriptor("message")},
+		Scopes:       []string{"mcp.message"},
 	}
+}
+
+// legacyProfile is a version 1 profile: the non-interactive contract that
+// stays loadable and fails login with a migration error.
+func legacyProfile() *Profile {
+	p := validProfile()
+	p.Version = LegacySchemaVersion
+	p.Scopes = nil
+	return p
 }
 
 func writeProfile(t *testing.T, configDir string, p *Profile) {
@@ -334,7 +344,13 @@ func TestValidate(t *testing.T) {
 		name   string
 		mutate func(*Profile)
 	}{
-		{"wrong version", func(p *Profile) { p.Version = 2 }},
+		{"wrong version", func(p *Profile) { p.Version = 3 }},
+		{"version 1 declares scopes", func(p *Profile) {
+			p.Version = LegacySchemaVersion
+		}},
+		{"version 2 without scopes", func(p *Profile) { p.Scopes = nil }},
+		{"duplicate scopes", func(p *Profile) { p.Scopes = []string{"mcp.message", "mcp.message"} }},
+		{"malformed scope token", func(p *Profile) { p.Scopes = []string{"mcp message"} }},
 		{"name mismatch", func(p *Profile) { p.Name = Name("other") }},
 		{"http origin", func(p *Profile) { p.Origin = "http://tama.example" }},
 		{"origin with path", func(p *Profile) { p.Origin = "https://tama.example/mcp" }},

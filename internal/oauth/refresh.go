@@ -91,6 +91,13 @@ func (c *Client) refreshLocked(ctx context.Context) (string, error) {
 			return c.postToken(ectx, cred.TokenEndpoint, rec, form)
 		},
 		func(pctx context.Context, tok *tokenResponse) error {
+			// The grant's scope binding is revalidated against the set the
+			// durable credential bound: a reduced, expanded, or malformed
+			// returned set fails closed before any credential write. A
+			// credential without a bound set predates scope binding.
+			if err := checkBoundScope(cred.Scopes, tok.Scope); err != nil {
+				return err
+			}
 			// The fenced store is the persistence fence: the slot write
 			// plus the atomic fence commit decide the outcome. The commit
 			// is bound to the lease epoch captured at claim time, so a

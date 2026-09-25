@@ -39,6 +39,7 @@ func testProfile() *profile.Profile {
 		Bounds:       profile.Bounds{ProtocolMin: "2026-07-28", ProtocolMax: "2026-07-28"},
 		State:        profile.StateRefs{Database: "default", Credentials: "default"},
 		Operations:   []catalog.Descriptor{op},
+		Scopes:       []string{"mcp.message"},
 	}
 	if err := p.Validate(p.Name); err != nil {
 		panic(err)

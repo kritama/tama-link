@@ -64,6 +64,7 @@ func demoProfileForWrite() profile.Profile {
 		Bounds:       profile.Bounds{ProtocolMin: "2026-07-28", ProtocolMax: "2026-07-28"},
 		State:        profile.StateRefs{Database: "default", Credentials: "default"},
 		Operations:   []catalog.Descriptor{op},
+		Scopes:       []string{"mcp.message"},
 	}
 	if err := p.Validate("demo"); err != nil {
 		panic(err)
@@ -73,15 +74,20 @@ func demoProfileForWrite() profile.Profile {
 
 // writeDemoProfile installs the demo profile under configDir.
 func writeDemoProfile(configDir string) error {
+	return writeDemoProfileFile(configDir, "demo", demoProfileForWrite())
+}
+
+// writeDemoProfileFile installs one profile document under configDir.
+func writeDemoProfileFile(configDir, name string, p profile.Profile) error {
 	profilesDir := filepath.Join(configDir, "profiles")
 	if err := os.MkdirAll(profilesDir, 0o700); err != nil {
 		return err
 	}
-	data, err := json.Marshal(demoProfileForWrite())
+	data, err := json.Marshal(p)
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(profilesDir, "demo.json"), data, 0o600)
+	return os.WriteFile(filepath.Join(profilesDir, name+".json"), data, 0o600)
 }
 
 // buildBinary compiles the real command so the tests exercise the same

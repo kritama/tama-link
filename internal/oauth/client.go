@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/kritama/tama-link/internal/profile"
 	"github.com/kritama/tama-link/internal/store"
 )
 
@@ -129,6 +131,11 @@ type Config struct {
 	// MaxMetadataBytes bounds one metadata or token response body.
 	// Defaults to DefaultMaxMetadataBytes.
 	MaxMetadataBytes int64
+	// Scopes is the profile's OAuth scope set. When non-empty the canonical
+	// scope string is sent in dynamic registration and authorization
+	// requests and the token endpoint's returned scope is validated against
+	// it. Version 1 profiles request no scopes and leave this empty.
+	Scopes []string
 }
 
 // Client is one profile's OAuth client. It holds the in-memory access token
@@ -138,12 +145,16 @@ type Client struct {
 	endpoint    string
 	issuer      string
 	redirectURI string
-	secrets     SecretStore
-	lease       Leaser
-	clock       func() time.Time
-	httpClient  *http.Client
-	maxBytes    int64
-	owner       string
+	// scopes is the canonical requested scope set; scope is its wire form.
+	// Empty for version 1 profiles, which request no scope.
+	scopes     []string
+	scope      string
+	secrets    SecretStore
+	lease      Leaser
+	clock      func() time.Time
+	httpClient *http.Client
+	maxBytes   int64
+	owner      string
 
 	mu          sync.Mutex
 	token       string
@@ -194,6 +205,14 @@ func New(cfg Config) (*Client, error) {
 	if maxBytes <= 0 {
 		maxBytes = DefaultMaxMetadataBytes
 	}
+	var scopes []string
+	if len(cfg.Scopes) > 0 {
+		canonical, err := profile.CanonicalScopes(cfg.Scopes)
+		if err != nil {
+			return nil, fmt.Errorf("scopes: %w", err)
+		}
+		scopes = canonical
+	}
 	// Redirects are refused on every client, default or supplied: metadata,
 	// registration, and token destinations must all come from validated
 	// profile metadata, never from a Location header. The supplied client is
@@ -215,6 +234,8 @@ func New(cfg Config) (*Client, error) {
 		endpoint:    endpoint.String(),
 		issuer:      cfg.Issuer,
 		redirectURI: redirect.String(),
+		scopes:      scopes,
+		scope:       strings.Join(scopes, " "),
 		secrets:     cfg.Secrets,
 		lease:       cfg.Lease,
 		clock:       clock,

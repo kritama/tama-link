@@ -188,6 +188,9 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 		"response_types":             []string{"code"},
 		"token_endpoint_auth_method": md.AS.TokenEndpointAuthMethod(),
 	}
+	if c.scope != "" {
+		body["scope"] = c.scope
+	}
 	data, err := json.Marshal(body)
 	if err != nil {
 		return nil, fmt.Errorf("encode registration: %w", err)
@@ -214,13 +217,19 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 		ClientID     string `json:"client_id"`
 		ClientSecret string `json:"client_secret"`
 		// Zero means the secret does not expire (RFC 7591).
-		SecretExpiresAt int64 `json:"client_secret_expires_at"`
+		SecretExpiresAt int64  `json:"client_secret_expires_at"`
+		Scope           string `json:"scope"`
 	}
 	if err := json.Unmarshal(payload, &created); err != nil {
 		return nil, fmt.Errorf("decode registration: json")
 	}
 	if created.ClientID == "" {
 		return nil, fmt.Errorf("registration returned no client id")
+	}
+	// A registration that declares scopes must support every requested
+	// scope; otherwise the browser consent could not grant them.
+	if err := registrationScopeOK(c.scopes, created.Scope); err != nil {
+		return nil, err
 	}
 	rec := &ClientRecord{
 		ClientID:        created.ClientID,

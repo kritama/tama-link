@@ -21,10 +21,14 @@ const maxTokenExpirySeconds = int64(math.MaxInt64) / int64(time.Second)
 // rediscovery, and so a profile that points at a different authorization
 // server fails closed instead of replaying a foreign credential.
 type refreshCredential struct {
-	RefreshToken  string    `json:"refresh_token"`
-	TokenEndpoint string    `json:"token_endpoint"`
-	Issuer        string    `json:"issuer"`
-	Updated       time.Time `json:"updated"`
+	RefreshToken  string `json:"refresh_token"`
+	TokenEndpoint string `json:"token_endpoint"`
+	Issuer        string `json:"issuer"`
+	// Scopes is the granted scope set bound to this credential; refresh
+	// revalidates the token endpoint's returned scope against it. Absent in
+	// credentials persisted before scope binding.
+	Scopes  []string  `json:"scopes,omitempty"`
+	Updated time.Time `json:"updated"`
 }
 
 // loadRefresh returns the stored refresh credential, or found=false.

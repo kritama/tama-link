@@ -14,9 +14,15 @@ import (
 var databaseReferencePattern = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,62}[a-z0-9])?$`)
 
 const (
-	// SchemaVersion is the profile document version this build understands.
-	// Unknown versions fail closed until the profile is reconciled.
-	SchemaVersion = 1
+	// SchemaVersion is the newest profile document version this build
+	// understands: version 2 adds the required non-empty OAuth scopes array.
+	SchemaVersion = 2
+
+	// LegacySchemaVersion is the version 1 document delivered through
+	// Phase 2. It remains loadable for the non-interactive runtime and
+	// fails interactive login with a migration error instead of receiving
+	// an implicit scope set.
+	LegacySchemaVersion = 1
 
 	// maxInstructionsBytes bounds the pinned upstream server instructions.
 	maxInstructionsBytes = 16 * 1024
@@ -52,6 +58,10 @@ type Profile struct {
 	Limits *limits.Limits `json:"limits,omitempty"`
 	// Operations is the pinned approved-operation catalog.
 	Operations []catalog.Descriptor `json:"operations"`
+	// Scopes is the canonical, sorted OAuth scope set the profile requests.
+	// Required and non-empty in version 2; absent in version 1. The
+	// canonical set participates in the profile digest.
+	Scopes []string `json:"scopes,omitempty"`
 	// Digest reconciles the complete non-secret profile configuration. It is
 	// required when any profile limit exceeds the version 1 default.
 	Digest string `json:"digest,omitempty"`
@@ -112,8 +122,8 @@ func (p *Profile) EffectiveLimits() limits.Limits {
 // Validate reports whether the profile is internally consistent for the
 // expected profile name.
 func (p *Profile) Validate(expected Name) error {
-	if p.Version != SchemaVersion {
-		return fmt.Errorf("unsupported profile version %d, want %d", p.Version, SchemaVersion)
+	if p.Version != SchemaVersion && p.Version != LegacySchemaVersion {
+		return fmt.Errorf("unsupported profile version %d, want %d or %d", p.Version, SchemaVersion, LegacySchemaVersion)
 	}
 	if p.Name != expected {
 		return fmt.Errorf("profile name %q does not match %q", p.Name, expected)
@@ -161,6 +171,11 @@ func (p *Profile) Validate(expected Name) error {
 	if _, err := p.Kind(); err != nil {
 		return err
 	}
+	canonical, err := validateScopes(p.Version, p.Scopes)
+	if err != nil {
+		return err
+	}
+	p.Scopes = canonical
 	if p.Digest != "" {
 		if err := p.CheckDigest(); err != nil {
 			return err
