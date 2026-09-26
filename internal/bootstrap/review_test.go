@@ -218,8 +218,17 @@ func TestDiscardAfterPublicationGateDoesNotPublish(t *testing.T) {
 
 func TestDiscardClosesStoreBeforeRemovingDatabase(t *testing.T) {
 	configDir := privateConfig(t)
-	dbDir := t.TempDir()
-	dbPath := filepath.Join(dbDir, "default.db")
+	shell := &profile.Profile{
+		Name:  "tama-app",
+		State: profile.StateRefs{Database: stateDatabase, Credentials: stateCredentials},
+	}
+	dbPath, err := profile.DatabasePath(configDir, shell)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(dbPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(dbPath, []byte("db"), 0o600); err != nil {
 		t.Fatal(err)
 	}
