@@ -12,8 +12,8 @@ import (
 // ValidateAgainstSchema validates one JSON value against the pinned schema's
 // enforced vocabulary: type, properties, required, additionalProperties
 // (boolean or nested schema), items, enum, const, minimum, maximum,
-// minLength, maxLength (Unicode code points), minItems, maxItems, and
-// pattern (Go RE2). Pinned schemas may only use this vocabulary with
+// minLength, maxLength (Unicode code points), minItems, maxItems,
+// pattern (Go RE2), and anyOf. Pinned schemas may only use this vocabulary with
 // well-formed values: CheckSchemaVocabulary enforces both at profile load,
 // so nothing unenforced or malformed can reach runtime. Numbers are compared
 // through exact arbitrary-precision decimals — exponent form included — never
@@ -42,6 +42,7 @@ type schemaView struct {
 	MinItems             *countValue                `json:"minItems"`
 	MaxItems             *countValue                `json:"maxItems"`
 	Pattern              string                     `json:"pattern"`
+	AnyOf                []json.RawMessage          `json:"anyOf"`
 }
 
 func (s *schemaView) validate(value json.RawMessage, path string) error {
@@ -49,6 +50,11 @@ func (s *schemaView) validate(value json.RawMessage, path string) error {
 	kind := valueKind(trimmed)
 	if s.Type != nil {
 		if err := s.checkType(trimmed, kind, path); err != nil {
+			return err
+		}
+	}
+	if len(s.AnyOf) > 0 {
+		if err := s.validateAnyOf(trimmed, path); err != nil {
 			return err
 		}
 	}
@@ -89,6 +95,19 @@ func (s *schemaView) validate(value json.RawMessage, path string) error {
 		return fmt.Errorf("%s is not one of the pinned enum values", path)
 	}
 	return nil
+}
+
+func (s *schemaView) validateAnyOf(value []byte, path string) error {
+	for i, branch := range s.AnyOf {
+		var child schemaView
+		if err := json.Unmarshal(branch, &child); err != nil {
+			return fmt.Errorf("%s.anyOf[%d] is not a schema object", path, i)
+		}
+		if err := child.validate(value, fmt.Sprintf("%s.anyOf[%d]", path, i)); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("%s does not match any allowed schema", path)
 }
 
 func (s *schemaView) checkType(value []byte, kind jsonKind, path string) error {

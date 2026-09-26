@@ -8,12 +8,14 @@ Profile producer: [kritama/memovee-cli#3](https://github.com/kritama/memovee-cli
 
 ## Purpose
 
-Implement `tama-link login --profile <name>` as the explicit interactive OAuth
-entry point for an existing Tama Link profile.
+Implement the existing-profile path of `tama-link login` as the explicit
+interactive OAuth entry point for a profile that already exists.
 
-The command authorizes one profile, persists the durable OAuth material needed
-by later `serve` processes, and exits. It does not create profiles, start the
-MCP server, or make an upstream MCP request.
+The command authorizes that profile, persists the durable OAuth material needed
+by later `serve` processes, and exits. This path does not create or edit
+profiles, start the MCP server, or make an upstream MCP request. Creating a
+previously absent profile is the separate bootstrap path in
+`plans/profile-bootstrap.md`.
 
 This plan refines the Phase 3 login work described by
 `wip/tama-link-specification.md` and
@@ -74,8 +76,9 @@ acceptance remains a separate acceptance gate for Tama Link issue #8.
 
 ### Other components own
 
-- The Memovee CLI or another installer creates the non-secret Tama Link profile
-  and selects its endpoint, adapter, and scopes.
+- The Memovee CLI creates and reconciles profiles it manages. Tama Link's
+  bootstrap flow may create a previously absent profile from a reviewed
+  template; this existing-profile path does not.
 - The authorization server owns user authentication, consent, authorization
   codes, and tokens.
 - The user owns all interaction with the browser. Tama Link must never collect
@@ -83,7 +86,8 @@ acceptance remains a separate acceptance gate for Tama Link issue #8.
 
 ### Not part of login
 
-- creating or editing profiles;
+- creating or editing profiles on this path; new-profile creation belongs to
+  `plans/profile-bootstrap.md`;
 - accepting tokens from flags, environment variables, or profile files;
 - running a persistent HTTP callback server;
 - starting `serve` or exposing the downstream MCP tools;
@@ -96,19 +100,20 @@ acceptance remains a separate acceptance gate for Tama Link issue #8.
 
 ### 1. Command surface
 
-The command is:
+The existing-profile command is:
 
 ```text
 tama-link login --profile <name> [--config-dir <dir>] [--no-browser]
 ```
 
-- `--profile` is required.
+- `--profile` names an existing profile on this path.
 - `--config-dir` follows the same resolution rules as `serve` and supports
   managed installations and isolated acceptance tests.
 - `--no-browser` prints the authorization URL and waits for the callback. It is
   intended for environments where automatic browser launch is unavailable or
   undesirable.
-- Login requires an existing, valid profile. It never creates or rewrites one.
+- This path requires an existing, valid profile. It never creates or rewrites
+  one. Bootstrap flags are rejected when the named profile already exists.
 
 ### 2. Profile scopes
 
@@ -482,7 +487,8 @@ restart workflow. Only this gate closes the remaining live-acceptance claim.
 
 Login is complete when all of the following are true:
 
-1. `login` requires an existing version 2 profile with explicit scopes.
+1. Existing-profile `login` requires a version 2 profile with explicit scopes.
+   Creating a profile is covered by `plans/profile-bootstrap.md`, not this path.
 2. Requested scopes are canonical, least-privileged, sent in the authorization
    request, and validated against discovery and token responses.
 3. The callback uses a pre-bound exact IPv4 loopback URI and a fixed path.

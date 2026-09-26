@@ -13,6 +13,11 @@ import (
 	"github.com/kritama/tama-link/internal/version"
 )
 
+func TestMain(m *testing.M) {
+	stdinIsInteractive = func() bool { return false }
+	os.Exit(m.Run())
+}
+
 func writeProfileFile(t *testing.T, configDir, name string) {
 	t.Helper()
 	profilesDir := filepath.Join(configDir, "profiles")
