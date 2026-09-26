@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/kritama/tama-link/internal/profile"
 )
@@ -51,14 +52,19 @@ func (s *Service) finish(ctx context.Context, req Request, cand candidate, recor
 	}()
 	work, cancelWork := context.WithCancel(ctx)
 	stopRenew := s.renew(work, session, owner, cancelWork)
-	defer func() {
-		cancelWork()
-		stopRenew()
-	}()
+	var renewStopped sync.Once
+	stop := func() {
+		renewStopped.Do(func() {
+			cancelWork()
+			stopRenew()
+		})
+	}
+	defer stop()
 
 	if record.Stage != stageAuthorized {
 		if err := session.Authorize(work, req.NoBrowser); err != nil {
-			return nil, s.afterAuthorizeFailure(ctx, session, cand.Name, err)
+			stop()
+			return nil, s.afterAuthorizeFailure(ctx, session, owner, cand.Name, err)
 		}
 		record.Stage = stageAuthorized
 		if err := record.save(s.opts.ConfigDir); err != nil {
@@ -141,13 +147,21 @@ func (s *Service) finish(ctx context.Context, req Request, cand candidate, recor
 // Tests use it to discard the bootstrap in that interval.
 var beforePublish func()
 
-func (s *Service) afterAuthorizeFailure(ctx context.Context, session Session, name profile.Name, err error) error {
+func (s *Service) afterAuthorizeFailure(ctx context.Context, session Session, owner string, name profile.Name, err error) error {
 	ready, readyErr := session.Ready(ctx)
 	if readyErr != nil || ready {
 		return incomplete(err)
 	}
 	if logoutErr := session.Logout(ctx); logoutErr != nil {
 		return incomplete(logoutErr)
+	}
+	// Windows denies DELETE while SQLite still holds the database. Release
+	// the lease and close the store before removing the file.
+	if relErr := session.ReleaseLease(context.WithoutCancel(ctx), LeaseName, owner); relErr != nil {
+		return incomplete(relErr)
+	}
+	if closeErr := session.Close(); closeErr != nil {
+		return incomplete(closeErr)
 	}
 	if dbErr := removeDatabasePath(session.DatabasePath()); dbErr != nil {
 		return incomplete(dbErr)

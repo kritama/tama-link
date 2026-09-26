@@ -216,6 +216,52 @@ func TestDiscardAfterPublicationGateDoesNotPublish(t *testing.T) {
 	}
 }
 
+func TestDiscardClosesStoreBeforeRemovingDatabase(t *testing.T) {
+	configDir := privateConfig(t)
+	dbDir := t.TempDir()
+	dbPath := filepath.Join(dbDir, "default.db")
+	if err := os.WriteFile(dbPath, []byte("db"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session := &closingSession{fakeSession: fakeSession{dbPath: dbPath}}
+	svc := testService(t, configDir, nil, &fakeSession{}, nil)
+	svc.opts.OpenSession = func(context.Context, *profile.Profile) (Session, error) {
+		return session, nil
+	}
+	record := journal{
+		Version: journalVersion, ID: "0123456789abcdef0123456789abcdef",
+		Name: "tama-app", Origin: "https://tama.example",
+		Endpoint: "https://tama.example/mcp/app", Issuer: "https://auth.example",
+		Template: "app", Scopes: []string{"mcp.message"},
+		Database: stateDatabase, Credentials: stateCredentials, Stage: stageAuthorized,
+	}
+	if err := record.create(configDir); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.discard(context.Background(), record); err != nil {
+		t.Fatal(err)
+	}
+	if !session.closedBeforeRemoval {
+		t.Fatal("database was removed before the store closed")
+	}
+	if _, err := os.Stat(dbPath); !os.IsNotExist(err) {
+		t.Fatalf("database remains: %v", err)
+	}
+}
+
+type closingSession struct {
+	fakeSession
+	closedBeforeRemoval bool
+}
+
+func (c *closingSession) Close() error {
+	if _, err := os.Stat(c.dbPath); err != nil {
+		return err
+	}
+	c.closedBeforeRemoval = true
+	return nil
+}
+
 func TestRecoveryRejectsConflictingWinner(t *testing.T) {
 	t.Parallel()
 	configDir := privateConfig(t)

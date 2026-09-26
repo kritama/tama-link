@@ -197,7 +197,12 @@ func (s *Service) discardLocked(ctx context.Context, record journal) error {
 	if err != nil {
 		return incomplete(err)
 	}
-	defer func() { _ = session.Close() }()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = session.Close()
+		}
+	}()
 	owner, err := newOwner()
 	if err != nil {
 		return failErr(err)
@@ -209,10 +214,25 @@ func (s *Service) discardLocked(ctx context.Context, record journal) error {
 	if !claimed {
 		return failErr(fmt.Errorf("%w: wait for it to finish and retry", ErrBusy))
 	}
-	defer func() { _ = session.ReleaseLease(context.WithoutCancel(ctx), LeaseName, owner) }()
+	released := false
+	defer func() {
+		if !released {
+			_ = session.ReleaseLease(context.WithoutCancel(ctx), LeaseName, owner)
+		}
+	}()
 	if err := session.Logout(ctx); err != nil {
 		return incomplete(err)
 	}
+	if err := session.ReleaseLease(context.WithoutCancel(ctx), LeaseName, owner); err != nil {
+		return incomplete(err)
+	}
+	released = true
+	if err := session.Close(); err != nil {
+		return incomplete(err)
+	}
+	closed = true
+	// The store must be closed before deletion. Windows rejects DELETE
+	// while the SQLite handle is open.
 	if err := s.removeDatabase(shell); err != nil {
 		return incomplete(err)
 	}
