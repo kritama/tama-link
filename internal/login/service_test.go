@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -145,6 +146,18 @@ func (f *oauthFixture) handle(w http.ResponseWriter, r *http.Request) {
 		f.regBody = string(raw)
 		f.regCalls++
 		f.mu.Unlock()
+		var request struct {
+			ApplicationType string   `json:"application_type"`
+			RedirectURIs    []string `json:"redirect_uris"`
+		}
+		if json.Unmarshal(raw, &request) != nil || request.ApplicationType != "native" ||
+			len(request.RedirectURIs) != 1 || !validRegisteredCallback(request.RedirectURIs[0]) {
+			f.writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":             "invalid_redirect_uri",
+				"error_description": "provider prose must not reach the caller",
+			})
+			return
+		}
 		resp := map[string]any{
 			"client_id":                "cid-test",
 			"client_secret":            "shh",
@@ -174,6 +187,16 @@ func (f *oauthFixture) handle(w http.ResponseWriter, r *http.Request) {
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func validRegisteredCallback(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "http" || u.Hostname() != "127.0.0.1" ||
+		u.Path != CallbackPath || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return false
+	}
+	port, err := strconv.Atoi(u.Port())
+	return err == nil && port >= 1024 && port <= 65535
 }
 
 // field decodes one JSON array for embedding, or returns nil to omit.
@@ -408,11 +431,19 @@ func TestLoginSuccessWithBrowser(t *testing.T) {
 	if !strings.Contains(fx.regBody, `"scope":"mcp.message"`) {
 		t.Fatalf("registration body = %s, want the requested scope", fx.regBody)
 	}
-	// The registration carries the loopback base with the fixed callback
-	// path: the port varies per attempt, but a provider comparing paths
-	// must see the one every authorization uses.
-	if !strings.Contains(fx.regBody, `"redirect_uris":["http://127.0.0.1/oauth/callback"]`) {
-		t.Fatalf("registration body = %s, want the loopback callback redirect", fx.regBody)
+	var registered struct {
+		ApplicationType string   `json:"application_type"`
+		RedirectURIs    []string `json:"redirect_uris"`
+	}
+	if err := json.Unmarshal([]byte(fx.regBody), &registered); err != nil {
+		t.Fatalf("decode registration body: %v", err)
+	}
+	if registered.ApplicationType != "native" || len(registered.RedirectURIs) != 1 ||
+		!validRegisteredCallback(registered.RedirectURIs[0]) {
+		t.Fatalf("registration body = %s, want one exact native loopback callback", fx.regBody)
+	}
+	if got := fx.tokenForm.Get("redirect_uri"); got != registered.RedirectURIs[0] {
+		t.Fatalf("token redirect = %q, want registered redirect %q", got, registered.RedirectURIs[0])
 	}
 	if got := fx.tokenForm.Get("scope"); got != "mcp.message" {
 		t.Fatalf("token scope = %q", got)
@@ -530,6 +561,12 @@ func TestLoginDeniedPreservesPriorCredential(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "free text") {
 		t.Fatalf("provider free text leaked: %v", err)
+	}
+	fx.mu.Lock()
+	regCalls := fx.regCalls
+	fx.mu.Unlock()
+	if regCalls != 1 {
+		t.Fatalf("registration calls = %d, want 1: re-login must reuse the registered callback", regCalls)
 	}
 
 	// The prior credential is still usable.

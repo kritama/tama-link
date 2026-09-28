@@ -168,6 +168,28 @@ func TestNewRequiresProfile(t *testing.T) {
 	if _, err := New(""); err == nil {
 		t.Fatal("New(\"\") succeeded, want error")
 	}
+	if _, err := NewInteractive(""); err == nil {
+		t.Fatal("NewInteractive(\"\") succeeded, want error")
+	}
+}
+
+func TestFinishOpenUsesSelectedProbe(t *testing.T) {
+	backend := newFakeKeyring()
+	probeErr := errors.New("selected probe")
+	selected := func(profile string, got keyring.Keyring) error {
+		if profile != "demo" {
+			t.Fatalf("probe profile = %q, want demo", profile)
+		}
+		if got != backend {
+			t.Fatal("probe received a different backend")
+		}
+		return probeErr
+	}
+
+	_, err := finishOpen("demo", backend, selected)
+	if !errors.Is(err, probeErr) {
+		t.Fatalf("finishOpen error = %v, want selected probe error", err)
+	}
 }
 
 func TestKeyringSecuresStore(t *testing.T) {
@@ -236,6 +258,57 @@ func TestProbeSucceedsAndCleansUp(t *testing.T) {
 	backend.mu.Unlock()
 	if count != 0 {
 		t.Fatalf("probe left %d entries behind", count)
+	}
+}
+
+func TestInteractiveProbeAllowsTimeToUnlock(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
+	backend := newFakeKeyring()
+	slow := &slowKeyring{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		inner:   backend,
+	}
+	probeTimeout = 50 * time.Millisecond
+	loginProbeTimeout = time.Second
+	t.Cleanup(func() {
+		probeTimeout = 5 * time.Second
+		loginProbeTimeout = 2 * time.Minute
+	})
+
+	errs := make(chan error, 1)
+	go func() { errs <- probeBackendForLogin("demo", slow) }()
+	<-slow.started
+
+	// The interactive probe remains available after the unattended serve
+	// budget would have expired, giving the user time to unlock the keyring.
+	time.Sleep(2 * probeTimeout)
+	close(slow.release)
+	if err := <-errs; err != nil {
+		t.Fatalf("interactive probe: %v", err)
+	}
+}
+
+func TestInteractiveProbeReportsLoginTimeout(t *testing.T) {
+	resetRunner()
+	t.Cleanup(resetRunner)
+	backend := newFakeKeyring()
+	slow := &slowKeyring{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+		inner:   backend,
+	}
+	loginProbeTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { loginProbeTimeout = 2 * time.Minute })
+
+	errs := make(chan error, 1)
+	go func() { errs <- probeBackendForLogin("demo", slow) }()
+	<-slow.started
+	err := <-errs
+	close(slow.release)
+	if err == nil || !strings.Contains(err.Error(), "timed out during interactive login") {
+		t.Fatalf("interactive timeout = %v, want login-specific diagnostic", err)
 	}
 }
 

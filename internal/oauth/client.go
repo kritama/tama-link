@@ -112,11 +112,9 @@ type Config struct {
 	// Issuer is the expected authorization-server issuer, exactly.
 	// Required.
 	Issuer string
-	// RedirectURI is the loopback URI registered with the authorization
-	// server during dynamic client registration. Defaults to
-	// "http://127.0.0.1" (any ephemeral port). The actual listener port is
-	// selected by the caller before NewAuthorizationRequest, which carries
-	// the exact URI through the authorization and token exchanges.
+	// RedirectURI is the compatibility default used by Register. Interactive
+	// login binds its listener first and passes the exact callback URI to
+	// RegisterForRedirect instead. Defaults to "http://127.0.0.1".
 	RedirectURI string
 	// Secrets stores OAuth secrets in the profile credential namespace.
 	// Required.

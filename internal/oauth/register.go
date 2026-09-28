@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -22,10 +23,14 @@ const (
 // ClientRecord is the persisted dynamic client registration. The secret,
 // when present, lives only in the credential backend.
 type ClientRecord struct {
-	ClientID     string    `json:"client_id"`
-	ClientSecret string    `json:"client_secret,omitempty"`
-	AuthMethod   string    `json:"token_endpoint_auth_method"`
-	Issuer       string    `json:"issuer"`
+	ClientID     string `json:"client_id"`
+	ClientSecret string `json:"client_secret,omitempty"`
+	AuthMethod   string `json:"token_endpoint_auth_method"`
+	Issuer       string `json:"issuer"`
+	// RedirectURI is the exact loopback callback registered for this
+	// client. Legacy records omit it and retain the provider's historical
+	// redirect behavior.
+	RedirectURI  string    `json:"redirect_uri,omitempty"`
 	RegisteredAt time.Time `json:"registered_at"`
 	// SecretExpiresAt is the RFC 7591 client_secret_expires_at: a Unix
 	// second after which the secret is invalid, or zero when the secret
@@ -128,7 +133,8 @@ func (c *Client) currentRecord(ctx context.Context, rec *ClientRecord) error {
 	if !found {
 		return fmt.Errorf("%w: the stored client registration is no longer usable", ErrNoCredentials)
 	}
-	if stored.ClientID != rec.ClientID || stored.ClientSecret != rec.ClientSecret || stored.Issuer != rec.Issuer {
+	if stored.ClientID != rec.ClientID || stored.ClientSecret != rec.ClientSecret ||
+		stored.Issuer != rec.Issuer || stored.RedirectURI != rec.RedirectURI {
 		return fmt.Errorf("%w: the client registration was replaced during the login", ErrNoCredentials)
 	}
 	return nil
@@ -138,11 +144,27 @@ func (c *Client) currentRecord(ctx context.Context, rec *ClientRecord) error {
 // issuer, otherwise performs dynamic client registration and persists the
 // result.
 func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, error) {
+	return c.register(ctx, md, c.redirectURI)
+}
+
+// RegisterForRedirect returns a stored registration for redirectURI, or
+// dynamically registers that exact native-loopback callback. Dynamic native
+// clients must register the listener's concrete port; a later login reuses
+// both the registration and its persisted redirect instead of silently
+// replacing a still-usable client identity.
+func (c *Client) RegisterForRedirect(ctx context.Context, md *Metadata, redirectURI string) (*ClientRecord, error) {
+	if err := checkDynamicRegistrationRedirect(redirectURI); err != nil {
+		return nil, err
+	}
+	return c.register(ctx, md, redirectURI)
+}
+
+func (c *Client) register(ctx context.Context, md *Metadata, redirectURI string) (*ClientRecord, error) {
 	if rec, found, err := c.RegisteredClient(ctx); err != nil {
 		return nil, err
 	} else if found {
-		if rec.Issuer != md.AS.Issuer {
-			return nil, fmt.Errorf("%w: stored client registration binds a different issuer", ErrMetadata)
+		if err := checkRegistrationReuse(rec, md, redirectURI); err != nil {
+			return nil, err
 		}
 		return rec, nil
 	}
@@ -191,15 +213,16 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 	if rec, found, err := c.RegisteredClient(ctx); err != nil {
 		return nil, err
 	} else if found {
-		if rec.Issuer != md.AS.Issuer {
-			return nil, fmt.Errorf("%w: stored client registration binds a different issuer", ErrMetadata)
+		if err := checkRegistrationReuse(rec, md, redirectURI); err != nil {
+			return nil, err
 		}
 		return rec, nil
 	}
 
 	body := map[string]any{
+		"application_type":           "native",
 		"client_name":                "Tama Link",
-		"redirect_uris":              []string{c.redirectURI},
+		"redirect_uris":              []string{redirectURI},
 		"grant_types":                []string{"authorization_code", "refresh_token"},
 		"response_types":             []string{"code"},
 		"token_endpoint_auth_method": md.AS.TokenEndpointAuthMethod(),
@@ -227,7 +250,7 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 		return nil, err
 	}
 	if resp.StatusCode != http.StatusCreated && resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("registration endpoint answered %d", resp.StatusCode)
+		return nil, registrationResponseError(resp.StatusCode, payload)
 	}
 	var created struct {
 		ClientID     string `json:"client_id"`
@@ -252,6 +275,7 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 		ClientSecret:    created.ClientSecret,
 		AuthMethod:      md.AS.TokenEndpointAuthMethod(),
 		Issuer:          md.AS.Issuer,
+		RedirectURI:     redirectURI,
 		RegisteredAt:    c.clock().UTC(),
 		SecretExpiresAt: created.SecretExpiresAt,
 		Scopes:          c.scopes,
@@ -288,6 +312,61 @@ func (c *Client) Register(ctx context.Context, md *Metadata) (*ClientRecord, err
 		return nil, err
 	}
 	return rec, nil
+}
+
+// checkRegistrationReuse prevents one stored client identity from being used
+// with a redirect it was not registered to receive. A legacy record has no
+// persisted redirect and keeps its old provider-defined loopback behavior.
+func checkRegistrationReuse(rec *ClientRecord, md *Metadata, redirectURI string) error {
+	if rec.Issuer != md.AS.Issuer {
+		return fmt.Errorf("%w: stored client registration binds a different issuer", ErrMetadata)
+	}
+	if rec.RedirectURI != "" && rec.RedirectURI != redirectURI {
+		return fmt.Errorf("%w: stored client registration binds a different redirect uri", ErrMetadata)
+	}
+	return nil
+}
+
+// checkDynamicRegistrationRedirect enforces the native redirect shape
+// accepted by the authorization server: an exact IPv4 loopback URI with a
+// non-privileged listener port and a callback path.
+func checkDynamicRegistrationRedirect(raw string) error {
+	if err := checkLoopbackRedirect(raw); err != nil {
+		return err
+	}
+	u, _ := url.Parse(raw)
+	port, err := strconv.Atoi(u.Port())
+	if err != nil || port < 1024 || port > 65535 || u.Path == "" || u.Path == "/" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("redirect uri must include an exact non-privileged loopback port and callback path")
+	}
+	return nil
+}
+
+// registrationResponseError carries only the provider's bounded enum-like
+// OAuth error code. Provider prose and the raw response body can contain
+// request data and must not reach CLI diagnostics.
+func registrationResponseError(status int, payload []byte) error {
+	var doc struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal(payload, &doc) == nil && safeOAuthErrorCode(doc.Error) {
+		return fmt.Errorf("registration endpoint answered %d: %s", status, doc.Error)
+	}
+	return fmt.Errorf("registration endpoint answered %d", status)
+}
+
+func safeOAuthErrorCode(value string) bool {
+	if len(value) == 0 || len(value) > 64 {
+		return false
+	}
+	for i, r := range value {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || i > 0 && (r == '.' || r == '_' || r == '-') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // storeClient commits one client registration through the client fence,

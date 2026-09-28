@@ -16,7 +16,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"net"
 	"os"
 	"time"
 
@@ -176,7 +175,7 @@ func newLoginOwner() (string, error) {
 }
 
 // Run executes one interactive login attempt: claim the durable login
-// lease, discover and register, bind the exact loopback listener, hand the
+// lease, discover, bind and register the exact loopback listener, hand the
 // authorization URL to the user's browser or to the user, wait for one
 // validated callback within the fixed deadline, exchange the code, and
 // verify the durable credential. Every failure path closes the listener
@@ -214,17 +213,16 @@ func (s *Service) Run(ctx context.Context) error {
 	if err := md.CheckRequestedScopes(s.profile.Scopes); err != nil {
 		return fmt.Errorf("validate requested scopes: %w", err)
 	}
-	rec, err := s.client.Register(execCtx, md)
+	listener, redirectURI, err := s.bindCallbackListener(execCtx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = listener.Close() }()
+
+	rec, err := s.client.RegisterForRedirect(execCtx, md, redirectURI)
 	if err != nil {
 		return fmt.Errorf("register oauth client: %w", err)
 	}
-
-	listener, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		return fmt.Errorf("bind loopback listener: %w", err)
-	}
-	defer func() { _ = listener.Close() }()
-	redirectURI := fmt.Sprintf("http://%s/oauth/callback", listener.Addr().String())
 
 	authReq, err := s.client.NewAuthorizationRequest(md, rec, redirectURI)
 	if err != nil {

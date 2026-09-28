@@ -24,15 +24,24 @@ type profileRuntime struct {
 // process-scoped and has no close.
 func (rt *profileRuntime) Close() { _ = rt.Store.Close() }
 
+func loginCredentialOpener(interactive bool) credentialOpener {
+	if interactive {
+		return credential.NewInteractive
+	}
+	return credential.New
+}
+
 // openProfileRuntime opens one profile's secure credential namespace, state
-// store, and OAuth client at the canonical profile-scoped locations.
-func openProfileRuntime(ctx context.Context, p *profile.Profile, configDir string, hooks serveHooks) (*profileRuntime, error) {
+// store, and OAuth client at the canonical profile-scoped locations. Callers
+// select the default opener so unattended serve startup and interactive login
+// retain distinct keyring-unlock policies; fixture hooks override either one.
+func openProfileRuntime(ctx context.Context, p *profile.Profile, configDir string, hooks serveHooks, defaultOpen credentialOpener) (*profileRuntime, error) {
 	dbPath, namespace, err := stateLayout(p, configDir)
 	if err != nil {
 		return nil, err
 	}
 	if hooks.open == nil {
-		hooks.open = credential.New
+		hooks.open = defaultOpen
 	}
 	kr, err := hooks.open(namespace)
 	if err != nil {
@@ -45,9 +54,8 @@ func openProfileRuntime(ctx context.Context, p *profile.Profile, configDir strin
 	client, err := oauth.New(oauth.Config{
 		Endpoint: p.Endpoint,
 		Issuer:   p.Issuer,
-		// The registration carries the native-loopback base plus the fixed
-		// callback path: the port varies per attempt, but a provider that
-		// compares paths must see the one every authorization uses.
+		// Login overrides this compatibility default with the exact callback
+		// listener URI before dynamic registration.
 		RedirectURI: "http://127.0.0.1" + login.CallbackPath,
 		Scopes:      p.Scopes,
 		Secrets:     kr,

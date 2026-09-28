@@ -120,10 +120,13 @@ does not replace an existing profile. The default path opens the authorization
 URL in the platform browser and waits on a bounded loopback callback. With
 `--no-browser`, or when the browser cannot be opened, the authorization URL is
 printed to standard output for a manual handoff; all other output goes to
-standard error. Exit status is 0 for a committed and verified login, 1 for
-runtime and authorization failures, and 2 for usage or profile-contract
-errors, including a version 1 profile that has not been regenerated with
-scopes. `logout --profile <name>` remains a reserved command in this phase.
+standard error. The first secure-keyring access may display an operating-system
+unlock prompt; interactive login allows up to two minutes to complete it,
+while unattended `serve` startup retains its five-second fail-fast probe. Exit
+status is 0 for a committed and verified login, 1 for runtime and authorization
+failures, and 2 for usage or profile-contract errors, including a version 1
+profile that has not been regenerated with scopes. `logout --profile <name>`
+remains a reserved command in this phase.
 
 ## Branching
 

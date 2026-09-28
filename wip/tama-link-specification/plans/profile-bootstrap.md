@@ -469,7 +469,8 @@ For a new profile, the application service performs these steps:
    advertised metadata.
 6. Display the normalized summary and obtain interactive confirmation.
 7. Create the non-secret bootstrap journal and open the final state and
-   credential namespaces.
+   credential namespaces using the fixed two-minute interactive keyring probe;
+   unattended `serve` retains its separate five-second fail-fast policy.
 8. Acquire the bootstrap and login leases.
 9. Run the existing browser, callback, PKCE, registration, token, and fenced
    credential flow.

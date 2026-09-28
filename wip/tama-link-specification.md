@@ -538,13 +538,15 @@ not generate a replacement, overwrite unreadable rows, delete state, or fall
 back to plaintext. Logout never removes the state key. Version 1 performs no
 automatic state-key rotation, and headless environments are supported only with
 an explicitly available secure credential backend. Backend availability is a
-bounded startup probe: a complete set/read/remove cycle on one disposable
-entry with a unique unguessable per-invocation key must finish within a short
-fixed window, or Tama Link fails fast with a
-clear unavailable error. The window is fixed in the binary and cannot be
-extended at runtime, and it covers the whole probe — queueing behind a
-busy worker and execution alike — so a request accepted late gets only
-the remaining window, never a fresh one. The probe runs through one
+bounded probe: a complete set/read/remove cycle on one disposable entry with a
+unique unguessable per-invocation key must finish within the command's fixed
+window, or Tama Link fails with a clear unavailable error. Unattended `serve`
+startup and non-interactive login use a short five-second fail-fast window;
+terminal-attached interactive `login` uses a two-minute window so a user can
+complete the platform keyring unlock prompt.
+Neither window can be extended at runtime, and each covers the whole probe —
+queueing behind a busy worker and execution alike — so a request accepted late
+gets only the remaining window, never a fresh one. The probe runs through one
 process-wide worker goroutine rather than an abandoned one per attempt:
 the keyring API takes no context, so an in-flight call cannot be
 interrupted, but a timed-out probe abandons only its request — the same
@@ -554,12 +556,12 @@ pins exactly that one worker while later probes fail fast at the
 deadline. Every successful probe write is followed by a removal even
 when the read fails, so repeated failed startups never accumulate
 permanent probe entries in the backend while deletion still works. A
-backend that accepts a
-connection but blocks on user
-interaction for writes (for example a headless Secret Service) is
-unavailable; an interactive unlock prompt is not a supported serve-startup
+backend that accepts a connection but blocks on user interaction for writes
+(for example a headless Secret Service) is unavailable after the selected
+deadline. An interactive unlock prompt is not a supported `serve`-startup
 path, and Tama Link must never hang the serve process on the platform
-credential store.
+credential store; the longer login window applies only to the explicit
+interactive authorization command.
 
 Writes must be atomic and safe against symlink traversal. Local state and
 configuration permissions must be restrictive. Retention and garbage
@@ -1079,15 +1081,16 @@ return an actionable terminal or retryable error when user interaction is
 required.
 
 The authorization-code exchange binds one exact IPv4 loopback redirect URI.
-Dynamic registration uses the native-loopback base `http://127.0.0.1` with
-the fixed callback path `/oauth/callback`; the per-attempt port is not
-registered because it varies. Each attempt binds `127.0.0.1:0` before the
-authorization URL is built and uses the fixed callback path
-`/oauth/callback`. The exact selected URI appears in the
-authorization request, is required on the observed callback, and is resent
-verbatim in the token request, as the authorization-code grant requires. A
-callback observed on any other URI is rejected before any token request is
-sent. The callback is single-use, bounded by a five-minute deadline, validates
+Before first-time dynamic registration, login binds `127.0.0.1:0` and
+registers the exact selected URI, including its non-privileged port and the
+fixed path `/oauth/callback`. The client record persists that redirect. A
+later login reuses the client by binding its registered port; if the port is
+unavailable, it fails without replacing a still-usable registration or refresh
+credential. The exact registered URI appears in the authorization request, is
+required on the observed callback, and is resent verbatim in the token request,
+as the authorization-code grant requires. A callback observed on any other URI
+is rejected before any token request is sent. The callback is single-use,
+bounded by a five-minute deadline, validates
 state and the authorization response issuer when the server advertises
 `authorization_response_iss_parameter_supported` (or the nonstandard Tama
 issuer list form), returns only fixed non-reflective HTML with restrictive
