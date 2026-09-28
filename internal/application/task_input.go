@@ -42,10 +42,11 @@ func (s *Service) applyInputResponses(ctx context.Context, sub *store.Submission
 
 func (s *Service) deliverInput(ctx context.Context, id, owner string, canonical map[string]json.RawMessage) *contract.Error {
 	name := inputDeliveryLease(id)
-	renewCtx, cancelRenew := context.WithCancel(context.Background())
-	defer cancelRenew()
 	lost := make(chan struct{})
-	go s.renewInputDelivery(renewCtx, name, owner, lost)
+	stopRenew := startInputDeliveryRenewal(func(renewCtx context.Context) {
+		s.renewInputDelivery(renewCtx, name, owner, lost)
+	})
+	defer stopRenew()
 
 	sub, err := s.store.GetSubmission(ctx, id)
 	if err != nil {
@@ -188,9 +189,27 @@ func (s *Service) pendingOutstanding(ctx context.Context, id string, pending []s
 	return live, nil
 }
 
+func startInputDeliveryRenewal(run func(context.Context)) func() {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		run(ctx)
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
+}
+
 func (s *Service) renewInputDelivery(ctx context.Context, name, owner string, lost chan struct{}) {
-	if !s.extendDelivery(name, owner) {
-		close(lost)
+	if ctx.Err() != nil {
+		return
+	}
+	if !s.extendDelivery(ctx, name, owner) {
+		if ctx.Err() == nil {
+			close(lost)
+		}
 		return
 	}
 	interval := s.deliveryTTL() / 3
@@ -204,8 +223,10 @@ func (s *Service) renewInputDelivery(ctx context.Context, name, owner string, lo
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			if !s.extendDelivery(name, owner) {
-				close(lost)
+			if !s.extendDelivery(ctx, name, owner) {
+				if ctx.Err() == nil {
+					close(lost)
+				}
 				return
 			}
 			timer.Reset(interval)
@@ -213,8 +234,8 @@ func (s *Service) renewInputDelivery(ctx context.Context, name, owner string, lo
 	}
 }
 
-func (s *Service) extendDelivery(name, owner string) bool {
-	owned, err := s.store.RenewLease(context.Background(), name, owner, s.deliveryTTL())
+func (s *Service) extendDelivery(ctx context.Context, name, owner string) bool {
+	owned, err := s.store.RenewLease(ctx, name, owner, s.deliveryTTL())
 	return err == nil && owned
 }
 

@@ -13,8 +13,10 @@ documents have narrower roles:
 
 - `wip/tama-link-specification/plan.md` is the delivery roadmap and dependency
   ledger;
-- `wip/tama-link-specification/plans/login.md` is the active implementation
-  plan for the Phase 3 interactive login slice; and
+- `wip/tama-link-specification/plans/login.md` is the implementation plan for
+  the existing-profile authorization path;
+- `wip/tama-link-specification/plans/profile-bootstrap.md` is the
+  implementation plan for interactive self-service profile creation; and
 - acceptance and review documents record evidence or findings and must not
   redefine this contract.
 
@@ -100,7 +102,7 @@ a contract revision.
 | --- | --- |
 | Tama | Authorization enforcement, graph execution, durable App submission/task state, upstream tool behavior and results |
 | Tama Link | Protocol adaptation, OAuth client behavior, local durable correlation and execution, polling, progress normalization, catalog projection, client-facing tool contract |
-| Memovee CLI | Installing/upgrading the Tama Link binary, creating non-secret profiles, orchestrating the local product topology |
+| Memovee CLI | Installing/upgrading the Tama Link binary, creating and reconciling profiles it manages, orchestrating the local product topology |
 | `memovee-codex` | Codex MCP registration, skills, optional hooks, Codex-compatible progress presentation |
 | `memovee-opencode` | OpenCode tool wrapper/configuration and native progress or panel rendering |
 | Other client packages | Installation and presentation behavior specific to that client |
@@ -676,14 +678,16 @@ that richer presentation.
 
 Runtime validation is authoritative only within a reviewed assertion
 vocabulary: `type`, `properties`, `required`, `additionalProperties`
-(boolean or nested schema), `items`, `enum`, `const`, `minimum`, `maximum`,
-`minLength`, `maxLength`, `minItems`, `maxItems`, and `pattern`, plus the
-annotation keywords `title`, `description`, `examples`, `default`, `$schema`,
-and `$comment`. A pinned operation schema that uses any other assertion
-keyword — `oneOf`, `allOf`, `not`, `minProperties`, `uniqueItems`,
-`contains`, `exclusiveMinimum`, `dependentRequired`, or another — would be
-silently unenforced, so profile load fails closed and names the unsupported
-keyword, recursively, instead.
+(boolean or nested schema), `items`, `anyOf` (1 to 16 schema objects, each
+enforced), `enum`, `const`, `minimum`, `maximum`, `minLength`, `maxLength`,
+`minItems`, `maxItems`, and `pattern`, plus the annotation keywords `title`,
+`description`, `examples`, `default`, `$schema`, and `$comment`. A pinned
+operation schema that uses any other assertion keyword — `oneOf`, `allOf`,
+`not`, `minProperties`, `uniqueItems`, `contains`, `exclusiveMinimum`,
+`dependentRequired`, or another — would be silently unenforced, so profile
+load fails closed and names the unsupported keyword, recursively, instead.
+`anyOf` exists so a reviewed Tama variant output schema can be pinned without
+copying an arbitrary live schema into policy.
 
 Profile load also validates the meta-shape of every supported keyword,
 recursively: a keyword with a null or malformed value is rejected, never
@@ -752,8 +756,11 @@ It marks `reflection.comments.review` as `unsupported`: the current
 `expected_state_version` guard prevents a stale duplicate transition, but the
 read-back surface cannot prove which actor performed a transition after a lost
 response. A later profile may enable it only after upstream idempotency or
-correlation is returned and retrievable during reconciliation. The existing
-Tama App submission table remains authoritative for graph execution and is not
+correlation is returned and retrievable during reconciliation. The self-service
+system-read bundle does not request `mcp.reflection.review`, so that mutation
+is absent rather than pinned: Tama hides it from an authenticated `tools/list`,
+and an advertised copy is ignored instead of enabled. The existing Tama App
+submission table remains authoritative for graph execution and is not
 generalized for System calls.
 
 The sole upstream adapter speaks MCP `2026-07-28` as implemented by TamaMCP. It
@@ -1002,8 +1009,11 @@ letters, digits, or hyphens, beginning and ending with a letter or digit. They
 must not use Windows reserved device names. Credential-store references remain
 opaque names but may not contain path separators or traversal components.
 
-The Memovee CLI owns creation and reconciliation of its profile. Tama Link
-validates profiles but does not start containers or create root users.
+The Memovee CLI owns creation and reconciliation of profiles it manages. Tama
+Link may also create a previously absent profile through the explicit
+`login` bootstrap flow. That flow uses a reviewed built-in template, never
+edits an existing profile, and does not start containers or create root users.
+Tama Link validates every profile before use.
 
 Profile version 1 is implemented for the non-interactive OAuth and upstream
 runtime delivered through Phase 2. Phase 3 login introduces profile version 2,
@@ -1045,12 +1055,18 @@ Browser authorization and consent remain user-visible. Tokens must be stored
 only through the configured secure credential backend, redacted from errors,
 and excluded from logs and local submission state.
 
-`tama-link login --profile <name> [--config-dir <dir>] [--no-browser]` is the
-explicit interactive entry point for browser authorization. The default path
-uses a fixed platform browser opener without shell evaluation. `--no-browser`,
-or an automatic browser-launch failure, presents the authorization URL for a
-manual user handoff while the bounded callback attempt remains active. Tama
-Link never collects or automates entry of the user's credentials.
+`tama-link login [--address <https-origin>] [--type <app|system>] [--profile <name>] [--issuer <https-url>] [--config-dir <dir>] [--no-browser] [--yes]`
+is the explicit entry point for browser authorization and, when no profile
+exists yet, for creating one. `--profile <name>` on an existing profile keeps
+the current authorization path and rejects bootstrap flags. A new profile is
+created only from a path-free HTTPS origin and a reviewed `app` or `system`
+template; `--type` defaults to `app` and derives `/mcp/app` or `/mcp/system`.
+Non-interactive input never prompts. The default path uses a fixed platform
+browser opener without shell evaluation. `--no-browser`, or an automatic
+browser-launch failure, presents the authorization URL for a manual user
+handoff while the bounded callback attempt remains active. Tama Link never
+collects or automates entry of the user's credentials, and it never replaces
+an existing profile file.
 
 An MCP tool call that lacks usable credentials returns
 `authentication_required`; it must not unexpectedly open a browser from the
@@ -1254,17 +1270,17 @@ The administrative command surface is:
 
 ```text
 tama-link serve --profile <name> [--config-dir <dir>]
-tama-link login --profile <name> [--config-dir <dir>] [--no-browser]
+tama-link login [--address <https-origin>] [--type <app|system>] [--profile <name>] [--issuer <https-url>] [--config-dir <dir>] [--no-browser] [--yes]
 tama-link logout --profile <name> [--config-dir <dir>]
 tama-link doctor --profile <name> [--config-dir <dir>] [--json]
 tama-link version [--json]
 ```
 
 Only `serve` is needed for normal MCP operation. `login` performs explicit
-interactive authorization. `logout` removes or revokes only the selected
-profile's credentials after checking policy; it does not delete profile state.
-`doctor` is read-only. Memovee-owned profile setup is normally performed by the
-Memovee CLI.
+interactive authorization and may create a previously absent profile from a
+reviewed template. `logout` removes or revokes only the selected profile's
+credentials after checking policy; it does not delete profile state. `doctor`
+is read-only. Managed profile reconciliation remains with the Memovee CLI.
 
 Current delivery status is explicit: `serve`, `version`, and interactive
 `login` are implemented; `logout` remains a reserved fail-closed stub; and
@@ -1394,6 +1410,8 @@ recorded live acceptance prove:
 - fixed browser handoff, bounded loopback callback, and durable login
   concurrency control as specified in
   `wip/tama-link-specification/plans/login.md`;
+- self-service creation of a previously absent app or system profile, as
+  specified in `wip/tama-link-specification/plans/profile-bootstrap.md`;
 - MCP progress-token support;
 - Codex and OpenCode package integration;
 - client-specific progress presentation; and

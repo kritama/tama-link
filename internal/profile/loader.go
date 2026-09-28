@@ -3,9 +3,14 @@ package profile
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 )
+
+// ErrNotFound reports that the named profile file does not exist. An
+// unreadable or invalid file is a different error.
+var ErrNotFound = errors.New("profile not found")
 
 // maxProfileFileBytes bounds one profile document on disk.
 const maxProfileFileBytes = 1 << 20
@@ -23,7 +28,7 @@ func Load(name Name, configDir string) (*Profile, error) {
 	data, err := readProfileFile(path)
 	if err != nil {
 		if isNotExist(err) {
-			return nil, fmt.Errorf("profile %q not found at %s", name, path)
+			return nil, fmt.Errorf("profile %q not found at %s: %w", name, path, ErrNotFound)
 		}
 		return nil, fmt.Errorf("read profile %s: %w", path, err)
 	}

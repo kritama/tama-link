@@ -50,6 +50,64 @@ func TestDeliveredInputPersistsAfterCallerCancel(t *testing.T) {
 	}
 }
 
+func TestInputDeliveryRenewalStopWaitsForExit(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{})
+	cancelled := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	stop := startInputDeliveryRenewal(func(ctx context.Context) {
+		close(started)
+		<-ctx.Done()
+		close(cancelled)
+		<-release
+	})
+	<-started
+
+	stopped := make(chan struct{})
+	go func() {
+		stop()
+		close(stopped)
+	}()
+	select {
+	case <-cancelled:
+	case <-time.After(5 * time.Second):
+		t.Fatal("renewal was not cancelled")
+	}
+	select {
+	case <-stopped:
+		t.Fatal("stop returned before the renewal goroutine exited")
+	default:
+	}
+	close(release)
+	select {
+	case <-stopped:
+	case <-time.After(5 * time.Second):
+		t.Fatal("stop did not wait for the renewal goroutine")
+	}
+}
+
+func TestInputDeliveryRenewalSkipsCancelledStart(t *testing.T) {
+	t.Parallel()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	lost := make(chan struct{})
+	(&Service{}).renewInputDelivery(ctx, "input-delivery/test", "owner", lost)
+	select {
+	case <-lost:
+		t.Fatal("cancelled renewal reported a lost lease")
+	default:
+	}
+}
+
 func TestTaskDeliveryLeaseOutlivesSlowUpdate(t *testing.T) {
 	t.Parallel()
 

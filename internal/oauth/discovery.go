@@ -137,6 +137,15 @@ func endpointOrigin(endpoint string) string {
 	return u.Scheme + "://" + u.Host
 }
 
+// advertisedIssuerSelected reports whether an advertised authorization-server
+// URL is the server selected for the pinned issuer. One trailing slash on the
+// advertised URL is ignored. A trailing slash that exists only on the pinned
+// issuer does not match, so pre-profile discovery and runtime selection use
+// the same identity.
+func advertisedIssuerSelected(advertised, issuer string) bool {
+	return advertised == issuer || strings.TrimSuffix(advertised, "/") == issuer
+}
+
 // selectAuthorizationServer picks the one server matching the expected
 // issuer exactly.
 func (c *Client) selectAuthorizationServer(prm *ProtectedResource) (string, error) {
@@ -148,7 +157,7 @@ func (c *Client) selectAuthorizationServer(prm *ProtectedResource) (string, erro
 		if err := checkSecureURL(u); err != nil {
 			continue
 		}
-		if candidate == c.issuer || strings.TrimSuffix(candidate, "/") == c.issuer {
+		if advertisedIssuerSelected(candidate, c.issuer) {
 			return candidate, nil
 		}
 	}
