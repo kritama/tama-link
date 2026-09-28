@@ -71,6 +71,7 @@ func TestRunRejectsPositionalArguments(t *testing.T) {
 		{"serve", []string{"serve", "--profile", "demo", "extra"}},
 		{"login", []string{"login", "--profile", "demo", "extra"}},
 		{"logout", []string{"logout", "--profile", "demo", "extra"}},
+		{"repair", []string{"repair", "--profile", "demo", "extra"}},
 		{"version", []string{"version", "junk"}},
 		{"help", []string{"help", "extra"}},
 	}

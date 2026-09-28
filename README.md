@@ -122,7 +122,11 @@ URL in the platform browser and waits on a bounded loopback callback. With
 printed to standard output for a manual handoff; all other output goes to
 standard error. The first secure-keyring access may display an operating-system
 unlock prompt; interactive login allows up to two minutes to complete it,
-while unattended `serve` startup retains its five-second fail-fast probe. Exit
+while unattended `serve` startup retains its five-second fail-fast probe. On
+Linux, Tama Link uses the desktop default keyring and does not create a
+separate Tama Link collection. Credentials stranded by an older build can be
+copied with `tama-link repair --profile <name>`; that command does not delete
+the old collections. Exit
 status is 0 for a committed and verified login, 1 for runtime and authorization
 failures, and 2 for usage or profile-contract errors, including a version 1
 profile that has not been regenerated with scopes. `logout --profile <name>`

@@ -8,6 +8,11 @@ import (
 	"time"
 )
 
+// CredentialLeaseName orders profile credential writers: OAuth refresh,
+// logout, registration, and legacy keyring repair. A writer must hold it
+// before changing credential items so those operations cannot overlap.
+const CredentialLeaseName = "oauth/refresh"
+
 // ClaimLease atomically acquires the named lease for owner. A lease is
 // acquired when it does not exist, is expired, or is already held by owner.
 // It reports whether owner holds the lease after the call. A claim by a

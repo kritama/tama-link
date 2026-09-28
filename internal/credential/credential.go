@@ -61,25 +61,25 @@ var loginProbeTimeout = 2 * time.Minute
 // profile. It fails closed with ErrUnavailable when no secure backend is
 // available or cannot complete an availability probe.
 func New(profile string) (*Keyring, error) {
-	return open(profile, probeBackend)
+	return open(profile, false, probeBackend)
 }
 
 // NewInteractive opens the secure credential backend for an interactive
 // login. Unlike New's fail-fast serve policy, it permits a bounded interval
 // for the user to unlock the platform keyring.
 func NewInteractive(profile string) (*Keyring, error) {
-	return open(profile, probeBackendForLogin)
+	return open(profile, true, probeBackendForLogin)
 }
 
-func open(profile string, probe func(string, keyring.Keyring) error) (*Keyring, error) {
+// openPlatformBackend resolves the OS credential backend. Tests replace it
+// with a fixture; production uses openPlatform.
+var openPlatformBackend = openPlatform
+
+func open(profile string, interactive bool, probe func(string, keyring.Keyring) error) (*Keyring, error) {
 	if profile == "" {
 		return nil, errors.New("credential: profile name is required")
 	}
-	cfg := keyring.Config{
-		ServiceName:     serviceName,
-		AllowedBackends: secureBackends(),
-	}
-	kr, err := keyring.Open(cfg)
+	kr, err := openPlatformBackend(interactive)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}

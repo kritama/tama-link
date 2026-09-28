@@ -544,6 +544,25 @@ window, or Tama Link fails with a clear unavailable error. Unattended `serve`
 startup and non-interactive login use a short five-second fail-fast window;
 terminal-attached interactive `login` uses a two-minute window so a user can
 complete the platform keyring unlock prompt.
+On Linux the probe opens the Secret Service collection behind the standard
+`default` alias and must not create an application collection. A missing or
+locked default alias fails closed. Interactive login may unlock that existing
+collection; unattended `serve` must not prompt and must not create a
+replacement collection. Credentials stranded in older collections labelled
+`Tama Link` are recovered only by the explicit `repair` command. Repair
+selects the state key matching `meta.state_key_id` and the profile's OAuth
+credential items, proves that key decrypts existing ciphertext, and checks
+required records before any destination write. It then holds the profile
+credential lease — the same lease that orders refresh, logout, and
+registration — across the copy. It does not overwrite an existing destination
+item, does not delete source collections, and does not generate a replacement
+state key. The same fixed two-minute window starts before the Secret Service
+connection and covers setup, property reads, unlock prompts, migration,
+verification, and cleanup. Cancellation or expiry stops further writes. A
+cancelled connection setup closes the raw bus socket before joining setup and
+closing godbus, so a blocked request write cannot deadlock cleanup. A
+destination key with more than one match fails closed, and a later removal
+deletes every match.
 Neither window can be extended at runtime, and each covers the whole probe —
 queueing behind a busy worker and execution alike — so a request accepted late
 gets only the remaining window, never a fresh one. The probe runs through one
@@ -1275,6 +1294,7 @@ The administrative command surface is:
 tama-link serve --profile <name> [--config-dir <dir>]
 tama-link login [--address <https-origin>] [--type <app|system>] [--profile <name>] [--issuer <https-url>] [--config-dir <dir>] [--no-browser] [--yes]
 tama-link logout --profile <name> [--config-dir <dir>]
+tama-link repair --profile <name> [--config-dir <dir>]
 tama-link doctor --profile <name> [--config-dir <dir>] [--json]
 tama-link version [--json]
 ```
@@ -1282,14 +1302,17 @@ tama-link version [--json]
 Only `serve` is needed for normal MCP operation. `login` performs explicit
 interactive authorization and may create a previously absent profile from a
 reviewed template. `logout` removes or revokes only the selected profile's
-credentials after checking policy; it does not delete profile state. `doctor`
-is read-only. Managed profile reconciliation remains with the Memovee CLI.
+credentials after checking policy; it does not delete profile state. `repair`
+is the explicit interactive Linux migration for credentials stranded in older
+Secret Service collections; it is not a `serve` startup path and it does not
+delete source collections. `doctor` is read-only. Managed profile
+reconciliation remains with the Memovee CLI.
 
-Current delivery status is explicit: `serve`, `version`, and interactive
-`login` are implemented; `logout` remains a reserved fail-closed stub; and
-`doctor` is not yet wired into the binary. The remaining Phase 3 command work
-must not be described as available until its behavioral tests and secure
-credential paths pass.
+Current delivery status is explicit: `serve`, `version`, interactive `login`,
+and Linux `repair` are implemented; `logout` remains a reserved fail-closed
+stub; and `doctor` is not yet wired into the binary. The remaining Phase 3
+command work must not be described as available until its behavioral tests and
+secure credential paths pass.
 
 Human output may use progress and color when attached to a terminal. JSON and
 non-interactive output must be deterministic, ANSI-free, and free of secret
