@@ -213,7 +213,7 @@ func planMigration(ctx context.Context, session Session, destination Collection,
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		if err := readLegacyItems(ctx, session, collection, req.Prefix, found); err != nil {
+		if err := readLegacyItems(ctx, session, collection, req, found); err != nil {
 			return nil, err
 		}
 	}
@@ -236,11 +236,6 @@ func migrationKeys(req MigrateRequest, found map[string]*valuedItem) []string {
 	}
 	for _, key := range req.Optional {
 		if _, ok := found[key]; ok {
-			keys[key] = struct{}{}
-		}
-	}
-	for key := range found {
-		if strings.HasPrefix(key, req.Prefix) {
 			keys[key] = struct{}{}
 		}
 	}

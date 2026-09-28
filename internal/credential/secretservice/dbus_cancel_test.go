@@ -84,7 +84,7 @@ func TestAuthenticateReleasesBlockedSetup(t *testing.T) {
 }
 
 func TestDialSessionSocketHonorsDeadline(t *testing.T) {
-	t.Parallel()
+	t.Setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path="+t.TempDir()+"/bus")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

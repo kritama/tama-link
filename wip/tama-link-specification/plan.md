@@ -161,12 +161,17 @@ fails closed: interactive login may unlock the existing collection, while
 unattended `serve` must not prompt or create a replacement. Credentials left in
 older collections labelled `Tama Link` are copied by the explicit `repair`
 command. Repair validates the state key identified by `meta.state_key_id`
-against existing ciphertext before writing, holds the profile credential lease
+against existing ciphertext before writing. Selection is restricted to that
+key and requested live, fence, and retired-slot items; unrelated namespace
+items are excluded before secret reads and conflict checks. Repair holds the
+profile credential lease
 across the copy so it cannot overlap refresh, logout, registration, or another
 repair, fails closed on conflicts and duplicate destination items, and does not
-delete source collections. Nothing secret is
-written to the SQLite state store, logs, or JSON output. Access tokens are held
-in memory only.
+delete source collections. An interrupted multi-item copy may leave exact
+destination copies; explicit retry revalidates and skips identical items,
+copies missing items, and succeeds only after full verification. Nothing secret
+is written to the SQLite state store, logs, or JSON output. Access tokens are
+held in memory only.
 
 Because canonical arguments and terminal results can contain private App or
 System data, sensitive SQLite blobs are encrypted with a random profile-scoped

@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-func readLegacyItems(ctx context.Context, session Session, collection Collection, prefix string, found map[string]*valuedItem) error {
+func readLegacyItems(ctx context.Context, session Session, collection Collection, req MigrateRequest, found map[string]*valuedItem) error {
 	items, err := collection.Items(ctx)
 	if err != nil {
 		return fmt.Errorf("list legacy collection %s: %w", collection.Path(), err)
@@ -21,7 +21,7 @@ func readLegacyItems(ctx context.Context, session Session, collection Collection
 		if err != nil {
 			return err
 		}
-		if !strings.HasPrefix(key, prefix) {
+		if key != req.StateKey && !slices.Contains(req.Required, key) && !slices.Contains(req.Optional, key) {
 			continue
 		}
 		blob, err := itemSecret(ctx, session, item)

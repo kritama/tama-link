@@ -38,11 +38,32 @@ fixture for the blocked transport.
 
 ## Validation Evidence
 
+### CodeRabbit PR #20 follow-up
+
+Both actionable review findings are resolved:
+
+- The cancelled-dial test pins a test-owned unavailable Unix socket address and
+  runs without `t.Parallel`, so it works with an absent or incompatible desktop
+  session-bus environment.
+- Migration selects only the state key and requested required/optional keys.
+  Filtering happens before secret reads and conflict checks. Regression tests
+  preserve requested optional/retired items while excluding malformed,
+  parseable, and conflicting unrelated items in the same namespace.
+
+The partial-publication concern is captured by an explicit recovery contract:
+an interruption may leave exact destination copies, retains sources, and an
+explicit retry revalidates and completes only missing items. The
+`TestInterruptedRepairResumesExactCopies` regression checks this behavior,
+including one destination match per key and no source deletion. Live provider
+acceptance remains a separate gate.
+
 The following checks passed on 2026-09-28:
 
 | Check | Result | Boundary |
 | --- | --- | --- |
 | `make check` | Passed | Formatting, unit tests, race detector, vet, lint, and trimmed Linux build; loopback fixtures ran outside the sandbox. |
+| CodeRabbit selection and recovery regressions with `-race -count=20` | Passed | Requested keys and optional items, unrelated malformed/parseable/conflicting values, and exact-copy recovery after an interrupted repair. |
+| Cancelled-dial test with absent and incompatible host addresses, `-race -count=20` | Passed | Host-independent controlled Unix address. |
 | Setup cancellation regressions with `-race -count=100` | Passed | Blocked authentication plus blocked `Hello` and `AddMatchSignal` writes return after cancellation. |
 | Six remediation regressions with `-race -count=20` | Passed | Concurrent repair, duplicate removal, cancellation without writes, stalled unlock, wrong state key, and malformed required record. |
 | Property-read and repair-budget regressions with `-race -count=20` | Passed | Production property helper cancellation, cancelled label reads, socket cancellation, and budget-before-dial behavior. |

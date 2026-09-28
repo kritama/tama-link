@@ -551,12 +551,20 @@ collection; unattended `serve` must not prompt and must not create a
 replacement collection. Credentials stranded in older collections labelled
 `Tama Link` are recovered only by the explicit `repair` command. Repair
 selects the state key matching `meta.state_key_id` and the profile's OAuth
-credential items, proves that key decrypts existing ciphertext, and checks
-required records before any destination write. It then holds the profile
+credential items. Only that state key, required live slots, and explicitly
+requested optional fence/retired slots are selected; other items under the
+same namespace are excluded before reading their secret values. Repair proves
+that key decrypts existing ciphertext and checks required records before any
+destination write. It then holds the profile
 credential lease — the same lease that orders refresh, logout, and
 registration — across the copy. It does not overwrite an existing destination
 item, does not delete source collections, and does not generate a replacement
-state key. The same fixed two-minute window starts before the Secret Service
+state key. Copying multiple items is resumable rather than atomic: interruption
+may leave exact copies in the destination, and source items remain intact.
+A later explicit repair revalidates the sources and destination, accepts only
+byte-identical existing items, and copies the missing items. It reports success
+only after complete verification. The same fixed two-minute window starts
+before the Secret Service
 connection and covers setup, property reads, unlock prompts, migration,
 verification, and cleanup. Cancellation or expiry stops further writes. A
 cancelled connection setup closes the raw bus socket before joining setup and
