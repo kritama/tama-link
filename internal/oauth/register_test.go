@@ -26,11 +26,12 @@ func registerServer(t *testing.T, body string, status int, calls *int32) *httpte
 		}
 		if atomic.AddInt32(calls, 1) > 0 {
 			var body struct {
-				ClientName    string   `json:"client_name"`
-				RedirectURIs  []string `json:"redirect_uris"`
-				GrantTypes    []string `json:"grant_types"`
-				ResponseTypes []string `json:"response_types"`
-				AuthMethod    string   `json:"token_endpoint_auth_method"`
+				ApplicationType string   `json:"application_type"`
+				ClientName      string   `json:"client_name"`
+				RedirectURIs    []string `json:"redirect_uris"`
+				GrantTypes      []string `json:"grant_types"`
+				ResponseTypes   []string `json:"response_types"`
+				AuthMethod      string   `json:"token_endpoint_auth_method"`
 			}
 			raw, err := io.ReadAll(r.Body)
 			if err != nil {
@@ -42,6 +43,9 @@ func registerServer(t *testing.T, body string, status int, calls *int32) *httpte
 			}
 			if body.ClientName != "Tama Link" {
 				t.Errorf("client_name = %q", body.ClientName)
+			}
+			if body.ApplicationType != "native" {
+				t.Errorf("application_type = %q", body.ApplicationType)
 			}
 			if len(body.RedirectURIs) != 1 || body.RedirectURIs[0] != "http://127.0.0.1" {
 				t.Errorf("redirect_uris = %v", body.RedirectURIs)
@@ -56,6 +60,65 @@ func registerServer(t *testing.T, body string, status int, calls *int32) *httpte
 	}))
 	t.Cleanup(ts.Close)
 	return ts
+}
+
+func TestRegisterForRedirectPersistsAndReusesExactCallback(t *testing.T) {
+	var calls int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		var request struct {
+			ApplicationType string   `json:"application_type"`
+			RedirectURIs    []string `json:"redirect_uris"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			t.Errorf("decode registration: %v", err)
+		}
+		if request.ApplicationType != "native" || len(request.RedirectURIs) != 1 ||
+			request.RedirectURIs[0] != "http://127.0.0.1:43123/oauth/callback" {
+			t.Errorf("registration request = %+v", request)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `{"client_id":"cid-exact","client_secret":"shh"}`)
+	}))
+	t.Cleanup(ts.Close)
+
+	client := newStaticClient(t, newFakeSecrets(), newFakeLease(), newTestClock(time.Now()))
+	redirectURI := "http://127.0.0.1:43123/oauth/callback"
+	rec, err := client.RegisterForRedirect(context.Background(), regMetadata(ts, testIssuer), redirectURI)
+	if err != nil {
+		t.Fatalf("RegisterForRedirect: %v", err)
+	}
+	if rec.RedirectURI != redirectURI {
+		t.Fatalf("stored redirect = %q, want %q", rec.RedirectURI, redirectURI)
+	}
+	if _, err := client.RegisterForRedirect(context.Background(), regMetadata(ts, testIssuer), redirectURI); err != nil {
+		t.Fatalf("reuse RegisterForRedirect: %v", err)
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("registration calls = %d, want 1", got)
+	}
+	if _, err := client.RegisterForRedirect(
+		context.Background(), regMetadata(ts, testIssuer), "http://127.0.0.1:43124/oauth/callback",
+	); err == nil || !strings.Contains(err.Error(), "different redirect uri") {
+		t.Fatalf("mismatched redirect reuse = %v", err)
+	}
+}
+
+func TestRegisterSurfacesOnlySanitizedOAuthErrorCode(t *testing.T) {
+	var calls int32
+	ts := registerServer(t,
+		`{"error":"invalid_redirect_uri","error_description":"sensitive provider prose"}`,
+		http.StatusBadRequest, &calls)
+	client := newStaticClient(t, newFakeSecrets(), newFakeLease(), newTestClock(time.Now()))
+
+	_, err := client.Register(context.Background(), regMetadata(ts, testIssuer))
+	if err == nil || !strings.Contains(err.Error(), "invalid_redirect_uri") {
+		t.Fatalf("Register error = %v, want sanitized error code", err)
+	}
+	if strings.Contains(err.Error(), "sensitive provider prose") {
+		t.Fatalf("Register leaked provider prose: %v", err)
+	}
 }
 
 // regMetadata returns a Metadata whose registration endpoint points at the

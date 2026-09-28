@@ -157,26 +157,19 @@ privilege changes cannot occur silently.
 
 ### 4. Redirect registration and callback URI
 
-Dynamic registration uses the native-loopback redirect base plus the fixed
-callback path:
-
-```text
-http://127.0.0.1/oauth/callback
-```
-
-The per-attempt port is not registered because it varies; providers that
-compare redirect paths must see the fixed path every authorization uses.
-
-Each login attempt binds an IPv4 listener to `127.0.0.1:0` before constructing
-the authorization request. The exact selected callback URI is:
+Before first-time dynamic registration, login binds an IPv4 listener to
+`127.0.0.1:0`. The exact selected native-loopback callback is registered:
 
 ```text
 http://127.0.0.1:<port>/oauth/callback
 ```
 
-That exact URI is used in both the authorization request and token exchange.
-The different ephemeral port is allowed by the native-app loopback redirect
-contract and must be covered by provider acceptance tests.
+The client record persists that URI. A later login reuses the client by
+binding its registered port before constructing the authorization request;
+if the port is unavailable, login fails without replacing the still-usable
+registration or refresh credential. The exact registered URI is used in the
+authorization request and token exchange and must be covered by provider
+acceptance tests.
 
 The listener must not bind a wildcard address, a non-loopback interface, an
 IPv6 fallback, or a user-configurable callback path.
@@ -292,15 +285,18 @@ The login service performs these steps in order:
 1. Parse flags and resolve the configuration directory.
 2. Load the named profile and validate its endpoint, resource, adapter, and
    canonical scope set.
-3. Open the profile-isolated SQLite state and secure keyring namespace.
+3. Open the profile-isolated SQLite state and secure keyring namespace. When
+   stdin is a terminal, use the fixed two-minute interactive availability
+   window so the user can unlock the operating-system keyring; non-interactive
+   login retains the same five-second fail-fast behavior as `serve`.
 4. Acquire the durable `oauth/login` lease.
-5. Construct the OAuth client with the profile resource and registration
-   redirect base.
+5. Construct the OAuth client with the profile resource.
 6. Discover and validate protected-resource and authorization-server metadata,
    including issuer, endpoints, PKCE support, resource binding, and scopes.
-7. Reuse or dynamically register the fenced client record.
-8. Bind the exact IPv4 loopback listener and construct the authorization
-   request with its selected redirect URI.
+7. Bind the exact IPv4 loopback listener, reusing the port persisted with a
+   usable client registration when one exists.
+8. Reuse that fenced client record or dynamically register the exact selected
+   callback URI, then construct the authorization request with the same URI.
 9. Open the authorization URL or present it for manual handoff.
 10. Wait for one validated callback within the fixed deadline.
 11. Exchange the code using the original redirect URI and PKCE verifier, then
@@ -372,7 +368,7 @@ sanitized CLI diagnostics only at the command boundary.
 
 - canonical `scope`, exact `resource`, state, S256 challenge, client ID, and
   exact callback URI in authorization requests;
-- base loopback redirect registration with per-attempt ephemeral ports;
+- exact native loopback redirect registration and persisted-port reuse;
 - token response scope omission, exact equality, reduction, expansion,
   malformed values, and durable refresh-scope binding;
 - preservation of prior usable credentials on denial and failed re-login;

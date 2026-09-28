@@ -125,7 +125,7 @@ func stateLayout(p *profile.Profile, configDir string) (dbPath string, namespace
 // verified adapter, leased worker, and the application service. The cleanup
 // callback shuts down the worker and closes the store.
 func buildApp(ctx context.Context, p *profile.Profile, configDir string, hooks serveHooks) (server.App, func(), error) {
-	rt, err := openProfileRuntime(ctx, p, configDir, hooks)
+	rt, err := openProfileRuntime(ctx, p, configDir, hooks, credential.New)
 	if err != nil {
 		return nil, nil, err
 	}

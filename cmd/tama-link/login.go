@@ -38,20 +38,21 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	if !ok {
 		return 2
 	}
+	interactive := stdinInteractive()
 	svc, err := bootstrap.New(bootstrap.Options{
 		ConfigDir:    flags.configDir,
 		ConfigDirSet: flags.configDirSet,
-		Interactive:  stdinInteractive(),
+		Interactive:  interactive,
 		Stdin:        os.Stdin,
 		Stdout:       stdout,
 		Stderr:       stderr,
 		HTTP:         fixtureHooks().client(),
 		OpenSession: func(ctx context.Context, shell *profile.Profile) (bootstrap.Session, error) {
-			return openBootstrapSession(ctx, shell, flags.configDir, stdout, stderr)
+			return openBootstrapSession(ctx, shell, flags.configDir, interactive, stdout, stderr)
 		},
 		ReadCatalog: readBootstrapCatalog,
 		LoginExisting: func(ctx context.Context, p *profile.Profile) error {
-			return runExistingLogin(ctx, p, flags, stdout, stderr)
+			return runExistingLogin(ctx, p, flags, interactive, stdout, stderr)
 		},
 	})
 	if err != nil {
@@ -86,7 +87,7 @@ func runLogin(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	return 0
 }
 
-func runExistingLogin(ctx context.Context, p *profile.Profile, flags loginFlags, stdout, stderr io.Writer) error {
+func runExistingLogin(ctx context.Context, p *profile.Profile, flags loginFlags, interactive bool, stdout, stderr io.Writer) error {
 	if err := login.CheckProfile(p); err != nil {
 		return &bootstrap.ExitError{Status: 2, Err: err}
 	}
@@ -94,6 +95,7 @@ func runExistingLogin(ctx context.Context, p *profile.Profile, flags loginFlags,
 		profileName: p.Name,
 		configDir:   flags.configDir,
 		noBrowser:   flags.noBrowser,
+		interactive: interactive,
 	}, stdout, stderr)
 	if err != nil {
 		status := 1
@@ -156,10 +158,11 @@ type loginConfig struct {
 	profileName profile.Name
 	configDir   string
 	noBrowser   bool
+	interactive bool
 }
 
 func buildLogin(ctx context.Context, p *profile.Profile, cfg loginConfig, stdout, stderr io.Writer) (*login.Service, func(), error) {
-	rt, err := openProfileRuntime(ctx, p, cfg.configDir, fixtureHooks())
+	rt, err := openProfileRuntime(ctx, p, cfg.configDir, fixtureHooks(), loginCredentialOpener(cfg.interactive))
 	if err != nil {
 		return nil, nil, err
 	}

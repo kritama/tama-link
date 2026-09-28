@@ -71,26 +71,26 @@ func (r *probeRunner) run() {
 	}
 }
 
-// probe runs one availability probe and bounds it with probeTimeout. On
-// timeout the request is abandoned, not the worker: the worker stays
+// probe runs one availability probe and bounds it with the caller's policy.
+// On timeout the request is abandoned, not the worker: the worker stays
 // owned by the runner and serves the next probe once the blocking call
 // returns. One deadline covers both queueing and execution, so a request
-// that waits behind a busy worker cannot extend the documented fixed
+// that waits behind a busy worker cannot extend its selected fixed
 // window.
-func (r *probeRunner) probe(kr keyring.Keyring, key string) error {
+func (r *probeRunner) probe(kr keyring.Keyring, key string, timeout time.Duration, timeoutHint string) error {
 	req := probeRequest{kr: kr, key: key, done: make(chan error, 1)}
-	timer := time.NewTimer(probeTimeout)
+	timer := time.NewTimer(timeout)
 	defer timer.Stop()
 	select {
 	case r.requests <- req:
 	case <-timer.C:
-		return fmt.Errorf("credential backend did not accept an availability probe within %s; a keyring unlock prompt is not a supported serve-startup path", probeTimeout)
+		return fmt.Errorf("credential backend did not accept an availability probe within %s; %s", timeout, timeoutHint)
 	}
 	select {
 	case err := <-req.done:
 		return err
 	case <-timer.C:
-		return fmt.Errorf("credential backend did not complete an availability probe within %s; a keyring unlock prompt is not a supported serve-startup path", probeTimeout)
+		return fmt.Errorf("credential backend did not complete an availability probe within %s; %s", timeout, timeoutHint)
 	}
 }
 

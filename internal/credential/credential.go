@@ -46,18 +46,32 @@ func secureBackends() []keyring.BackendType {
 	}
 }
 
-// probeTimeout bounds the startup availability probe. It is deliberately
-// short and fixed in the binary: Tama Link starts headless and must never
-// hang on an interactive keyring unlock prompt. A backend that cannot
-// complete a write within the window is unavailable, and serve fails fast
-// with a clear error. Tests in this package shorten the window through the
-// variable; production never extends it.
+// probeTimeout bounds the unattended serve-startup availability probe. It is
+// deliberately short: serve starts headless and must never wait on an
+// interactive keyring unlock prompt.
 var probeTimeout = 5 * time.Second
+
+// loginProbeTimeout gives an interactive login enough time to unlock the
+// platform keyring while still bounding a backend call that cannot be
+// interrupted. Tests in this package shorten the window through the variable;
+// production uses the fixed two-minute interaction budget.
+var loginProbeTimeout = 2 * time.Minute
 
 // New opens the secure credential backend for profile and namespaces it by
 // profile. It fails closed with ErrUnavailable when no secure backend is
 // available or cannot complete an availability probe.
 func New(profile string) (*Keyring, error) {
+	return open(profile, probeBackend)
+}
+
+// NewInteractive opens the secure credential backend for an interactive
+// login. Unlike New's fail-fast serve policy, it permits a bounded interval
+// for the user to unlock the platform keyring.
+func NewInteractive(profile string) (*Keyring, error) {
+	return open(profile, probeBackendForLogin)
+}
+
+func open(profile string, probe func(string, keyring.Keyring) error) (*Keyring, error) {
 	if profile == "" {
 		return nil, errors.New("credential: profile name is required")
 	}
@@ -69,7 +83,11 @@ func New(profile string) (*Keyring, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
-	if err := probeBackend(profile, kr); err != nil {
+	return finishOpen(profile, kr, probe)
+}
+
+func finishOpen(profile string, kr keyring.Keyring, probe func(string, keyring.Keyring) error) (*Keyring, error) {
+	if err := probe(profile, kr); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	return &Keyring{kr: kr, prefix: profile + "/"}, nil
@@ -82,9 +100,17 @@ func New(profile string) (*Keyring, error) {
 //
 // The probe runs through the process-wide probe worker instead of an
 // abandoned goroutine per attempt: a backend that blocks indefinitely
-// pins exactly one worker, and retries through New fail fast at the
-// deadline without adding workers.
+// pins exactly one worker, and retries through either constructor respect
+// their deadline without adding workers.
 func probeBackend(profile string, kr keyring.Keyring) error {
+	return probeBackendWithin(profile, kr, probeTimeout, "a keyring unlock prompt is not a supported serve-startup path")
+}
+
+func probeBackendForLogin(profile string, kr keyring.Keyring) error {
+	return probeBackendWithin(profile, kr, loginProbeTimeout, "the keyring unlock prompt timed out during interactive login")
+}
+
+func probeBackendWithin(profile string, kr keyring.Keyring, timeout time.Duration, timeoutHint string) error {
 	// The probe key is unique per invocation: two Tama Link processes for
 	// the same profile can start concurrently, and a shared probe key lets
 	// one process delete the entry the other is still reading, reporting a
@@ -93,7 +119,7 @@ func probeBackend(profile string, kr keyring.Keyring) error {
 	if err != nil {
 		return err
 	}
-	return sharedRunner().probe(kr, key)
+	return sharedRunner().probe(kr, key, timeout, timeoutHint)
 }
 
 // probeKey returns one unguessable per-invocation probe key inside the

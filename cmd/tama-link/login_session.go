@@ -27,8 +27,8 @@ type loginSession struct {
 	dbPath  string
 }
 
-func openBootstrapSession(ctx context.Context, shell *profile.Profile, configDir string, stdout, stderr io.Writer) (bootstrap.Session, error) {
-	rt, err := openProfileRuntime(ctx, shell, configDir, fixtureHooks())
+func openBootstrapSession(ctx context.Context, shell *profile.Profile, configDir string, interactive bool, stdout, stderr io.Writer) (bootstrap.Session, error) {
+	rt, err := openProfileRuntime(ctx, shell, configDir, fixtureHooks(), loginCredentialOpener(interactive))
 	if err != nil {
 		return nil, err
 	}

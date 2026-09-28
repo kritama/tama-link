@@ -172,8 +172,11 @@ rule, which the authoritative specification now states as "no persistent
 control-surface listener."
 
 The listener port is selected before the authorization URL exists. That exact
-redirect URI is carried in the authorization request, matched against the
-observed callback, and resent verbatim in the token exchange; the
+redirect URI is dynamically registered and persisted with the client record,
+then carried in the authorization request, matched against the observed
+callback, and resent verbatim in the token exchange. Later login attempts bind
+the registered port before reusing that client; an unavailable port fails the
+attempt without replacing usable credentials. The
 authorization-code grant requires the two values to be equal, so any mismatch
 is rejected before a token request is sent.
 
@@ -428,6 +431,13 @@ credential backend is unavailable, `serve` fails with `state_unavailable` and
 `doctor` reports the cause. Tama Link must not generate a replacement, delete
 the database, overwrite unreadable rows, or fall back to plaintext. `logout`
 removes OAuth credentials but never the state-encryption key.
+
+Credential-backend availability retains interaction-specific fixed bounds:
+unattended `serve` startup and non-interactive login perform the fail-fast probe
+within five seconds, while terminal-attached interactive `login` allows two
+minutes for the operating-system keyring unlock prompt. Both paths use the same
+secure backend and disposable set/read/remove probe; login's longer window is
+not inherited by serve or automation.
 
 Version 1 has no automatic key rotation. A future rotation command must retain
 the old key until every encrypted row is transactionally rewritten and the new
