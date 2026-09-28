@@ -23,30 +23,15 @@ func (s *Service) finish(ctx context.Context, req Request, cand candidate, recor
 		return nil, incomplete(err)
 	}
 	shell := shellProfile(cand)
-	session, err := s.opts.OpenSession(ctx, shell)
-	if err != nil {
-		return nil, incomplete(err)
-	}
-	defer func() { _ = session.Close() }()
-
 	owner, err := newOwner()
 	if err != nil {
 		return nil, failErr(err)
 	}
-	claimed, err := session.ClaimLease(ctx, LeaseName, owner, leaseTTL)
+	session, record, generation, err := s.openClaimedSession(ctx, shell, record, owner)
 	if err != nil {
-		return nil, failErr(fmt.Errorf("claim bootstrap lease: %w", err))
+		return nil, err
 	}
-	if !claimed {
-		return nil, failErr(fmt.Errorf("%w: wait for it to finish and retry", ErrBusy))
-	}
-	generation, held, err := session.LeaseGeneration(ctx, LeaseName, owner)
-	if err != nil {
-		return nil, failErr(fmt.Errorf("read bootstrap lease: %w", err))
-	}
-	if !held {
-		return nil, failErr(fmt.Errorf("%w: bootstrap lease was lost", ErrBusy))
-	}
+	defer func() { _ = session.Close() }()
 	defer func() {
 		_ = session.ReleaseLease(context.WithoutCancel(ctx), LeaseName, owner)
 	}()
@@ -115,7 +100,8 @@ func (s *Service) finish(ctx context.Context, req Request, cand candidate, recor
 		beforePublish()
 	}
 	err = withPublicationLock(s.opts.ConfigDir, func() error {
-		if _, err := loadJournal(s.opts.ConfigDir, cand.Name); err != nil {
+		current, err := loadJournal(s.opts.ConfigDir, cand.Name)
+		if err != nil || current.ID != record.ID {
 			return incomplete(fmt.Errorf("%w: bootstrap was discarded before publication", ErrBusy))
 		}
 		heldNow, err := session.CommitLease(work, LeaseName, owner, generation)
@@ -147,29 +133,87 @@ func (s *Service) finish(ctx context.Context, req Request, cand candidate, recor
 // Tests use it to discard the bootstrap in that interval.
 var beforePublish func()
 
-func (s *Service) afterAuthorizeFailure(ctx context.Context, session Session, owner string, name profile.Name, err error) error {
-	ready, readyErr := session.Ready(ctx)
-	if readyErr != nil || ready {
-		return incomplete(err)
+func (s *Service) openClaimedSession(ctx context.Context, shell *profile.Profile, record journal, owner string) (Session, journal, int64, error) {
+	var session Session
+	var current journal
+	var generation int64
+	err := withPublicationLock(s.opts.ConfigDir, func() error {
+		loaded, err := loadJournal(s.opts.ConfigDir, shell.Name)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return failErr(fmt.Errorf("%w: bootstrap journal was removed before lease claim", ErrBusy))
+			}
+			return incomplete(fmt.Errorf("read bootstrap journal before lease claim: %w", err))
+		}
+		if loaded.ID != record.ID || loaded.Name != record.Name {
+			return failErr(fmt.Errorf("%w: bootstrap journal changed before lease claim", ErrBusy))
+		}
+		current = loaded
+		session, err = s.opts.OpenSession(ctx, shell)
+		if err != nil {
+			return incomplete(err)
+		}
+		generation, err = claimBootstrapLease(ctx, session, owner)
+		if err != nil {
+			_ = session.Close()
+			session = nil
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, journal{}, 0, err
 	}
-	if logoutErr := session.Logout(ctx); logoutErr != nil {
-		return incomplete(logoutErr)
+	return session, current, generation, nil
+}
+
+func claimBootstrapLease(ctx context.Context, session Session, owner string) (int64, error) {
+	claimed, err := session.ClaimLease(ctx, LeaseName, owner, leaseTTL)
+	if err != nil {
+		return 0, failErr(fmt.Errorf("claim bootstrap lease: %w", err))
 	}
-	// Windows denies DELETE while SQLite still holds the database. Release
-	// the lease and close the store before removing the file.
-	if relErr := session.ReleaseLease(context.WithoutCancel(ctx), LeaseName, owner); relErr != nil {
-		return incomplete(relErr)
+	if !claimed {
+		return 0, failErr(fmt.Errorf("%w: wait for it to finish and retry", ErrBusy))
 	}
-	if closeErr := session.Close(); closeErr != nil {
-		return incomplete(closeErr)
+	generation, held, err := session.LeaseGeneration(ctx, LeaseName, owner)
+	if err != nil {
+		_ = session.ReleaseLease(context.WithoutCancel(ctx), LeaseName, owner)
+		return 0, failErr(fmt.Errorf("read bootstrap lease: %w", err))
 	}
-	if dbErr := removeDatabasePath(session.DatabasePath()); dbErr != nil {
-		return incomplete(dbErr)
+	if !held {
+		_ = session.ReleaseLease(context.WithoutCancel(ctx), LeaseName, owner)
+		return 0, failErr(fmt.Errorf("%w: bootstrap lease was lost", ErrBusy))
 	}
-	if journalErr := removeJournal(s.opts.ConfigDir, name); journalErr != nil {
-		return incomplete(journalErr)
+	return generation, nil
+}
+
+func (s *Service) afterAuthorizeFailure(ctx context.Context, session Session, owner string, name profile.Name, cause error) error {
+	cleanupErr := withPublicationLock(s.opts.ConfigDir, func() error {
+		ready, readyErr := session.Ready(ctx)
+		if readyErr != nil || ready {
+			return cause
+		}
+		if err := session.Logout(ctx); err != nil {
+			return err
+		}
+		// Windows denies DELETE while SQLite still holds the database. The
+		// publication lock prevents a new session from opening or claiming the
+		// state after this release and before cleanup finishes.
+		if err := session.ReleaseLease(context.WithoutCancel(ctx), LeaseName, owner); err != nil {
+			return err
+		}
+		if err := session.Close(); err != nil {
+			return err
+		}
+		if err := removeDatabasePath(session.DatabasePath()); err != nil {
+			return err
+		}
+		return removeJournal(s.opts.ConfigDir, name)
+	})
+	if cleanupErr != nil {
+		return incomplete(cleanupErr)
 	}
-	return failErr(err)
+	return failErr(cause)
 }
 
 func (s *Service) renew(ctx context.Context, session Session, owner string, lost func()) func() {

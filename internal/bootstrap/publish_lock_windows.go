@@ -10,9 +10,9 @@ import (
 	"golang.org/x/sys/windows"
 )
 
-// withPublicationLock holds the cross-process publication lock across fn.
-// discard and profile publication both take this lock, so one cannot remove
-// the journal or credentials while the other is creating the profile file.
+// withPublicationLock holds the cross-process bootstrap lock across fn.
+// Session opening and lease claim, cleanup, discard, and publication all take
+// this lock so cleanup cannot delete state another process is starting to use.
 func withPublicationLock(configDir string, fn func() error) error {
 	dir, err := prepareStaging(configDir)
 	if err != nil {
