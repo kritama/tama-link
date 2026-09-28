@@ -22,7 +22,9 @@ const (
 	DefaultMaxMetadataBytes = 256 << 10
 
 	// refreshLeaseName is the profile-scoped cross-process refresh lease.
-	refreshLeaseName = "oauth/refresh"
+	// Repair claims the same lease so legacy migration cannot overlap a
+	// refresh, logout, or registration.
+	refreshLeaseName = store.CredentialLeaseName
 
 	// refreshSkew refreshes a little before the recorded expiry so a
 	// request is never issued with an expired token.

@@ -16,6 +16,7 @@ const usage = `Usage:
   tama-link serve --profile <name> [--config-dir <dir>]
   tama-link login [--address <https-origin>] [--type <app|system>] [--profile <name>] [--issuer <https-url>] [--config-dir <dir>] [--no-browser] [--yes]
   tama-link logout --profile <name>
+  tama-link repair --profile <name> [--config-dir <dir>]
   tama-link version [--json]
 
 The serve command starts the Tama Link MCP server over stdin/stdout for the
@@ -26,6 +27,10 @@ terminal, creates a new app or system profile from a reviewed template.
 With --no-browser, or when the browser cannot be opened, it prints the
 authorization URL and waits for the callback; standard output is reserved
 for that URL. A non-interactive new profile requires --address.
+
+The repair command copies credentials stranded in older Linux Secret Service
+collections into the desktop default keyring. It does not delete those
+collections and it is not a serve-startup path.
 `
 
 func main() {
@@ -49,6 +54,8 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		return runLogin(ctx, rest, stdout, stderr)
 	case "logout":
 		return runLogout(rest, stdout, stderr)
+	case "repair":
+		return runRepair(ctx, rest, stdout, stderr)
 	case "version":
 		return runVersion(rest, stdout, stderr)
 	case "help", "-h", "--help":
